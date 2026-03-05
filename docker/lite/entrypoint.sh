@@ -101,8 +101,12 @@ else
     # Parse host:port/dbname
     DB_HOSTPORT="${DB_HOSTPORTDB%%/*}"
     export DB_NAME="${DB_HOSTPORTDB#*/}"
-    export DB_HOST="${DB_HOSTPORT%%:*}"
-    export DB_PORT="${DB_HOSTPORT#*:}"
+    if [[ "$DB_HOSTPORT" == *":"* ]]; then
+        export DB_HOST="${DB_HOSTPORT%%:*}"
+        export DB_PORT="${DB_HOSTPORT#*:}"
+    else
+        export DB_HOST="$DB_HOSTPORT"
+    fi
     
     # Extract sslmode from DATABASE_URL if present
     if [[ "$DATABASE_URL" == *"sslmode="* ]]; then
@@ -128,6 +132,8 @@ echo "  - Database SSL Mode: ${DB_SSL_MODE}"
 echo "  - Whisper Model: ${WHISPER_MODEL_SIZE}"
 echo "  - Device Type: ${DEVICE_TYPE}"
 echo "  - Log Level: ${LOG_LEVEL}"
+echo "  - Storage Backend: ${STORAGE_BACKEND:-local}"
+echo "  - Local Storage Dir: ${LOCAL_STORAGE_DIR:-/var/lib/vexa/recordings}"
 echo ""
 
 # -----------------------------------------------------------------------------
@@ -259,6 +265,9 @@ mkdir -p /var/lib/redis
 mkdir -p /var/run/redis
 chmod 755 /var/lib/redis
 chmod 755 /var/run/redis
+# Recording storage directories
+mkdir -p "${LOCAL_STORAGE_DIR:-/var/lib/vexa/recordings}"
+mkdir -p /var/lib/vexa/recordings/spool
 echo "  Done"
 echo ""
 
@@ -303,12 +312,32 @@ echo ""
 # -----------------------------------------------------------------------------
 
 echo "Verifying transcription service..."
-TRANSCRIBER_URL="${TRANSCRIBER_URL:-${REMOTE_TRANSCRIBER_URL:-}}"
-if [ -z "$TRANSCRIBER_URL" ]; then
-    echo "  ❌ ERROR: TRANSCRIBER_URL (or REMOTE_TRANSCRIBER_URL) is not set"
-    echo "     This is required for transcription functionality"
-    exit 1
-fi
+if [ "${SKIP_TRANSCRIPTION_CHECK:-false}" = "true" ]; then
+    echo "  ⚠️ Skipping transcription service verification (SKIP_TRANSCRIPTION_CHECK=true)"
+    echo "     Ensuring minimal variables are set..."
+    
+    # Still check for URL presence as it's critical, but don't ping it
+    TRANSCRIBER_URL="${TRANSCRIBER_URL:-${REMOTE_TRANSCRIBER_URL:-}}"
+    if [ -z "$TRANSCRIBER_URL" ]; then
+        echo "  ❌ ERROR: TRANSCRIBER_URL (or REMOTE_TRANSCRIBER_URL) is not set"
+        exit 1
+    fi
+    
+    TRANSCRIBER_API_KEY="${TRANSCRIBER_API_KEY:-${REMOTE_TRANSCRIBER_API_KEY:-}}"
+    if [ -z "$TRANSCRIBER_API_KEY" ]; then
+         echo "  ❌ ERROR: TRANSCRIBER_API_KEY (or REMOTE_TRANSCRIBER_API_KEY) is not set"
+         exit 1
+    fi
+    
+    echo "  ✅ Transcription configuration presence verified (connectivity check skipped)"
+else
+    # Standard verification logic
+    TRANSCRIBER_URL="${TRANSCRIBER_URL:-${REMOTE_TRANSCRIBER_URL:-}}"
+    if [ -z "$TRANSCRIBER_URL" ]; then
+        echo "  ❌ ERROR: TRANSCRIBER_URL (or REMOTE_TRANSCRIBER_URL) is not set"
+        echo "     This is required for transcription functionality"
+        exit 1
+    fi
 
 TRANSCRIBER_API_KEY="${TRANSCRIBER_API_KEY:-${REMOTE_TRANSCRIBER_API_KEY:-}}"
 if [ -z "$TRANSCRIBER_API_KEY" ]; then
@@ -417,6 +446,57 @@ else
     echo "     Service is reachable but authentication verification failed"
     exit 1
 fi
+fi
+echo ""
+
+# -----------------------------------------------------------------------------
+# PulseAudio & ALSA Configuration
+# -----------------------------------------------------------------------------
+
+echo "Configuring PulseAudio and ALSA..."
+
+# Configure ALSA to route through PulseAudio (needed before PA starts)
+cat > /root/.asoundrc <<'ALSA_EOF'
+pcm.!default {
+    type pulse
+}
+ctl.!default {
+    type pulse
+}
+ALSA_EOF
+echo "  ALSA configured to use PulseAudio"
+
+# Create a post-start script for PulseAudio sink setup
+# This runs after supervisord starts PulseAudio
+cat > /usr/local/bin/setup-pulseaudio-sinks.sh <<'PA_EOF'
+#!/bin/bash
+# Wait for PulseAudio to be ready
+for i in $(seq 1 15); do
+    if pactl info >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+if ! pactl info >/dev/null 2>&1; then
+    echo "[PulseAudio Setup] ERROR: PulseAudio not available after 15s"
+    exit 1
+fi
+
+echo "[PulseAudio Setup] Creating null sink for audio capture..."
+pactl load-module module-null-sink sink_name=zoom_sink sink_properties=device.description="ZoomAudioSink" 2>/dev/null || true
+
+echo "[PulseAudio Setup] Creating TTS sink for voice agent..."
+pactl load-module module-null-sink sink_name=tts_sink sink_properties=device.description="TTSAudioSink" 2>/dev/null || true
+
+echo "[PulseAudio Setup] Creating virtual microphone from TTS sink monitor..."
+pactl load-module module-remap-source master=tts_sink.monitor source_name=virtual_mic source_properties=device.description="VirtualMicrophone" 2>/dev/null || true
+pactl set-default-source virtual_mic 2>/dev/null || true
+
+echo "[PulseAudio Setup] Done - sinks configured"
+PA_EOF
+chmod +x /usr/local/bin/setup-pulseaudio-sinks.sh
+echo "  PulseAudio sink setup script created"
 echo ""
 
 # -----------------------------------------------------------------------------

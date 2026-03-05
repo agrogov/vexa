@@ -12,6 +12,8 @@ export const BotConfigSchema = z.object({
   nativeMeetingId: z.string(), // *** ADDED schema field ***
   language: z.string().nullish(), // Optional language
   task: z.string().nullish(),     // Optional task
+  transcribeEnabled: z.boolean().optional(),
+  transcriptionTier: z.enum(["realtime", "deferred"]).optional(),
   redisUrl: z.string(),         // Required Redis URL
   container_name: z.string().optional(), // ADDED: Optional container name
   automaticLeave: z.object({
@@ -22,6 +24,12 @@ export const BotConfigSchema = z.object({
   reconnectionIntervalMs: z.number().int().optional(), // ADDED: Optional reconnection interval
   meeting_id: z.number().int().optional(), // Allow optional internal ID
   botManagerCallbackUrl: z.string().url().optional(), // ADDED: Optional callback URL
+  recordingEnabled: z.boolean().optional(),
+  captureModes: z.array(z.string()).optional(),
+  recordingUploadUrl: z.string().url().optional(),
+  // Voice agent / meeting interaction interface
+  voiceAgentEnabled: z.boolean().optional(),
+  defaultAvatarUrl: z.string().url().optional(),
   teamsSpeaker: z.object({
     signalLossGraceMs: z.number().int().positive().optional(),
     speakingKeepaliveMs: z.number().int().positive().optional(),

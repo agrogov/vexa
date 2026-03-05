@@ -105,7 +105,34 @@ docker run -d \
 | `REMOTE_TRANSCRIBER_URL` | (required) | Remote transcription API URL |
 | `REMOTE_TRANSCRIBER_API_KEY` | (required) | API key for remote transcription service |
 | `REMOTE_TRANSCRIBER_TEMPERATURE` | `0` | Temperature parameter for remote transcription |
+| `SKIP_TRANSCRIPTION_CHECK` | `false` | If `true`, skips the startup connectivity check to the transcription service. **Only relevant when using an external (non‑Vexa) Whisper‑compatible transcription service** that does not expose a `/health` or root URL returning 2xx (e.g. some third‑party/OVH gateways). The Vexa transcription service (developed in this stack) exposes `/health` and does not need this. The container still requires `REMOTE_TRANSCRIBER_URL` and `REMOTE_TRANSCRIBER_API_KEY` to be set. |
 | `API_GATEWAY_URL` | `http://localhost:8056` | API Gateway URL (used by MCP service) |
+| `STORAGE_BACKEND` | `local` | Recording storage backend: `local`, `minio`, or `s3` |
+| `LOCAL_STORAGE_DIR` | `/var/lib/vexa/recordings` | Local recording directory when `STORAGE_BACKEND=local` |
+| `LOCAL_STORAGE_FSYNC` | `true` | If `true`, fsync recording writes for durability |
+| `MINIO_ENDPOINT` | (empty) | MinIO/S3-compatible endpoint when `STORAGE_BACKEND=minio` |
+| `MINIO_ACCESS_KEY` | (empty) | Access key for MinIO backend |
+| `MINIO_SECRET_KEY` | (empty) | Secret key for MinIO backend |
+| `MINIO_BUCKET` | `vexa-recordings` | Bucket for MinIO backend |
+| `MINIO_SECURE` | `false` | Use TLS for MinIO endpoint |
+| `AWS_REGION` | `us-east-1` | Region for `s3` backend |
+| `AWS_ACCESS_KEY_ID` | (empty) | AWS access key for `s3` backend |
+| `AWS_SECRET_ACCESS_KEY` | (empty) | AWS secret key for `s3` backend |
+| `S3_BUCKET` | (empty) | Bucket for `s3` backend |
+| `S3_ENDPOINT` | (empty) | Optional custom endpoint for S3-compatible providers |
+| `S3_SECURE` | `true` | Use TLS for `S3_ENDPOINT` |
+
+### External transcription services without health endpoint
+
+At startup, the Lite entrypoint verifies that the transcription service is reachable by requesting `BASE_URL/health` (or the root URL if that fails). It uses `curl -f`, so any HTTP 4xx or 5xx (e.g. **404**) causes the check to fail and the container to exit with "Cannot reach transcription service".
+
+This applies **only when you use an external (outside) Whisper‑compatible transcription service**—not the Vexa transcription service developed in this stack, which exposes `/health` and works with the default check. If your **external** service does not expose a `/health` or root endpoint that returns 2xx (e.g. some third‑party or proxy gateways that only serve the transcription path), set:
+
+```bash
+-e SKIP_TRANSCRIPTION_CHECK=true
+```
+
+With this set, the entrypoint only checks that `REMOTE_TRANSCRIBER_URL` (or `TRANSCRIBER_URL`) and `REMOTE_TRANSCRIBER_API_KEY` (or `TRANSCRIBER_API_KEY`) are non-empty; it does not perform the connectivity or API-key request.
 
 ### Redis Configuration
 
@@ -177,6 +204,7 @@ docker run -d \
   --name vexa \
   -p 8056:8056 \
   -v vexa-logs:/var/log/vexa-bots \
+  -v vexa-recordings:/var/lib/vexa/recordings \
   -e DATABASE_URL="..." \
   -e ADMIN_API_TOKEN="..." \
   -e REMOTE_TRANSCRIBER_URL="http://localhost:8083/v1/audio/transcriptions" \
@@ -187,8 +215,36 @@ docker run -d \
 | Volume | Path | Description |
 |--------|------|-------------|
 | `vexa-logs` | `/var/log/vexa-bots` | Bot process logs |
+| `vexa-recordings` | `/var/lib/vexa/recordings` | Persisted recording files for `STORAGE_BACKEND=local` |
 
 **Note:** Model volumes are only needed for local CPU mode (`WHISPER_BACKEND=faster_whisper`). Remote transcription mode doesn't require model storage.
+
+### Recording backend quick switch
+
+Local filesystem (default in Lite):
+
+```bash
+-e STORAGE_BACKEND=local \
+-e LOCAL_STORAGE_DIR=/var/lib/vexa/recordings \
+-e LOCAL_STORAGE_FSYNC=true
+```
+
+Cloud object storage (AWS S3):
+
+```bash
+-e STORAGE_BACKEND=s3 \
+-e AWS_REGION=us-east-1 \
+-e AWS_ACCESS_KEY_ID=... \
+-e AWS_SECRET_ACCESS_KEY=... \
+-e S3_BUCKET=vexa-recordings
+```
+
+S3-compatible providers can also set:
+
+```bash
+-e S3_ENDPOINT=https://<provider-endpoint> \
+-e S3_SECURE=true
+```
 
 ## Platform-Specific Deployment
 
@@ -377,6 +433,10 @@ See `services/mcp/README.md` for detailed MCP setup instructions.
 - **Redis Persistence:** Internal Redis data is ephemeral unless volumes are mounted
 
 ## Troubleshooting
+
+### "Cannot reach transcription service" at startup
+
+The entrypoint checks reachability by requesting the transcription service's `/health` (or root) URL. If that returns 404 or another non-2xx, the container exits with this error. This only affects **external** Whisper-compatible services that don't expose such an endpoint; the Vexa transcription service in this stack has `/health` and does not need a workaround. **Fix for external services:** set `SKIP_TRANSCRIPTION_CHECK=true`. See [External transcription services without health endpoint](#external-transcription-services-without-health-endpoint) above.
 
 ### Bot Fails to Start
 
