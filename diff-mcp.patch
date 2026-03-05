@@ -1,0 +1,10 @@
+diff --git a/services/mcp/Dockerfile b/services/mcp/Dockerfile
+index 5167441..dc40aa3 100644
+--- a/services/mcp/Dockerfile
++++ b/services/mcp/Dockerfile
+@@ -1,4 +1,4 @@
+-FROM python:3.11-slim
++FROM docker.ib-ci.com/python:3.11-slim
+ 
+ WORKDIR /app
+ 

@@ -1,0 +1,694 @@
+diff --git a/services/transcription-collector/Dockerfile b/services/transcription-collector/Dockerfile
+index c3e1540..e897ee4 100644
+--- a/services/transcription-collector/Dockerfile
++++ b/services/transcription-collector/Dockerfile
+@@ -1,5 +1,5 @@
+ # Base Python image
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set working directory
+ WORKDIR /app
+diff --git a/services/transcription-collector/mapping/speaker_mapper.py b/services/transcription-collector/mapping/speaker_mapper.py
+index e0f396a..148f56b 100644
+--- a/services/transcription-collector/mapping/speaker_mapper.py
++++ b/services/transcription-collector/mapping/speaker_mapper.py
+@@ -1,8 +1,18 @@
+ import logging
+ from typing import List, Dict, Any, Optional, Tuple
+ import json
+-import redis.asyncio as aioredis
+-import redis
++try:
++    import redis.asyncio as aioredis
++    import redis
++except ModuleNotFoundError:  # pragma: no cover - enables lightweight local unit checks without redis package
++    aioredis = Any  # type: ignore[assignment]
++
++    class _RedisStub:
++        class exceptions:
++            class RedisError(Exception):
++                pass
++
++    redis = _RedisStub()  # type: ignore[assignment]
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -13,232 +23,301 @@ STATUS_MULTIPLE = "MULTIPLE_CONCURRENT_SPEAKERS"
+ STATUS_NO_SPEAKER_EVENTS = "NO_SPEAKER_EVENTS"
+ STATUS_ERROR = "ERROR_IN_MAPPING"
+ 
+-# NEW: Define buffer constants for fetching speaker events
+-# CRITICAL: We need to fetch events from session start (0) to catch all active speakers,
+-# not just a small buffer, because a speaker who started earlier might still be active
+-PRE_SEGMENT_SPEAKER_EVENT_FETCH_MS = 0  # Fetch from session start (0ms) to catch all active speakers
+-POST_SEGMENT_SPEAKER_EVENT_FETCH_MS = 500 # Small buffer after segment end for late-arriving END events
+-
+-def _get_participant_identifier(event: Dict[str, Any]) -> Optional[str]:
+-    """Extract a consistent participant identifier from an event.
+-    Returns participant_id_meet if available, otherwise participant_name.
+-    This ensures consistent matching between START and END events.
+-    """
+-    return event.get("participant_id_meet") or event.get("participant_name")
+-
+-def _events_match_participant(event1: Dict[str, Any], event2: Dict[str, Any]) -> bool:
+-    """Check if two events belong to the same participant.
+-    Matches on either participant_id_meet or participant_name.
+-    """
+-    id1 = _get_participant_identifier(event1)
+-    id2 = _get_participant_identifier(event2)
+-    if not id1 or not id2:
+-        return False
+-    
+-    # Direct match
+-    if id1 == id2:
+-        return True
+-    
+-    # Cross-match: check if id1 matches id2's other field
+-    if event1.get("participant_id_meet") == event2.get("participant_id_meet") and event1.get("participant_id_meet"):
+-        return True
+-    if event1.get("participant_name") == event2.get("participant_name") and event1.get("participant_name"):
+-        return True
+-    
+-    return False
++# Event fetch window constants
++PRE_SEGMENT_SPEAKER_EVENT_FETCH_MS = 0
++POST_SEGMENT_SPEAKER_EVENT_FETCH_MS = 500
++
++# Mapping stability constants
++MIN_SPEECH_BURST_MS = 350
++SHORT_SILENCE_GAP_MS = 700
++MIN_MEANINGFUL_OVERLAP_MS = 50
++MULTIPLE_AMBIGUITY_RATIO = 1.2
++FALLBACK_CONTEXT_WINDOW_MS = 15000
++FALLBACK_DOMINANCE_RATIO = 2.0
++
++
++def _normalize_name(name: Optional[str]) -> Optional[str]:
++    if not name:
++        return None
++    normalized = " ".join(str(name).strip().split()).lower()
++    return normalized or None
++
++
++def _participant_key(event: Dict[str, Any], id_to_key: Dict[str, str]) -> Optional[str]:
++    participant_id = event.get("participant_id_meet")
++    normalized_name = _normalize_name(event.get("participant_name"))
++
++    # Prefer name to survive ephemeral platform IDs.
++    if normalized_name:
++        key = f"name:{normalized_name}"
++        if participant_id:
++            id_to_key[participant_id] = key
++        return key
++
++    if participant_id:
++        return id_to_key.get(participant_id) or f"id:{participant_id}"
++
++    return None
++
++
++def _choose_display_name(raw_name: Optional[str], normalized_name: str) -> str:
++    if raw_name and str(raw_name).strip():
++        return str(raw_name).strip()
++    if normalized_name.startswith("name:"):
++        return normalized_name[5:]
++    return "unknown"
++
++
++def _normalize_display_name(name: Optional[str]) -> Optional[str]:
++    if not name:
++        return None
++    normalized = (
++        str(name)
++        .strip()
++        .lower()
++        .replace("\u00a0", " ")
++    )
++    normalized = " ".join(normalized.split())
++    return normalized or None
++
++
++def _build_speaker_intervals(
++    parsed_events: List[Dict[str, Any]],
++    interval_end_ms: float,
++) -> Tuple[Dict[str, List[Tuple[float, float]]], Dict[str, Dict[str, Optional[str]]]]:
++    intervals: Dict[str, List[Tuple[float, float]]] = {}
++    states: Dict[str, Dict[str, Optional[float]]] = {}
++    identity_meta: Dict[str, Dict[str, Optional[str]]] = {}
++    id_to_key: Dict[str, str] = {}
++
++    # Sort for deterministic state reconstruction.
++    ordered_events = sorted(parsed_events, key=lambda ev: float(ev["relative_client_timestamp_ms"]))
++
++    for event in ordered_events:
++        event_type = event.get("event_type")
++        if event_type not in {"SPEAKER_START", "SPEAKER_END"}:
++            continue
++
++        ts = float(event["relative_client_timestamp_ms"])
++        key = _participant_key(event, id_to_key)
++        if not key:
++            logger.warning(f"[MapSpeaker] Event at {ts:.0f}ms missing both participant_id_meet and participant_name: {event}")
++            continue
++
++        meta = identity_meta.setdefault(key, {"name": None, "id": None})
++        if event.get("participant_name"):
++            meta["name"] = str(event.get("participant_name")).strip()
++        if event.get("participant_id_meet"):
++            # Keep most recent seen platform id for diagnostics/output.
++            meta["id"] = str(event.get("participant_id_meet"))
++
++        state = states.setdefault(key, {"active": False, "start": None})
++
++        if event_type == "SPEAKER_START":
++            # Duplicate START while already speaking -> noise.
++            if state["active"]:
++                continue
++            state["active"] = True
++            state["start"] = ts
++            continue
++
++        # SPEAKER_END
++        if not state["active"]:
++            # Stray END with no open START -> noise.
++            continue
++
++        start_ts = float(state["start"] or ts)
++        end_ts = max(ts, start_ts)
++        intervals.setdefault(key, []).append((start_ts, end_ts))
++        state["active"] = False
++        state["start"] = None
++
++    for key, state in states.items():
++        if state["active"] and state["start"] is not None:
++            start_ts = float(state["start"])
++            end_ts = max(interval_end_ms, start_ts)
++            intervals.setdefault(key, []).append((start_ts, end_ts))
++
++    # Debounce/hysteresis cleanup per participant.
++    cleaned: Dict[str, List[Tuple[float, float]]] = {}
++    for key, spans in intervals.items():
++        if not spans:
++            continue
++        spans = sorted(spans, key=lambda span: span[0])
++
++        # Remove tiny bursts (flapping START/END).
++        filtered = [span for span in spans if (span[1] - span[0]) >= MIN_SPEECH_BURST_MS]
++        if not filtered:
++            continue
++
++        merged: List[Tuple[float, float]] = [filtered[0]]
++        for start_ts, end_ts in filtered[1:]:
++            prev_start, prev_end = merged[-1]
++            if start_ts - prev_end <= SHORT_SILENCE_GAP_MS:
++                merged[-1] = (prev_start, max(prev_end, end_ts))
++            else:
++                merged.append((start_ts, end_ts))
++
++        cleaned[key] = merged
++
++    return cleaned, identity_meta
++
+ 
+ def map_speaker_to_segment(
+     segment_start_ms: float,
+     segment_end_ms: float,
+-    speaker_events_for_session: List[Tuple[str, float]], # List of (event_json_str, timestamp_ms)
+-    session_end_time_ms: Optional[float] = None
++    speaker_events_for_session: List[Tuple[str, float]],
++    session_end_time_ms: Optional[float] = None,
+ ) -> Dict[str, Any]:
+-    """Maps a speaker to a transcription segment based on speaker events.
+-
+-    Args:
+-        segment_start_ms: Start time of the transcription segment in milliseconds.
+-        segment_end_ms: End time of the transcription segment in milliseconds.
+-        speaker_events_for_session: Chronologically sorted list of speaker event (JSON string, timestamp_ms) tuples.
+-        session_end_time_ms: The official end time of the session in milliseconds, if available.
+-                           Used for handling open SPEAKER_START events at the end of a session.
+-
+-    Returns:
+-        A dictionary containing:
+-            'speaker_name': Name of the identified speaker, or None.
+-            'participant_id_meet': Google Meet participant ID, or None.
+-            'status': Mapping status (e.g., MAPPED, UNKNOWN, MULTIPLE).
+-    """
++    """Map a speaker to a segment using stabilized participant identity and flap-resistant intervals."""
+     active_speaker_name: Optional[str] = None
+     active_participant_id: Optional[str] = None
+     mapping_status = STATUS_UNKNOWN
+ 
+     if not speaker_events_for_session:
+         return {
+-            "speaker_name": None, 
+-            "participant_id_meet": None, 
+-            "status": STATUS_NO_SPEAKER_EVENTS
++            "speaker_name": None,
++            "participant_id_meet": None,
++            "status": STATUS_NO_SPEAKER_EVENTS,
+         }
+ 
+-    # Parse speaker events from JSON string to dict
+     parsed_events: List[Dict[str, Any]] = []
+     for event_json, timestamp in speaker_events_for_session:
+         try:
+             event = json.loads(event_json)
+-            event['relative_client_timestamp_ms'] = timestamp # Ensure timestamp is part of the event dict
++            event["relative_client_timestamp_ms"] = float(timestamp)
+             parsed_events.append(event)
+         except json.JSONDecodeError:
+             logger.warning(f"Failed to parse speaker event JSON: {event_json}")
+             continue
+-    
+-    if not parsed_events:
+-        return {"speaker_name": None, "participant_id_meet": None, "status": STATUS_ERROR} # Error parsing all events
+ 
+-    # Find speaker(s) active during the segment interval
+-    # This is a simplified approach: considers the speaker whose START event is closest before or at segment_start_ms
+-    # and whose corresponding END event is after segment_start_ms or not present before segment_end_ms.
++    if not parsed_events:
++        return {"speaker_name": None, "participant_id_meet": None, "status": STATUS_ERROR}
+ 
+-    # Relevant events are those whose activity period could overlap with the segment
+-    # A speaker is active in segment [S_start, S_end] if:
+-    #   - They have a START event at T_start <= S_end
+-    #   - And no corresponding END event T_end such that T_start <= T_end < S_start
+-    
+-    # Use a list to store candidates with their events, since we need to match by both ID and name
+-    candidate_speakers: List[Dict[str, Any]] = []  # List of {event, identifier}
++    interval_end_ms = session_end_time_ms or segment_end_ms
++    intervals_by_participant, identity_meta = _build_speaker_intervals(parsed_events, interval_end_ms)
+ 
+-    logger.debug(f"[MapSpeaker] Segment: [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms], Processing {len(parsed_events)} events")
++    logger.debug(
++        f"[MapSpeaker] Segment: [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms], "
++        f"participants with cleaned intervals: {len(intervals_by_participant)}"
++    )
+ 
+-    for event in parsed_events:
+-        event_ts = event['relative_client_timestamp_ms']
+-        participant_id = _get_participant_identifier(event)
+-        participant_name = event.get("participant_name", "unknown")
++    active_speakers_in_segment: List[Dict[str, Any]] = []
++    for participant_key, intervals in intervals_by_participant.items():
++        overlap_duration = 0.0
++        for start_ts, end_ts in intervals:
++            overlap_start = max(start_ts, segment_start_ms)
++            overlap_end = min(end_ts, segment_end_ms)
++            if overlap_start < overlap_end:
++                overlap_duration += overlap_end - overlap_start
+ 
+-        if not participant_id:
+-            logger.warning(f"[MapSpeaker] Event at {event_ts:.0f}ms missing both participant_id_meet and participant_name: {event}")
+-            continue
++        if overlap_duration >= MIN_MEANINGFUL_OVERLAP_MS:
++            meta = identity_meta.get(participant_key, {})
++            display_name = _choose_display_name(meta.get("name"), participant_key)
++            active_speakers_in_segment.append(
++                {
++                    "name": display_name,
++                    "id": meta.get("id"),
++                    "overlap_duration": overlap_duration,
++                    "participant_key": participant_key,
++                }
++            )
+ 
+-        if event["event_type"] == "SPEAKER_START":
+-            # If this start is before the segment ends, it *could* be the speaker
+-            if event_ts <= segment_end_ms:
+-                # Check if we already have a START for this participant (replace if newer)
+-                existing_idx = None
+-                for idx, candidate in enumerate(candidate_speakers):
+-                    if _events_match_participant(candidate["event"], event):
+-                        existing_idx = idx
+-                        break
+-                
+-                if existing_idx is not None:
+-                    # Replace with newer START event
+-                    candidate_speakers[existing_idx] = {"event": event, "identifier": participant_id}
+-                    logger.debug(f"[MapSpeaker] Updated candidate: {participant_name} (ID: {participant_id}) at {event_ts:.0f}ms")
+-                else:
+-                    candidate_speakers.append({"event": event, "identifier": participant_id})
+-                    logger.debug(f"[MapSpeaker] Added candidate: {participant_name} (ID: {participant_id}) at {event_ts:.0f}ms")
+-            else:
+-                logger.debug(f"[MapSpeaker] Skipping SPEAKER_START for {participant_name} at {event_ts:.0f}ms (after segment end {segment_end_ms:.0f}ms)")
+-
+-        elif event["event_type"] == "SPEAKER_END":
+-            # Find matching candidate and remove if END occurs before segment starts
+-            matching_idx = None
+-            for idx, candidate in enumerate(candidate_speakers):
+-                if _events_match_participant(candidate["event"], event):
+-                    matching_idx = idx
+-                    break
+-            
+-            if matching_idx is not None:
+-                if event_ts < segment_start_ms:
+-                    removed_name = candidate_speakers[matching_idx]["event"].get("participant_name", "unknown")
+-                    logger.debug(f"[MapSpeaker] Removing candidate {removed_name} (ID: {participant_id}) - END at {event_ts:.0f}ms before segment start {segment_start_ms:.0f}ms")
+-                    candidate_speakers.pop(matching_idx)
+-                else:
+-                    logger.debug(f"[MapSpeaker] Keeping candidate {participant_name} (ID: {participant_id}) - END at {event_ts:.0f}ms during/after segment")
++    # Merge speakers that normalize to the same name to reduce false MULTIPLE cases from minor name churn.
++    if active_speakers_in_segment:
++        merged: Dict[str, Dict[str, Any]] = {}
++        for speaker in active_speakers_in_segment:
++            norm_name = _normalize_display_name(speaker["name"]) or speaker["name"]
++            entry = merged.get(norm_name)
++            if not entry:
++                merged[norm_name] = dict(speaker)
+             else:
+-                logger.debug(f"[MapSpeaker] SPEAKER_END for {participant_name} (ID: {participant_id}) at {event_ts:.0f}ms - not in candidates")
+-    
+-    logger.debug(f"[MapSpeaker] After filtering: {len(candidate_speakers)} candidate(s): {[c['event'].get('participant_name') for c in candidate_speakers]}")
+-    
+-    # From the remaining candidates, determine who was speaking during the segment
+-    # This logic can be complex for overlaps. Simplified: take the one whose START was latest but before/at segment start.
+-    # More robust: find speaker whose active interval [speaker_start, speaker_end_or_session_end] maximally overlaps segment.
+-
+-    active_speakers_in_segment = []
+-
+-    for candidate in candidate_speakers:
+-        start_event = candidate["event"]
+-        start_ts = start_event['relative_client_timestamp_ms']
+-        participant_name = start_event.get("participant_name", "unknown")
+-        participant_id = _get_participant_identifier(start_event)
+-        
+-        # Find corresponding END event for this participant that is after start_ts
+-        end_ts = session_end_time_ms or segment_end_ms # Default to session_end or segment_end if no specific end event
+-        found_end_event = False
+-        # look for an explicit end event
+-        for end_search_event in parsed_events: # Search all parsed events again for the corresponding end
+-            if _events_match_participant(start_event, end_search_event) and \
+-               end_search_event["event_type"] == "SPEAKER_END" and \
+-               end_search_event['relative_client_timestamp_ms'] >= start_ts:
+-                end_ts = end_search_event['relative_client_timestamp_ms']
+-                found_end_event = True
+-                logger.debug(f"[MapSpeaker] Found END event for {participant_name} (ID: {participant_id}) at {end_ts:.0f}ms")
+-                break # Found the earliest relevant END event
+-        
+-        if not found_end_event:
+-            logger.debug(f"[MapSpeaker] No END event found for {participant_name} (ID: {participant_id}), using default end_ts={end_ts:.0f}ms")
+-        
+-        # Speaker is active during the segment if: [start_ts, end_ts] overlaps with [segment_start_ms, segment_end_ms]
+-        # Overlap condition: max(start1, start2) < min(end1, end2)
+-        overlap_start = max(start_ts, segment_start_ms)
+-        overlap_end = min(end_ts, segment_end_ms)
+-
+-        logger.debug(f"[MapSpeaker] {participant_name}: active [{start_ts:.0f}ms, {end_ts:.0f}ms], segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms], overlap [{overlap_start:.0f}ms, {overlap_end:.0f}ms]")
+-
+-        if overlap_start < overlap_end: # If there is an overlap
+-            overlap_duration = overlap_end - overlap_start
+-            logger.debug(f"[MapSpeaker] {participant_name} overlaps with segment: {overlap_duration:.0f}ms")
+-            active_speakers_in_segment.append({
+-                "name": start_event["participant_name"],
+-                "id": start_event.get("participant_id_meet"),
+-                "overlap_duration": overlap_duration,
+-                "start_event_ts": start_ts
+-            })
+-        else:
+-            logger.debug(f"[MapSpeaker] {participant_name} does NOT overlap with segment (overlap_start >= overlap_end)")
++                entry["overlap_duration"] += speaker["overlap_duration"]
++                # Prefer existing id; keep first.
++        active_speakers_in_segment = list(merged.values())
+ 
+     if not active_speakers_in_segment:
+-        logger.warning(f"[MapSpeaker] No active speakers found for segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms] - returning UNKNOWN")
+-        mapping_status = STATUS_UNKNOWN
+-    elif len(active_speakers_in_segment) == 1:
+-        active_speaker_name = active_speakers_in_segment[0]["name"]
+-        active_participant_id = active_speakers_in_segment[0]["id"]
+-        mapping_status = STATUS_MAPPED
+-        logger.info(f"[MapSpeaker] MAPPED segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms] to {active_speaker_name} (ID: {active_participant_id})")
++        # Fallback: if a segment falls into a temporary signal gap, choose a dominant nearby speaker.
++        context_start = max(0.0, segment_start_ms - FALLBACK_CONTEXT_WINDOW_MS)
++        context_end = segment_end_ms + FALLBACK_CONTEXT_WINDOW_MS
++        context_candidates: List[Dict[str, Any]] = []
++        for participant_key, intervals in intervals_by_participant.items():
++            context_overlap = 0.0
++            for start_ts, end_ts in intervals:
++                overlap_start = max(start_ts, context_start)
++                overlap_end = min(end_ts, context_end)
++                if overlap_start < overlap_end:
++                    context_overlap += overlap_end - overlap_start
++            if context_overlap >= MIN_SPEECH_BURST_MS:
++                meta = identity_meta.get(participant_key, {})
++                display_name = _choose_display_name(meta.get("name"), participant_key)
++                context_candidates.append(
++                    {
++                        "name": display_name,
++                        "id": meta.get("id"),
++                        "context_overlap": context_overlap,
++                    }
++                )
++
++        if context_candidates:
++            context_candidates.sort(key=lambda x: x["context_overlap"], reverse=True)
++            winner = context_candidates[0]
++            if len(context_candidates) == 1:
++                active_speaker_name = winner["name"]
++                active_participant_id = winner["id"]
++                mapping_status = STATUS_MAPPED
++            else:
++                second = context_candidates[1]
++                ratio = winner["context_overlap"] / max(second["context_overlap"], 1.0)
++                if ratio >= FALLBACK_DOMINANCE_RATIO:
++                    active_speaker_name = winner["name"]
++                    active_participant_id = winner["id"]
++                    mapping_status = STATUS_MAPPED
++
++            if mapping_status == STATUS_MAPPED:
++                logger.info(
++                    f"[MapSpeaker] Fallback MAPPED segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms] "
++                    f"to {active_speaker_name} (ID: {active_participant_id}, context={winner['context_overlap']:.0f}ms)"
++                )
++        if mapping_status != STATUS_MAPPED:
++            logger.warning(
++                f"[MapSpeaker] No active speakers found for segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms]"
++            )
++            mapping_status = STATUS_UNKNOWN
+     else:
+-        # Multiple speakers overlap. Prioritize by longest overlap.
+-        # If overlaps are equal, could use other heuristics (e.g. latest start). For now, longest.
+         active_speakers_in_segment.sort(key=lambda x: x["overlap_duration"], reverse=True)
+-        active_speaker_name = active_speakers_in_segment[0]["name"]
+-        active_participant_id = active_speakers_in_segment[0]["id"]
+-        mapping_status = STATUS_MULTIPLE
+-        logger.info(f"[MapSpeaker] MULTIPLE speakers for segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms]. Selected {active_speaker_name} (overlap: {active_speakers_in_segment[0]['overlap_duration']:.0f}ms) over {len(active_speakers_in_segment)-1} other(s)")
++        winner = active_speakers_in_segment[0]
++        active_speaker_name = winner["name"]
++        active_participant_id = winner["id"]
++
++        if len(active_speakers_in_segment) == 1:
++            mapping_status = STATUS_MAPPED
++        else:
++            second = active_speakers_in_segment[1]
++            ratio = winner["overlap_duration"] / max(second["overlap_duration"], 1.0)
++            mapping_status = STATUS_MAPPED if ratio >= MULTIPLE_AMBIGUITY_RATIO else STATUS_MULTIPLE
++
++        logger.info(
++            f"[MapSpeaker] {mapping_status} segment [{segment_start_ms:.0f}ms, {segment_end_ms:.0f}ms] "
++            f"to {active_speaker_name} (ID: {active_participant_id}, overlap={winner['overlap_duration']:.0f}ms)"
++        )
+ 
+     return {
+         "speaker_name": active_speaker_name,
+         "participant_id_meet": active_participant_id,
+-        "status": mapping_status
+-    } 
++        "status": mapping_status,
++    }
++
+ 
+-# NEW Utility function to centralize fetching and mapping logic
+ async def get_speaker_mapping_for_segment(
+-    redis_c: 'aioredis.Redis', # Forward reference for type hint
++    redis_c: 'aioredis.Redis',
+     session_uid: str,
+     segment_start_ms: float,
+     segment_end_ms: float,
+-    config_speaker_event_key_prefix: str, # Pass REDIS_SPEAKER_EVENT_KEY_PREFIX
+-    context_log_msg: str = "" # For more specific logging, e.g., "[LiveMap]" or "[FinalMap]"
++    config_speaker_event_key_prefix: str,
++    context_log_msg: str = "",
+ ) -> Dict[str, Any]:
+-    """
+-    Fetches speaker events from Redis for a given segment and session, 
+-    then maps them to determine the speaker.
+-    """
++    """Fetch speaker events for a session from Redis and map a segment to a speaker."""
+     if not session_uid:
+         logger.warning(f"{context_log_msg} No session_uid provided. Cannot map speakers.")
+         return {"speaker_name": None, "participant_id_meet": None, "status": STATUS_UNKNOWN}
+@@ -249,47 +328,38 @@ async def get_speaker_mapping_for_segment(
+ 
+     try:
+         speaker_event_key = f"{config_speaker_event_key_prefix}:{session_uid}"
+-        
+-        # CRITICAL FIX: Fetch ALL events from session start (0) to segment_end + buffer
+-        # This ensures we catch speakers who started speaking earlier and are still active
+-        # Previous bug: Only fetched events in small 500ms window, missing earlier START events
+-        fetch_start_ms = 0  # Always fetch from session start to catch all active speakers
++
++        fetch_start_ms = PRE_SEGMENT_SPEAKER_EVENT_FETCH_MS
+         fetch_end_ms = segment_end_ms + POST_SEGMENT_SPEAKER_EVENT_FETCH_MS
+-        
++
+         logger.debug(f"{context_log_msg} Fetching speaker events from Redis: [{fetch_start_ms:.0f}ms, {fetch_end_ms:.0f}ms]")
+-        
+-        # Fetch speaker events from Redis
++
+         speaker_events_raw = await redis_c.zrangebyscore(
+-            speaker_event_key, 
++            speaker_event_key,
+             min=fetch_start_ms,
+             max=fetch_end_ms,
+-            withscores=True
++            withscores=True,
+         )
+ 
+-        # --- Debug-mode instrumentation (docker logs; no PII) ---
+-        # #region agent log
+         try:
+-            # Check if there are late speaker events beyond our buffer window.
+-            # This helps validate whether POST_SEGMENT_SPEAKER_EVENT_FETCH_MS is too small.
+             late_min = fetch_end_ms
+-            late_max = segment_end_ms + 3000  # 3s after segment end
++            late_max = segment_end_ms + 3000
+             if late_max > late_min:
+                 late_events_raw = await redis_c.zrangebyscore(
+                     speaker_event_key,
+                     min=late_min,
+                     max=late_max,
+-                    withscores=False
++                    withscores=False,
+                 )
+                 if late_events_raw:
+-                    # Summarize by event_type and unique participant ids (hashed-ish by suffix/prefix)
+                     counts: Dict[str, int] = {}
+                     ids: set[str] = set()
+-                    for ev in late_events_raw[:50]:  # cap for safety
++                    for ev in late_events_raw[:50]:
+                         try:
+                             ev_str = ev.decode("utf-8") if isinstance(ev, (bytes, bytearray)) else str(ev)
+                             obj = json.loads(ev_str)
+-                            et = str(obj.get("event_type") or "unknown")
+-                            counts[et] = counts.get(et, 0) + 1
++                            event_type = str(obj.get("event_type") or "unknown")
++                            counts[event_type] = counts.get(event_type, 0) + 1
+                             pid = obj.get("participant_id_meet") or obj.get("participant_name") or ""
+                             pid = str(pid)
+                             if pid:
+@@ -301,19 +371,20 @@ async def get_speaker_mapping_for_segment(
+                         f"segEnd={segment_end_ms:.0f}ms bufferEnd={fetch_end_ms:.0f}ms lateCount={len(late_events_raw)} "
+                         f"types={counts} participantIdPrefixes={sorted(list(ids))[:5]}"
+                     )
+-        except Exception as _diag_err:
+-            logger.debug(f"{context_log_msg} [DiagLateEvents] failed: {_diag_err}")
+-        # #endregion
+-        
++        except Exception as diag_err:
++            logger.debug(f"{context_log_msg} [DiagLateEvents] failed: {diag_err}")
++
+         speaker_events_for_mapper: List[Tuple[str, float]] = []
+         for event_data, score_ms in speaker_events_raw:
+-            event_json_str: Optional[str] = None
+             if isinstance(event_data, bytes):
+-                event_json_str = event_data.decode('utf-8')
++                event_json_str = event_data.decode("utf-8")
+             elif isinstance(event_data, str):
+                 event_json_str = event_data
+             else:
+-                logger.warning(f"{context_log_msg} UID:{session_uid} Seg:{segment_start_ms}-{segment_end_ms} Unexpected speaker event data type from Redis: {type(event_data)}. Skipping this event.")
++                logger.warning(
++                    f"{context_log_msg} UID:{session_uid} Seg:{segment_start_ms}-{segment_end_ms} "
++                    f"Unexpected speaker event data type from Redis: {type(event_data)}. Skipping this event."
++                )
+                 continue
+             speaker_events_for_mapper.append((event_json_str, float(score_ms)))
+ 
+@@ -325,30 +396,36 @@ async def get_speaker_mapping_for_segment(
+         else:
+             logger.debug(f"{log_prefix_detail} {len(speaker_events_for_mapper)} speaker events for mapping.")
+ 
+-        # Call the core mapping logic
+         mapping_result = map_speaker_to_segment(
+             segment_start_ms=segment_start_ms,
+             segment_end_ms=segment_end_ms,
+-            speaker_events_for_session=speaker_events_for_mapper, # Now contains all events for the session
+-            session_end_time_ms=None # session_end_time not critical for per-segment mapping here
++            speaker_events_for_session=speaker_events_for_mapper,
++            session_end_time_ms=None,
+         )
+-        
++
+         mapped_speaker_name = mapping_result.get("speaker_name")
+         active_participant_id = mapping_result.get("participant_id_meet")
+         mapping_status = mapping_result.get("status", STATUS_ERROR)
+-        
+-        if mapping_status != STATUS_NO_SPEAKER_EVENTS: # Avoid double logging if no events
+-             logger.info(f"{log_prefix_detail} Result: Name='{mapped_speaker_name}', Status='{mapping_status}'")
+ 
+-    except redis.exceptions.RedisError as re:
+-        logger.error(f"{context_log_msg} UID:{session_uid} Seg:{segment_start_ms}-{segment_end_ms} Redis error fetching/processing speaker events: {re}", exc_info=True)
+-        mapping_status = STATUS_ERROR 
++        if mapping_status != STATUS_NO_SPEAKER_EVENTS:
++            logger.info(f"{log_prefix_detail} Result: Name='{mapped_speaker_name}', Status='{mapping_status}'")
++
++    except redis.exceptions.RedisError as redis_err:
++        logger.error(
++            f"{context_log_msg} UID:{session_uid} Seg:{segment_start_ms}-{segment_end_ms} "
++            f"Redis error fetching/processing speaker events: {redis_err}",
++            exc_info=True,
++        )
++        mapping_status = STATUS_ERROR
+     except Exception as map_err:
+-        logger.error(f"{context_log_msg} UID:{session_uid} Seg:{segment_start_ms}-{segment_end_ms} Speaker mapping error: {map_err}", exc_info=True)
++        logger.error(
++            f"{context_log_msg} UID:{session_uid} Seg:{segment_start_ms}-{segment_end_ms} Speaker mapping error: {map_err}",
++            exc_info=True,
++        )
+         mapping_status = STATUS_ERROR
+-    
++
+     return {
+         "speaker_name": mapped_speaker_name,
+         "participant_id_meet": active_participant_id,
+-        "status": mapping_status
+-    } 
+\ No newline at end of file
++        "status": mapping_status,
++    }
+diff --git a/services/transcription-collector/streaming/processors.py b/services/transcription-collector/streaming/processors.py
+index 0fdb4d3..c485908 100644
+--- a/services/transcription-collector/streaming/processors.py
++++ b/services/transcription-collector/streaming/processors.py
+@@ -439,11 +439,19 @@ async def process_speaker_event_message(message_id: str, event_data: Dict[str, A
+     False if a potentially recoverable error occurred (should not be ACKed).
+     """
+     try:
+-        # Validate required fields for speaker event
+-        required_fields = ["uid", "relative_client_timestamp_ms", "event_type", "participant_name"]
++        # Validate required fields for speaker event.
++        # participant_name may be absent in some platform edge-cases;
++        # accept participant_id_meet as identity fallback.
++        required_fields = ["uid", "relative_client_timestamp_ms", "event_type"]
+         if not all(field in event_data for field in required_fields):
+             logger.warning(f"[SpeakerProcessor] Speaker event message {message_id} missing required fields. Skipping. Data: {event_data}")
+             return True  # Handled error (bad data), OK to ACK
++        if not event_data.get("participant_name") and not event_data.get("participant_id_meet"):
++            logger.warning(
++                f"[SpeakerProcessor] Speaker event message {message_id} missing both participant_name "
++                f"and participant_id_meet. Skipping. Data: {event_data}"
++            )
++            return True
+ 
+         session_uid = event_data["uid"]
+         try:
+@@ -477,4 +485,4 @@ async def process_speaker_event_message(message_id: str, event_data: Dict[str, A
+         return False  # Potentially recoverable Redis error, DO NOT ACK
+     except Exception as e:
+         logger.error(f"[SpeakerProcessor] Unexpected error in process_speaker_event_message for {message_id}: {e}", exc_info=True)
+-        return False # Unexpected error, DO NOT ACK 
+\ No newline at end of file
++        return False # Unexpected error, DO NOT ACK 

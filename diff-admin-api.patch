@@ -1,0 +1,11 @@
+diff --git a/services/admin-api/Dockerfile b/services/admin-api/Dockerfile
+index 5b68d44..7090efd 100644
+--- a/services/admin-api/Dockerfile
++++ b/services/admin-api/Dockerfile
+@@ -1,5 +1,5 @@
+ # Base Python image
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set working directory
+ WORKDIR /app
