@@ -28,3 +28,4 @@ requests
 httpx
 psycopg2-binary
 aiodocker 
+kubernetes==35.0.0

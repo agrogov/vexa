@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
 # Install Python and dependencies
 RUN apt-get update && apt-get install -y \

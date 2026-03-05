@@ -17,4 +17,8 @@ export type BotConfig = {
   reconnectionIntervalMs?: number,
   meeting_id: number,  // Required, not optional
   botManagerCallbackUrl?: string;
+  teamsSpeaker?: {
+    signalLossGraceMs?: number;
+    speakingKeepaliveMs?: number;
+  };
 }

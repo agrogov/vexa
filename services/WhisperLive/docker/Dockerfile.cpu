@@ -1,9 +1,9 @@
-FROM python:3.10-bookworm
+FROM docker.ib-ci.com/python:3.10-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 
 # install lib required for pyaudio
-RUN apt update && apt install -y portaudio19-dev && apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apt update && apt install -y portaudio19-dev wget && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # update pip to support for whl.metadata -> less downloading
 RUN pip install --no-cache-dir -U "pip>=24"
@@ -21,5 +21,13 @@ RUN pip install --no-cache-dir -r server.txt && rm server.txt
 
 COPY whisper_live /app/whisper_live
 COPY run_server.py /app
+
+# Ensure VAD model path is stable across build/runtime users.
+ENV WL_VAD_MODEL_PATH=/root/.cache/whisper-live/silero_vad.onnx
+
+# Pre-cache Silero VAD model to avoid runtime download stalls.
+RUN mkdir -p /root/.cache/whisper-live \
+    && wget -O /root/.cache/whisper-live/silero_vad.onnx \
+      https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx
 
 CMD ["python", "run_server.py"]

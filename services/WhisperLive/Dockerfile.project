@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 WORKDIR /root
 RUN apt-get update -y && apt-get install -y python3-pip
 RUN pip3 install faster-whisper
@@ -43,6 +43,14 @@ ARG BUILD_DATE=unknown
 # Now copy the application code (using build arg to force rebuild)
 COPY services/WhisperLive/ /app/
 RUN echo "Build date: $BUILD_DATE" > /app/build_info.txt
+
+# Ensure VAD model path is stable across build/runtime users.
+ENV WL_VAD_MODEL_PATH=/root/.cache/whisper-live/silero_vad.onnx
+
+# Pre-cache Silero VAD model to avoid runtime download stalls.
+RUN mkdir -p /root/.cache/whisper-live \
+    && wget -O /root/.cache/whisper-live/silero_vad.onnx \
+      https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx
 
 # Copy our entrypoint script
 COPY services/WhisperLive/entrypoint.sh /entrypoint.sh

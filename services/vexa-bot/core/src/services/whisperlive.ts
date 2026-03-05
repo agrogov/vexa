@@ -95,7 +95,7 @@ export class WhisperLiveService {
       language: botConfig.language || null,
       task: botConfig.task || "transcribe",
       model: null, // Let server use WHISPER_MODEL_SIZE from environment
-      use_vad: false,
+      use_vad: true,
       platform: botConfig.platform,
       token: botConfig.token,  // MeetingToken (HS256 JWT)
       meeting_id: botConfig.meeting_id,
@@ -254,7 +254,7 @@ export class WhisperLiveService {
    */
   async cleanup(): Promise<void> {
     if (this.connection?.socket) {
-      this.connection.socket.close();
+      this.connection.socket.close(1000, "bot_shutdown");
       this.connection.socket = null;
     }
 

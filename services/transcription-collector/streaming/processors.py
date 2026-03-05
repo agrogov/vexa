@@ -439,11 +439,19 @@ async def process_speaker_event_message(message_id: str, event_data: Dict[str, A
     False if a potentially recoverable error occurred (should not be ACKed).
     """
     try:
-        # Validate required fields for speaker event
-        required_fields = ["uid", "relative_client_timestamp_ms", "event_type", "participant_name"]
+        # Validate required fields for speaker event.
+        # participant_name may be absent in some platform edge-cases;
+        # accept participant_id_meet as identity fallback.
+        required_fields = ["uid", "relative_client_timestamp_ms", "event_type"]
         if not all(field in event_data for field in required_fields):
             logger.warning(f"[SpeakerProcessor] Speaker event message {message_id} missing required fields. Skipping. Data: {event_data}")
             return True  # Handled error (bad data), OK to ACK
+        if not event_data.get("participant_name") and not event_data.get("participant_id_meet"):
+            logger.warning(
+                f"[SpeakerProcessor] Speaker event message {message_id} missing both participant_name "
+                f"and participant_id_meet. Skipping. Data: {event_data}"
+            )
+            return True
 
         session_uid = event_data["uid"]
         try:

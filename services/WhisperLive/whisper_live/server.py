@@ -582,6 +582,7 @@ class TranscriptionServer:
         self.client_manager = None
         self.no_voice_activity_chunks = 0
         self.use_vad = True
+        self.vad_detector = None
         self.single_model = False
         
         # Instantiate TranscriptionCollectorClient here
@@ -692,6 +693,20 @@ class TranscriptionServer:
         self._ws_url = f"ws://{self._pod_ip}:{self._listen_port}/ws"
         logging.info(f"🌐 WEBSOCKET URL CONFIGURED: {self._ws_url}")
         logging.info(f"🌐 WhisperLive WebSocket URL: {self._ws_url}")
+
+        # --- WS receive debug ---
+        self._debug_recv = os.getenv("WL_DEBUG_RECV", "").strip().lower() in ("1", "true", "yes", "on")
+        try:
+            self._recv_log_interval_s = float(os.getenv("WL_RECV_LOG_INTERVAL_S", "10"))
+        except Exception:
+            self._recv_log_interval_s = 10.0
+        try:
+            self._recv_log_every_n = int(os.getenv("WL_RECV_LOG_EVERY_N", "200"))
+        except Exception:
+            self._recv_log_every_n = 200
+        self._ws_last_recv_ts = {}
+        self._ws_last_log_ts = {}
+        self._ws_recv_count = {}
         self._metric_stop_evt = threading.Event()
         
         # Initialize Consul configuration
@@ -708,6 +723,52 @@ class TranscriptionServer:
         except Exception as exc:
             logging.warning(f"Failed to register shutdown handlers: {exc}")
         # --- End WL Scaling block ---
+
+    def _log_ws_recv(self, websocket, frame_data, frame_kind: str):
+        if not self._debug_recv:
+            return
+        ws_key = id(websocket)
+        now = time.time()
+        last_recv = self._ws_last_recv_ts.get(ws_key)
+        last_log = self._ws_last_log_ts.get(ws_key, 0.0)
+        count = self._ws_recv_count.get(ws_key, 0) + 1
+        self._ws_recv_count[ws_key] = count
+        self._ws_last_recv_ts[ws_key] = now
+        should_log = (now - last_log >= self._recv_log_interval_s) or (count % self._recv_log_every_n == 0)
+        if not should_log:
+            return
+        self._ws_last_log_ts[ws_key] = now
+        delta = None if last_recv is None else now - last_recv
+        size = None
+        if isinstance(frame_data, (bytes, bytearray)):
+            size = len(frame_data)
+        client_uid = None
+        try:
+            client = self.client_manager.get_client(websocket)
+            if client and getattr(client, "client_uid", None):
+                client_uid = client.client_uid
+        except Exception:
+            pass
+        logging.info(
+            f"WS_RECV: kind={frame_kind}, bytes={size}, delta_s={delta}, count={count}, uid={client_uid}"
+        )
+
+    def _log_ws_close(self, websocket, reason: str):
+        if not self._debug_recv:
+            return
+        ws_key = id(websocket)
+        now = time.time()
+        last_recv = self._ws_last_recv_ts.get(ws_key)
+        count = self._ws_recv_count.get(ws_key, 0)
+        delta = None if last_recv is None else now - last_recv
+        client_uid = None
+        try:
+            client = self.client_manager.get_client(websocket)
+            if client and getattr(client, "client_uid", None):
+                client_uid = client.client_uid
+        except Exception:
+            pass
+        logging.info(f"WS_CLOSE: reason={reason}, last_recv_delta_s={delta}, count={count}, uid={client_uid}")
 
     # --- Connection cleanup helper methods ---
     def _cleanup_stale_connections(self):
@@ -876,6 +937,7 @@ class TranscriptionServer:
         
         # Handle END_OF_AUDIO signal
         if frame_data == b"END_OF_AUDIO":
+            self._log_ws_recv(websocket, frame_data, "end_of_audio")
             return False
             
         # Check if this is a JSON control message (string) or binary audio data
@@ -888,6 +950,7 @@ class TranscriptionServer:
                 
                 control_message = json.loads(frame_data)
                 message_type = control_message.get("type", "unknown")
+                self._log_ws_recv(websocket, frame_data, f"control:{message_type}")
                 
                 if WL_LOG_CONTROL_EVENTS:
                     logging.info(f"Received control message type: {message_type}")
@@ -916,6 +979,7 @@ class TranscriptionServer:
         
         # Process as binary audio data
         try:
+            self._log_ws_recv(websocket, frame_data, "audio")
             return np.frombuffer(frame_data, dtype=np.float32)
         except (ValueError, TypeError) as e:
             logging.error(f"Failed to process audio data: {e}")
@@ -1040,12 +1104,23 @@ class TranscriptionServer:
                 logging.info(f"CAPACITY: Initialized ClientManager with max_clients={max_clients}, max_connection_time={max_connection_time}")
 
             self.use_vad = options.get('use_vad')
+            force_vad = os.getenv("WL_FORCE_VAD", "").strip().lower() in ("1", "true", "yes")
+            if force_vad:
+                self.use_vad = True
+                logging.info("WL_FORCE_VAD enabled; overriding client use_vad to True")
             if self.client_manager.is_server_full(websocket, options):
                 websocket.close()
                 return False  # Indicates that the connection should not continue
 
-            if self.backend and self.backend.is_tensorrt(): # Check if self.backend is not None
-                self.vad_detector = VoiceActivityDetector(frame_rate=self.RATE)
+            if self.use_vad and not getattr(self, "vad_detector", None):
+                try:
+                    vad_threshold = float(self.server_options.get("vad_onset", 0.5))
+                except Exception:
+                    vad_threshold = 0.5
+                self.vad_detector = VoiceActivityDetector(
+                    threshold=vad_threshold,
+                    frame_rate=self.RATE,
+                )
             self.initialize_client(websocket, options, faster_whisper_custom_model_path,
                                    whisper_tensorrt_path, trt_multilingual)
             return True
@@ -1066,18 +1141,19 @@ class TranscriptionServer:
         # Handle different return values from get_audio_from_websocket
         if frame_np is False:
             # END_OF_AUDIO received
-            if self.backend.is_tensorrt():
+            if self.backend.is_tensorrt() and client and hasattr(client, "set_eos"):
                 client.set_eos(True)
             return False
         elif frame_np is None:
             # Control message processed or error occurred, continue processing
             return True
 
-        if self.backend.is_tensorrt():
+        if self.use_vad and getattr(self, "vad_detector", None):
             voice_active = self.voice_activity(websocket, frame_np)
             if voice_active:
                 self.no_voice_activity_chunks = 0
-                client.set_eos(False)
+                if client and hasattr(client, "set_eos"):
+                    client.set_eos(False)
             if self.use_vad and not voice_active:
                 return True
 
@@ -1100,13 +1176,19 @@ class TranscriptionServer:
                 if not self.process_audio_frames(websocket):
                     break
         except ConnectionClosed:
+            self._log_ws_close(websocket, "connection_closed")
             logging.info("Connection closed by client")
         except Exception as e:
             logging.error(f"Unexpected error: {str(e)}")
         finally:
             if self.client_manager.get_client(websocket):
                 self.cleanup(websocket)
-                websocket.close()
+                try:
+                    websocket.close()
+                except ConnectionClosed:
+                    pass
+                except Exception as e:
+                    logging.debug(f"WebSocket close ignored: {e}")
             del websocket
 
     def run(self,
@@ -1127,6 +1209,22 @@ class TranscriptionServer:
         self.trt_multilingual = trt_multilingual
         self.single_model = single_model
         self.server_options = server_options or {}
+
+        # Preload VAD when forced so client connections don't block on download/init.
+        force_vad = os.getenv("WL_FORCE_VAD", "").strip().lower() in ("1", "true", "yes")
+        if force_vad and not self.vad_detector:
+            try:
+                vad_threshold = float(self.server_options.get("vad_onset", 0.5))
+            except Exception:
+                vad_threshold = 0.5
+            try:
+                self.vad_detector = VoiceActivityDetector(
+                    threshold=vad_threshold,
+                    frame_rate=self.RATE,
+                )
+                logging.info("WL_FORCE_VAD enabled; preloaded VAD detector")
+            except Exception as exc:
+                logging.error(f"WL_FORCE_VAD preload failed: {exc}")
         
         # Set max_clients based on backend type
         if self.backend.is_remote():
@@ -1157,6 +1255,15 @@ class TranscriptionServer:
         # Start periodic connection cleanup
         threading.Thread(target=self._periodic_cleanup, daemon=True).start()
         
+        try:
+            ping_interval = float(os.getenv("WL_PING_INTERVAL_S", "20"))
+        except Exception:
+            ping_interval = 20.0
+        try:
+            ping_timeout = float(os.getenv("WL_PING_TIMEOUT_S", "60"))
+        except Exception:
+            ping_timeout = 60.0
+
         with serve(
             functools.partial(
                 self.recv_audio,
@@ -1166,7 +1273,9 @@ class TranscriptionServer:
                 trt_multilingual=trt_multilingual
             ),
             host,
-            port
+            port,
+            ping_interval=ping_interval,
+            ping_timeout=ping_timeout
         ) as server:
             self.is_healthy = True # WebSocket server is up
             logger.info(f"SERVER_RUNNING: WhisperLive server running on {host}:{port} with health check on {host}:9091/health and max_clients={self.config_max_clients}")
@@ -1404,8 +1513,9 @@ class TranscriptionServer:
             self.no_voice_activity_chunks += 1
             if self.no_voice_activity_chunks > 3:
                 client = self.client_manager.get_client(websocket)
-                if not client.eos:
-                    client.set_eos(True)
+                if client and hasattr(client, "eos") and hasattr(client, "set_eos"):
+                    if not client.eos:
+                        client.set_eos(True)
                 time.sleep(0.1)    # Sleep 100m; wait some voice activity.
             return False
         return True
@@ -1438,6 +1548,15 @@ class TranscriptionServer:
                 self.transcription_server_instance = transcription_server_ref
                 self.redis_collector = redis_collector_ref # This is the TranscriptionCollectorClient instance
                 super().__init__(*args, **kwargs)
+
+            def _write_body_safely(self, body: bytes) -> bool:
+                try:
+                    self.wfile.write(body)
+                    return True
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    # Probe/client can disconnect before reading the body; avoid noisy traceback spam.
+                    logging.debug(f"Health endpoint client disconnected before body write: {e}")
+                    return False
             
             def do_GET(self):
                 server_websocket_healthy = self.transcription_server_instance.is_healthy
@@ -1469,7 +1588,7 @@ class TranscriptionServer:
                         self.send_response(200)
                         self.send_header('Content-type', 'text/plain')
                         self.end_headers()
-                        self.wfile.write(b'OK')
+                        self._write_body_safely(b'OK')
                     else:
                         unhealthy_reasons = []
                         if not server_websocket_healthy:
@@ -1481,34 +1600,41 @@ class TranscriptionServer:
                         self.send_response(503)
                         self.send_header('Content-type', 'text/plain')
                         self.end_headers()
-                        self.wfile.write(f"Service Unavailable: {', '.join(unhealthy_reasons)}".encode('utf-8'))
+                        self._write_body_safely(
+                            f"Service Unavailable: {', '.join(unhealthy_reasons)}".encode('utf-8')
+                        )
                 
                 elif self.path == '/metrics':
                     # Provide JSON metrics for load monitoring
                     import json
                     import hashlib
                     
-                    # Handle case where transcription_server_instance is None
-                    if self.transcription_server_instance is None:
+                    # Handle case where transcription server or client manager is not initialized yet.
+                    client_manager = None
+                    if self.transcription_server_instance is not None:
+                        client_manager = getattr(self.transcription_server_instance, 'client_manager', None)
+
+                    if self.transcription_server_instance is None or client_manager is None:
                         current_sessions = 0
                         max_clients = 10
                         server_id = 'unknown'
                         uid_list = []
                         token_hashes = []
                     else:
-                        current_sessions = len(self.transcription_server_instance.client_manager.clients)
+                        clients = getattr(client_manager, 'clients', {}) or {}
+                        current_sessions = len(clients)
                         max_clients = getattr(self.transcription_server_instance, 'max_clients', 10)
                         server_id = getattr(self.transcription_server_instance, '_consul_service_id', 'unknown')
                         # Collect current client UIDs and token hashes for deduplication across servers
                         try:
                             uid_list = [
                                 getattr(client, 'client_uid', None)
-                                for client in self.transcription_server_instance.client_manager.clients.values()
+                                for client in clients.values()
                                 if client is not None
                             ]
                             raw_tokens = [
                                 getattr(client, 'token', None)
-                                for client in self.transcription_server_instance.client_manager.clients.values()
+                                for client in clients.values()
                                 if client is not None
                             ]
                             token_hashes = [
@@ -1535,12 +1661,12 @@ class TranscriptionServer:
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
-                    self.wfile.write(json.dumps(metrics).encode('utf-8'))
+                    self._write_body_safely(json.dumps(metrics).encode('utf-8'))
                 else:
                     self.send_response(404)
                     self.send_header('Content-type', 'text/plain')
                     self.end_headers()
-                    self.wfile.write(b'Not Found')
+                    self._write_body_safely(b'Not Found')
             
             # Silence server logs by default, can be enabled for debugging
             def log_message(self, format, *args):

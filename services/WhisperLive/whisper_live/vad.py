@@ -110,13 +110,16 @@ class VoiceActivityDetection():
 
     @staticmethod
     def download(model_url="https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx"):
-        target_dir = os.path.expanduser("~/.cache/whisper-live/")
+        override_path = os.getenv("WL_VAD_MODEL_PATH", "").strip()
+        if override_path:
+            model_filename = override_path
+            target_dir = os.path.dirname(model_filename) or "."
+        else:
+            target_dir = os.path.expanduser("~/.cache/whisper-live/")
+            model_filename = os.path.join(target_dir, "silero_vad.onnx")
 
         # Ensure the target directory exists
         os.makedirs(target_dir, exist_ok=True)
-
-        # Define the target file path
-        model_filename = os.path.join(target_dir, "silero_vad.onnx")
 
         # Check if the model file already exists
         if not os.path.exists(model_filename):

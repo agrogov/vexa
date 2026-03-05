@@ -302,6 +302,22 @@ async function performGracefulLeave(
     }
   }
 
+  if (page && !page.isClosed()) {
+    log("[Graceful Leave] Requesting WhisperLive WebSocket close...");
+    try {
+      await page.evaluate(() => {
+        const svc = (window as any).__vexaWhisperLiveService;
+        if (svc?.close) {
+          svc.close(1000, "bot_shutdown");
+        }
+      });
+      await new Promise(resolve => setTimeout(resolve, 200));
+      log("[Graceful Leave] WhisperLive close request sent.");
+    } catch (closeError: any) {
+      log(`[Graceful Leave] Error requesting WhisperLive close: ${closeError.message}`);
+    }
+  }
+
   // Close the browser page if it's still open and wasn't closed by platform leave
   if (page && !page.isClosed()) {
     log("[Graceful Leave] Ensuring page is closed.");

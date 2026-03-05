@@ -314,6 +314,10 @@ export class BrowserWhisperLiveService {
   private retryDelayMs: number = 2000;
   private stubbornMode: boolean = false;
   private isManualReconnect: boolean = false; // Flag to prevent auto-reconnect during manual reconfigure
+  private audioSendCount: number = 0;
+  private lastAudioLogAtMs: number = 0;
+  private metadataSendCount: number = 0;
+  private lastMetadataLogAtMs: number = 0;
 
   constructor(config: any, stubbornMode: boolean = false) {
     this.whisperLiveUrl = config.whisperLiveUrl;
@@ -352,7 +356,7 @@ export class BrowserWhisperLiveService {
           language: this.botConfigData.language || null,
           task: this.botConfigData.task || "transcribe",
           model: null,
-          use_vad: false,
+          use_vad: true,
           platform: this.botConfigData.platform,
           token: this.botConfigData.token,  // MeetingToken (HS256 JWT)
           meeting_id: this.botConfigData.meeting_id,
@@ -399,7 +403,7 @@ export class BrowserWhisperLiveService {
           language: this.botConfigData.language || null,
           task: this.botConfigData.task || "transcribe",
           model: null,
-          use_vad: false,
+          use_vad: true,
           platform: this.botConfigData.platform,
           token: this.botConfigData.token,  // MeetingToken (HS256 JWT)
           meeting_id: this.botConfigData.meeting_id,
@@ -499,6 +503,12 @@ export class BrowserWhisperLiveService {
     try {
       // Send Float32Array directly as WhisperLive expects (matching google_old.ts approach)
       this.socket.send(audioData);
+      this.audioSendCount++;
+      const now = Date.now();
+      if (this.audioSendCount % 200 === 0 || now - this.lastAudioLogAtMs >= 5000) {
+        this.lastAudioLogAtMs = now;
+        (window as any).logBot(`[WhisperLive] Sent audio chunk #${this.audioSendCount} (samples=${audioData.length}).`);
+      }
       return true;
     } catch (error: any) {
       (window as any).logBot(`[WhisperLive] Error sending audio data: ${error.message}`);
@@ -522,6 +532,12 @@ export class BrowserWhisperLiveService {
 
     try {
       this.socket.send(JSON.stringify(meta));
+      this.metadataSendCount++;
+      const now = Date.now();
+      if (this.metadataSendCount % 200 === 0 || now - this.lastMetadataLogAtMs >= 5000) {
+        this.lastMetadataLogAtMs = now;
+        (window as any).logBot(`[WhisperLive] Sent audio metadata #${this.metadataSendCount} (length=${chunkLength}, sample_rate=${sampleRate}).`);
+      }
       return true;
     } catch (error: any) {
       (window as any).logBot(`[WhisperLive] Error sending audio metadata: ${error.message}`);
@@ -600,7 +616,7 @@ export class BrowserWhisperLiveService {
     return this.socket?.readyState === WebSocket.OPEN;
   }
 
-  close(): void {
+  close(code: number = 1000, reason: string = "bot_shutdown"): void {
     (window as any).logBot(`[STUBBORN] 🛑 Closing WebSocket and stopping reconnection...`);
     this.clearReconnectInterval();
     // Clear currentUid to ensure a new session is created on next connection
@@ -608,7 +624,7 @@ export class BrowserWhisperLiveService {
     this.currentUid = null;
     (window as any).logBot(`[STUBBORN] Cleared session UID: ${oldUid} -> null`);
     if (this.socket) {
-      this.socket.close();
+      this.socket.close(code, reason);
       this.socket = null;
     }
   }
@@ -617,6 +633,6 @@ export class BrowserWhisperLiveService {
   closeForReconfigure(): void {
     this.isManualReconnect = true;
     (window as any).logBot(`[STUBBORN] 🛑 Closing for manual reconfigure (will not auto-reconnect)...`);
-    this.close();
+    this.close(1000, "reconfigure");
   }
 }

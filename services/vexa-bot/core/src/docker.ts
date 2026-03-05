@@ -21,7 +21,11 @@ export const BotConfigSchema = z.object({
   }),
   reconnectionIntervalMs: z.number().int().optional(), // ADDED: Optional reconnection interval
   meeting_id: z.number().int().optional(), // Allow optional internal ID
-  botManagerCallbackUrl: z.string().url().optional() // ADDED: Optional callback URL
+  botManagerCallbackUrl: z.string().url().optional(), // ADDED: Optional callback URL
+  teamsSpeaker: z.object({
+    signalLossGraceMs: z.number().int().positive().optional(),
+    speakingKeepaliveMs: z.number().int().positive().optional(),
+  }).optional()
 });
 
 
