@@ -82,7 +82,7 @@ async def _web_search(query: str) -> str:
     try:
         client = _get_client()
         response = await client.chat.completions.create(
-            model="gpt-5-mini",
+            model=LLM_MODEL,
             messages=[
                 {
                     "role": "system",

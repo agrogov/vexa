@@ -32,6 +32,8 @@ echo "Building ${BASE_REPO}/vexa/mcp:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/mcp:${VERSION}" -f services/mcp/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/transcription-service:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/transcription-service:${VERSION}" -f services/transcription-service/Dockerfile.cpu services/transcription-service
+echo "Building ${BASE_REPO}/vexa/decision-listener:${VERSION}"
+docker build -t "${BASE_REPO}/vexa/decision-listener:${VERSION}" -f services/decision-listener/Dockerfile .
 
 # WhisperLive
 if [ "${PROFILE}" == "gpu" ]; then
@@ -58,6 +60,7 @@ docker push "${BASE_REPO}/vexa/bot-manager:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-collector:${VERSION}"
 docker push "${BASE_REPO}/vexa/mcp:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-service:${VERSION}"
+docker push "${BASE_REPO}/vexa/decision-listener:${VERSION}"
 docker push "${BASE_REPO}/vexa/whisperlive:${VERSION}"
 docker push "${BASE_REPO}/vexa/vexa-lite:${VERSION}"
 
