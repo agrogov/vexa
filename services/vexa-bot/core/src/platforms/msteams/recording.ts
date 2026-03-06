@@ -308,24 +308,28 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
       await new Promise<void>((resolve, reject) => {
         try {
           (window as any).logBot("Starting Teams recording process with new services.");
+          let degradedNoMedia = false;
           
           // Find and create combined audio stream
-          audioService.findMediaElements().then(async (mediaElements: HTMLMediaElement[]) => {
+          audioService.findMediaElements(15, 2000).then(async (mediaElements: HTMLMediaElement[]) => {
             if (mediaElements.length === 0) {
-              reject(
-                new Error(
-                  "[Teams BOT Error] No active media elements found after multiple retries. Ensure the Teams meeting media is playing."
-                )
+              degradedNoMedia = true;
+              (window as any).logBot(
+                "[Teams BOT Warning] No active media elements found after retries; " +
+                "continuing in degraded mode (meeting stays active, audio streaming disabled)."
               );
-              return;
+              return undefined;
             }
 
             // Create combined audio stream
             return await audioService.createCombinedAudioStream(mediaElements);
           }).then(async (combinedStream: MediaStream | undefined) => {
             if (!combinedStream) {
-              reject(new Error("[Teams BOT Error] Failed to create combined audio stream"));
-              return;
+              if (!degradedNoMedia) {
+                reject(new Error("[Teams BOT Error] Failed to create combined audio stream"));
+                return null;
+              }
+              return null;
             }
 
             if (isAudioRecordingEnabled) {
@@ -360,33 +364,38 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
             // Initialize audio processor
             return await audioService.initializeAudioProcessor(combinedStream);
           }).then(async (processor: any) => {
-            // Setup audio data processing
-            audioService.setupAudioDataProcessor(async (audioData: Float32Array, sessionStartTime: number | null) => {
-              if (!transcriptionEnabled || !whisperLiveService) {
-                return;
-              }
-              // Only send after server ready
-              if (!whisperLiveService.isReady()) {
-                return;
-              }
-              // Compute simple RMS and peak for diagnostics
-              let sumSquares = 0;
-              let peak = 0;
-              for (let i = 0; i < audioData.length; i++) {
-                const v = audioData[i];
-                sumSquares += v * v;
-                const a = Math.abs(v);
-                if (a > peak) peak = a;
-              }
-              const rms = Math.sqrt(sumSquares / Math.max(1, audioData.length));
-              // Diagnostic: send metadata first
-              whisperLiveService.sendAudioChunkMetadata(audioData.length, 16000);
-              // Send audio data to WhisperLive
-              const success = whisperLiveService.sendAudioData(audioData);
-              if (!success) {
-                (window as any).logBot("Failed to send Teams audio data to WhisperLive");
-              }
-            });
+            if (processor) {
+              // Setup audio data processing
+              audioService.setupAudioDataProcessor(async (audioData: Float32Array, sessionStartTime: number | null) => {
+                if (!transcriptionEnabled || !whisperLiveService) {
+                  return;
+                }
+                // Only send after server ready
+                if (!whisperLiveService.isReady()) {
+                  return;
+                }
+                // Compute simple RMS and peak for diagnostics
+                let sumSquares = 0;
+                let peak = 0;
+                for (let i = 0; i < audioData.length; i++) {
+                  const v = audioData[i];
+                  sumSquares += v * v;
+                  const a = Math.abs(v);
+                  if (a > peak) peak = a;
+                }
+                // Diagnostic: send metadata first
+                whisperLiveService.sendAudioChunkMetadata(audioData.length, 16000);
+                // Send audio data to WhisperLive
+                const success = whisperLiveService.sendAudioData(audioData);
+                if (!success) {
+                  (window as any).logBot("Failed to send Teams audio data to WhisperLive");
+                }
+              });
+            } else if (degradedNoMedia) {
+              (window as any).logBot(
+                "[Teams BOT Warning] Audio processor not initialized because no usable media tracks were found."
+              );
+            }
 
             // Initialize WhisperLive WebSocket connection with reusable callbacks
             const onMessage = (data: any) => {

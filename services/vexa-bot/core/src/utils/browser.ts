@@ -71,10 +71,13 @@ export class BrowserAudioService {
           return false;
         }
         
-        // Check if audio tracks are enabled
-        const hasEnabledTracks = audioTracks.some((track: MediaStreamTrack) => track.enabled && !track.muted);
-        if (!hasEnabledTracks) {
-          (window as any).logBot(`[Audio] Element found but all audio tracks are disabled or muted`);
+        // For Teams/WebRTC, remote tracks can report muted=true during startup/renegotiation.
+        // Accept enabled+live tracks and let the downstream pipeline verify real samples.
+        const hasUsableTracks = audioTracks.some(
+          (track: MediaStreamTrack) => track.enabled && track.readyState === "live"
+        );
+        if (!hasUsableTracks) {
+          (window as any).logBot(`[Audio] Element found but all audio tracks are disabled or not live`);
           return false;
         }
         
