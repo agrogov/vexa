@@ -118,11 +118,17 @@ def _build_bot_pod(
     meeting_id: int,
     meeting_url: str,
     platform: str,
-    bot_name: str,
+    bot_name: Optional[str],
     user_token: str,
     native_meeting_id: str,
     language: Optional[str],
     task: Optional[str],
+    transcription_tier: Optional[str],
+    recording_enabled: Optional[bool],
+    transcribe_enabled: Optional[bool],
+    zoom_obf_token: Optional[str],
+    voice_agent_enabled: Optional[bool],
+    default_avatar_url: Optional[str],
 ) -> Tuple[str, str]:
     connection_id = str(uuid.uuid4())
     pod_name = f"vexa-bot-{meeting_id}-{connection_id[:8]}"
@@ -144,7 +150,7 @@ def _build_bot_pod(
     bot_config: Dict[str, Any] = {
         "platform": platform,
         "meetingUrl": meeting_url,
-        "botName": bot_name,
+        "botName": bot_name or f"VexaBot-{uuid.uuid4().hex[:6]}",
         "token": meeting_token,
         "connectionId": connection_id,
         "nativeMeetingId": native_meeting_id,
@@ -152,17 +158,29 @@ def _build_bot_pod(
         "redisUrl": redis_url,
         "language": language,
         "task": task,
+        "transcriptionTier": transcription_tier or "realtime",
+        "transcribeEnabled": True if transcribe_enabled is None else bool(transcribe_enabled),
+        "obfToken": zoom_obf_token if platform == "zoom" else None,
         "container_name": pod_name,
         "automaticLeave": _default_automatic_leave(),
         "teamsSpeaker": _teams_speaker_tuning(),
     }
+    if recording_enabled is not None:
+        bot_config["recordingEnabled"] = bool(recording_enabled)
+    if voice_agent_enabled is not None:
+        bot_config["voiceAgentEnabled"] = bool(voice_agent_enabled)
+    if default_avatar_url:
+        bot_config["defaultAvatarUrl"] = default_avatar_url
 
     cb = _bot_manager_callback_url()
     if cb:
         bot_config["botManagerCallbackUrl"] = cb
 
+    # Keep parity with other orchestrators: do not pass null-valued keys.
+    cleaned_config = {k: v for k, v in bot_config.items() if v is not None}
+
     bot_env = [
-        client.V1EnvVar(name="BOT_CONFIG", value=json.dumps(bot_config)),
+        client.V1EnvVar(name="BOT_CONFIG", value=json.dumps(cleaned_config)),
         client.V1EnvVar(name="WHISPER_LIVE_URL", value=whisper_url),
         client.V1EnvVar(name="LOG_LEVEL", value=os.environ.get("BOT_LOG_LEVEL", "INFO")),
     ]
@@ -215,13 +233,19 @@ def _build_bot_pod(
 async def start_bot_container(
     user_id: int,
     meeting_id: int,
-    meeting_url: str,
+    meeting_url: Optional[str],
     platform: str,
-    bot_name: str,
+    bot_name: Optional[str],
     user_token: str,
     native_meeting_id: str,
     language: Optional[str],
     task: Optional[str],
+    transcription_tier: Optional[str] = "realtime",
+    recording_enabled: Optional[bool] = None,
+    transcribe_enabled: Optional[bool] = None,
+    zoom_obf_token: Optional[str] = None,
+    voice_agent_enabled: Optional[bool] = None,
+    default_avatar_url: Optional[str] = None,
 ) -> Tuple[str, str]:
     core = _get_core_v1()
     pod, connection_id = _build_bot_pod(
@@ -234,6 +258,12 @@ async def start_bot_container(
         native_meeting_id,
         language,
         task,
+        transcription_tier,
+        recording_enabled,
+        transcribe_enabled,
+        zoom_obf_token,
+        voice_agent_enabled,
+        default_avatar_url,
     )
     await asyncio.to_thread(core.create_namespaced_pod, namespace=_namespace(), body=pod)
     return pod.metadata.name, connection_id
