@@ -1,5 +1,5 @@
 # Base Python image
-FROM python:3.10-slim
+FROM docker.ib-ci.com/python:3.10-slim
 
 # Set working directory
 WORKDIR /app
