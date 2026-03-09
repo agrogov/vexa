@@ -139,6 +139,7 @@ async def generate_summary(
                 {"role": "user", "content": user_message},
             ],
             response_format={"type": "json_object"},
+            temperature=0.2,
             max_completion_tokens=256,
         )
 
@@ -206,6 +207,7 @@ async def generate_narrative(
                 {"role": "user", "content": user_message},
             ],
             response_format={"type": "json_object"},
+            temperature=0.3,
             max_completion_tokens=4096,
         )
 
