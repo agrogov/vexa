@@ -1,0 +1,276 @@
+diff --git a/docker/lite/Dockerfile.lite b/docker/lite/Dockerfile.lite
+index 17ab69d..22d71a2 100644
+--- a/docker/lite/Dockerfile.lite
++++ b/docker/lite/Dockerfile.lite
+@@ -36,6 +36,20 @@ FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS base
+ # Avoid prompts during package installation
+ ENV DEBIAN_FRONTEND=noninteractive
+ 
++# Install CA tools (slim images don't always include them)
++RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
++    && rm -rf /var/lib/apt/lists/*
++
++# Add Infobip Root CA
++ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
++
++# Update CA bundle
++RUN update-ca-certificates
++
++# Set environment variables to ensure Python uses the updated CA bundle
++ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
++ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
++
+ # Install system dependencies
+ # Using --fix-missing to handle transient hash mismatches from Ubuntu repos
+ RUN apt-get update && \
+diff --git a/services/WhisperLive/Dockerfile.cpu b/services/WhisperLive/Dockerfile.cpu
+index 06e5f71..13183e0 100644
+--- a/services/WhisperLive/Dockerfile.cpu
++++ b/services/WhisperLive/Dockerfile.cpu
+@@ -1,8 +1,22 @@
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set DEBIAN_FRONTEND to noninteractive to avoid prompts during apt-get install
+ ENV DEBIAN_FRONTEND=noninteractive
+ 
++# Install CA tools (slim images don't always include them)
++RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
++    && rm -rf /var/lib/apt/lists/*
++
++# Add Infobip Root CA
++ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
++
++# Update CA bundle
++RUN update-ca-certificates
++
++# Set environment variables to ensure Python uses the updated CA bundle
++ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
++ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
++
+ # Install system dependencies
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     libsndfile1 \
+@@ -37,6 +51,14 @@ RUN pip install --no-cache-dir 'faster-whisper[cpu]'
+ # Now copy the application code
+ COPY services/WhisperLive/ /app/
+ 
++# Ensure VAD model path is stable across build/runtime users.
++ENV WL_VAD_MODEL_PATH=/root/.cache/whisper-live/silero_vad.onnx
++
++# Pre-cache Silero VAD model to avoid runtime download stalls.
++RUN mkdir -p /root/.cache/whisper-live \
++    && wget -O /root/.cache/whisper-live/silero_vad.onnx \
++      https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx
++
+ # Copy our entrypoint script
+ COPY services/WhisperLive/entrypoint.sh /entrypoint.sh
+ RUN chmod +x /entrypoint.sh
+@@ -52,4 +74,4 @@ ENTRYPOINT ["/entrypoint.sh"]
+ CMD ["--port", "9090", "--backend", "faster_whisper"]
+ 
+ # Define the health check using the script
+-HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 CMD /healthcheck.sh 
+\ No newline at end of file
++HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 CMD /healthcheck.sh
+diff --git a/services/WhisperLive/Dockerfile.project b/services/WhisperLive/Dockerfile.project
+index e0521f9..705aac3 100644
+--- a/services/WhisperLive/Dockerfile.project
++++ b/services/WhisperLive/Dockerfile.project
+@@ -1,4 +1,4 @@
+-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
++FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+ WORKDIR /root
+ RUN apt-get update -y && apt-get install -y python3-pip
+ RUN pip3 install faster-whisper
+@@ -44,6 +44,14 @@ ARG BUILD_DATE=unknown
+ COPY services/WhisperLive/ /app/
+ RUN echo "Build date: $BUILD_DATE" > /app/build_info.txt
+ 
++# Ensure VAD model path is stable across build/runtime users.
++ENV WL_VAD_MODEL_PATH=/root/.cache/whisper-live/silero_vad.onnx
++
++# Pre-cache Silero VAD model to avoid runtime download stalls.
++RUN mkdir -p /root/.cache/whisper-live \
++    && wget -O /root/.cache/whisper-live/silero_vad.onnx \
++      https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx
++
+ # Copy our entrypoint script
+ COPY services/WhisperLive/entrypoint.sh /entrypoint.sh
+ RUN chmod +x /entrypoint.sh
+@@ -64,4 +72,4 @@ CMD ["--port", "9090", "--backend", "faster_whisper"]
+ # --timeout: Max time to wait for the health check command to complete.
+ # --start-period: Initialization time to allow the container to start before first health check.
+ # --retries: Number of consecutive failures before marking the container as unhealthy.
+-HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 CMD /healthcheck.sh
+\ No newline at end of file
++HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 CMD /healthcheck.sh
+diff --git a/services/WhisperLive/docker/Dockerfile.cpu b/services/WhisperLive/docker/Dockerfile.cpu
+index 6f320b4..90e4b0b 100644
+--- a/services/WhisperLive/docker/Dockerfile.cpu
++++ b/services/WhisperLive/docker/Dockerfile.cpu
+@@ -1,9 +1,9 @@
+-FROM python:3.10-bookworm
++FROM docker.ib-ci.com/python:3.10-bookworm
+ 
+ ARG DEBIAN_FRONTEND=noninteractive
+ 
+ # install lib required for pyaudio
+-RUN apt update && apt install -y portaudio19-dev && apt-get clean && rm -rf /var/lib/apt/lists/*
++RUN apt update && apt install -y portaudio19-dev wget && apt-get clean && rm -rf /var/lib/apt/lists/*
+ 
+ # update pip to support for whl.metadata -> less downloading
+ RUN pip install --no-cache-dir -U "pip>=24"
+@@ -22,4 +22,12 @@ RUN pip install --no-cache-dir -r server.txt && rm server.txt
+ COPY whisper_live /app/whisper_live
+ COPY run_server.py /app
+ 
++# Ensure VAD model path is stable across build/runtime users.
++ENV WL_VAD_MODEL_PATH=/root/.cache/whisper-live/silero_vad.onnx
++
++# Pre-cache Silero VAD model to avoid runtime download stalls.
++RUN mkdir -p /root/.cache/whisper-live \
++    && wget -O /root/.cache/whisper-live/silero_vad.onnx \
++      https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx
++
+ CMD ["python", "run_server.py"]
+diff --git a/services/WhisperLive/docker/Dockerfile.gpu b/services/WhisperLive/docker/Dockerfile.gpu
+index e88112e..90b17b3 100644
+--- a/services/WhisperLive/docker/Dockerfile.gpu
++++ b/services/WhisperLive/docker/Dockerfile.gpu
+@@ -1,9 +1,9 @@
+-FROM python:3.10-bookworm
++FROM docker.ib-ci.com/python:3.10-bookworm
+ 
+ ARG DEBIAN_FRONTEND=noninteractive
+ 
+ # install lib required for pyaudio
+-RUN apt update && apt install -y portaudio19-dev && apt-get clean && rm -rf /var/lib/apt/lists/*
++RUN apt update && apt install -y portaudio19-dev wget && apt-get clean && rm -rf /var/lib/apt/lists/*
+ 
+ # update pip to support for whl.metadata -> less downloading
+ RUN pip install --no-cache-dir -U "pip>=24"
+@@ -23,4 +23,12 @@ ENV LD_LIBRARY_PATH="/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib:/
+ COPY whisper_live /app/whisper_live
+ COPY run_server.py /app
+ 
++# Ensure VAD model path is stable across build/runtime users.
++ENV WL_VAD_MODEL_PATH=/root/.cache/whisper-live/silero_vad.onnx
++
++# Pre-cache Silero VAD model to avoid runtime download stalls.
++RUN mkdir -p /root/.cache/whisper-live \
++    && wget -O /root/.cache/whisper-live/silero_vad.onnx \
++      https://github.com/snakers4/silero-vad/raw/v5.0/files/silero_vad.onnx
++
+ CMD ["python", "run_server.py"]
+diff --git a/services/WhisperLive/docker/Dockerfile.tensorrt b/services/WhisperLive/docker/Dockerfile.tensorrt
+index c46a2d2..8c887a4 100644
+--- a/services/WhisperLive/docker/Dockerfile.tensorrt
++++ b/services/WhisperLive/docker/Dockerfile.tensorrt
+@@ -1,4 +1,4 @@
+-FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS base
++FROM docker.ib-ci.com/nvidia/cuda:12.4.1-base-ubuntu22.04 AS base
+ 
+ ARG DEBIAN_FRONTEND=noninteractive
+ 
+diff --git a/services/admin-api/Dockerfile b/services/admin-api/Dockerfile
+index 5b68d44..7090efd 100644
+--- a/services/admin-api/Dockerfile
++++ b/services/admin-api/Dockerfile
+@@ -1,5 +1,5 @@
+ # Base Python image
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set working directory
+ WORKDIR /app
+diff --git a/services/api-gateway/Dockerfile b/services/api-gateway/Dockerfile
+index bd0cf14..ec201f2 100644
+--- a/services/api-gateway/Dockerfile
++++ b/services/api-gateway/Dockerfile
+@@ -1,5 +1,5 @@
+ # Base Python image
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set working directory
+ WORKDIR /app
+diff --git a/services/bot-manager/Dockerfile b/services/bot-manager/Dockerfile
+index 5d3a708..ce0de7c 100644
+--- a/services/bot-manager/Dockerfile
++++ b/services/bot-manager/Dockerfile
+@@ -1,5 +1,5 @@
+ # Use an official Python runtime as a parent image
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set the working directory in the container
+ WORKDIR /app
+diff --git a/services/mcp/Dockerfile b/services/mcp/Dockerfile
+index 5167441..dc40aa3 100644
+--- a/services/mcp/Dockerfile
++++ b/services/mcp/Dockerfile
+@@ -1,4 +1,4 @@
+-FROM python:3.11-slim
++FROM docker.ib-ci.com/python:3.11-slim
+ 
+ WORKDIR /app
+ 
+diff --git a/services/transcription-collector/Dockerfile b/services/transcription-collector/Dockerfile
+index c3e1540..e897ee4 100644
+--- a/services/transcription-collector/Dockerfile
++++ b/services/transcription-collector/Dockerfile
+@@ -1,5 +1,5 @@
+ # Base Python image
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Set working directory
+ WORKDIR /app
+diff --git a/services/transcription-service/Dockerfile b/services/transcription-service/Dockerfile
+index 8dae135..1783caa 100644
+--- a/services/transcription-service/Dockerfile
++++ b/services/transcription-service/Dockerfile
+@@ -1,4 +1,4 @@
+-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
++FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+ 
+ # Install Python and dependencies
+ RUN apt-get update && apt-get install -y \
+diff --git a/services/transcription-service/Dockerfile.cpu b/services/transcription-service/Dockerfile.cpu
+index 9c115b1..c49c509 100644
+--- a/services/transcription-service/Dockerfile.cpu
++++ b/services/transcription-service/Dockerfile.cpu
+@@ -1,4 +1,4 @@
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
+ 
+ # Install system dependencies
+ RUN apt-get update && apt-get install -y \
+diff --git a/services/decision-listener/Dockerfile b/services/decision-listener/Dockerfile
+index adf1d0c..4160529 100644
+--- a/services/decision-listener/Dockerfile
++++ b/services/decision-listener/Dockerfile
+@@ -1,4 +1,21 @@
+-FROM python:3.10-slim
++FROM docker.ib-ci.com/python:3.10-slim
++
++# Set DEBIAN_FRONTEND to noninteractive to avoid prompts during apt-get install
++ENV DEBIAN_FRONTEND=noninteractive
++
++# Install CA tools (slim images don't always include them)
++RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
++    && rm -rf /var/lib/apt/lists/*
++
++# Add Infobip Root CA
++ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
++
++# Update CA bundle
++RUN update-ca-certificates
++
++# Set environment variables to ensure Python uses the updated CA bundle
++ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
++ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ 
+ WORKDIR /app
+ 

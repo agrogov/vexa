@@ -1,14 +1,3 @@
-diff --git a/services/bot-manager/Dockerfile b/services/bot-manager/Dockerfile
-index 5d3a708..ce0de7c 100644
---- a/services/bot-manager/Dockerfile
-+++ b/services/bot-manager/Dockerfile
-@@ -1,5 +1,5 @@
- # Use an official Python runtime as a parent image
--FROM python:3.10-slim
-+FROM docker.ib-ci.com/python:3.10-slim
- 
- # Set the working directory in the container
- WORKDIR /app
 diff --git a/services/bot-manager/app/main.py b/services/bot-manager/app/main.py
 index 2a499a6..19442dc 100644
 --- a/services/bot-manager/app/main.py

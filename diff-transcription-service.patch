@@ -1,23 +1,3 @@
-diff --git a/services/transcription-service/Dockerfile b/services/transcription-service/Dockerfile
-index 8dae135..1783caa 100644
---- a/services/transcription-service/Dockerfile
-+++ b/services/transcription-service/Dockerfile
-@@ -1,4 +1,4 @@
--FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
-+FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
- 
- # Install Python and dependencies
- RUN apt-get update && apt-get install -y \
-diff --git a/services/transcription-service/Dockerfile.cpu b/services/transcription-service/Dockerfile.cpu
-index 9c115b1..c49c509 100644
---- a/services/transcription-service/Dockerfile.cpu
-+++ b/services/transcription-service/Dockerfile.cpu
-@@ -1,4 +1,4 @@
--FROM python:3.10-slim
-+FROM docker.ib-ci.com/python:3.10-slim
- 
- # Install system dependencies
- RUN apt-get update && apt-get install -y \
 diff --git a/services/transcription-service/main.py b/services/transcription-service/main.py
 index c6f9f79..4a4c3ef 100644
 --- a/services/transcription-service/main.py
