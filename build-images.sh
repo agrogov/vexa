@@ -26,6 +26,8 @@ echo "Building ${BASE_REPO}/vexa/admin-api:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/admin-api:${VERSION}" -f services/admin-api/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/bot-manager:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/bot-manager:${VERSION}" -f services/bot-manager/Dockerfile .
+echo "Building ${BASE_REPO}/vexa/decision-listener:${VERSION}"
+docker build -t "${BASE_REPO}/vexa/decision-listener:${VERSION}" -f services/decision-listener/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/transcription-collector:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/transcription-collector:${VERSION}" -f services/transcription-collector/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/mcp:${VERSION}"
@@ -55,6 +57,7 @@ docker push "${BASE_REPO}/vexa/vexa-bot:${VERSION}"
 docker push "${BASE_REPO}/vexa/api-gateway:${VERSION}"
 docker push "${BASE_REPO}/vexa/admin-api:${VERSION}"
 docker push "${BASE_REPO}/vexa/bot-manager:${VERSION}"
+docker push "${BASE_REPO}/vexa/decision-listener:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-collector:${VERSION}"
 docker push "${BASE_REPO}/vexa/mcp:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-service:${VERSION}"
