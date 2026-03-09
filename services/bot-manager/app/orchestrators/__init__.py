@@ -7,6 +7,7 @@ Supported orchestrators:
 - docker (default): Uses Docker socket to spawn bot containers
 - nomad: Uses HashiCorp Nomad to dispatch parameterized jobs
 - process: Spawns bots as local Node.js processes (for Lite deployments)
+- kubernetes: Spawns bots as Pods via the Kubernetes API
 """
 import os
 import importlib
@@ -21,6 +22,8 @@ if _orchestrator == "nomad":
     module_name = "app.orchestrators.nomad"
 elif _orchestrator == "process":
     module_name = "app.orchestrators.process"
+elif _orchestrator == "kubernetes":
+    module_name = "app.orchestrators.kubernetes"
 else:
     # Default to Docker orchestrator
     module_name = "app.orchestrators.docker"

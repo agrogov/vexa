@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 import logging
 import os
 import base64
+import inspect
 from typing import Optional, List, Dict, Any
 import redis.asyncio as aioredis
 import asyncio
@@ -553,6 +554,37 @@ async def _delayed_container_stop(container_id: str, meeting_id: int, delay_seco
         logger.error(f"[Delayed Stop] Error during safety finalizer for meeting {meeting_id}: {e}", exc_info=True)
 # --- ------------------------ ---
 
+async def _is_container_running(container_id: str) -> bool:
+    """Normalize sync/async orchestrator checks for container status."""
+    try:
+        result = verify_container_running(container_id)
+        if inspect.isawaitable(result):
+            return await result
+        return bool(result)
+    except Exception as e:
+        logger.error(f"[Stop Bot] Failed to verify container {container_id}: {e}", exc_info=True)
+        return False
+
+async def _get_running_bots_status_safe(user_id: int) -> List[Dict[str, Any]]:
+    """Normalize sync/async orchestrator status listing."""
+    try:
+        result = get_running_bots_status(user_id)
+        if inspect.isawaitable(result):
+            return await result
+        return list(result)
+    except Exception as e:
+        logger.error(f"[Bot Status] Failed to get running bots for user {user_id}: {e}", exc_info=True)
+        return []
+
+async def _record_session_start_safe(meeting_id: int, connection_id: str) -> None:
+    """Run session start hook if provided and awaitable."""
+    try:
+        result = _record_session_start(meeting_id, connection_id)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as e:
+        logger.error(f"[Session Start] Failed to record session start for meeting {meeting_id}: {e}", exc_info=True)
+
 @app.get("/", include_in_schema=False)
 async def root():
     return {"message": "Vexa Bot Manager is running"}
@@ -818,7 +850,7 @@ async def request_bot(
                 detail={"status": "error", "message": error_msg, "meeting_id": meeting_id}
             )
 
-        asyncio.create_task(_record_session_start(meeting_id, connection_id))
+        asyncio.create_task(_record_session_start_safe(meeting_id, connection_id))
         logger.info(f"Scheduled background task to record session start for meeting {meeting_id}, session {connection_id}")
 
         # REMOVED: Status update to 'active' - now handled by bot startup callback
@@ -995,15 +1027,31 @@ async def stop_bot(
         logger.warning(f"Stop request: No meeting found for {platform_value}/{native_meeting_id} for user {current_user.id}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No meeting found to stop.")
 
+    terminal_states = [MeetingStatus.COMPLETED.value, MeetingStatus.FAILED.value]
+    terminal_meetings = [m for m in all_meetings if m.status in terminal_states]
+
+    # If terminal meetings still have running containers, attempt to stop them.
+    running_terminal_meetings: List[Meeting] = []
+    for meeting in terminal_meetings:
+        if not meeting.bot_container_id:
+            continue
+        if await _is_container_running(meeting.bot_container_id):
+            logger.info(f"Stop request: Meeting {meeting.id} is terminal ('{meeting.status}') but container {meeting.bot_container_id} is still running. Stopping it.")
+            background_tasks.add_task(_delayed_container_stop, meeting.bot_container_id, meeting.id, 0)
+            running_terminal_meetings.append(meeting)
+
     # Filter to non-terminal meetings
     non_terminal_meetings = [
         m for m in all_meetings 
-        if m.status not in [MeetingStatus.COMPLETED.value, MeetingStatus.FAILED.value]
+        if m.status not in terminal_states
     ]
 
     # If all meetings are terminal, return idempotent response
     if not non_terminal_meetings:
         meeting = all_meetings[0]
+        if running_terminal_meetings:
+            logger.info(f"Stop request: {len(running_terminal_meetings)} terminal meeting(s) had running containers. Stop scheduled.")
+            return {"message": "Stop requested for running bots in terminal meetings."}
         logger.info(f"Stop request: Meeting {meeting.id} already in terminal state '{meeting.status}'. Returning 202 idempotently.")
         return {"message": f"Meeting already {meeting.status}."}
 
@@ -1112,7 +1160,7 @@ async def get_user_bots_status(
     
     try:
         # Call the function from orchestrator_utils - ADD AWAIT HERE
-        running_bots_list = await get_running_bots_status(user_id)
+        running_bots_list = await _get_running_bots_status_safe(user_id)
         # Wrap the list in the response model
         return BotStatusResponse(running_bots=running_bots_list)
     except Exception as e:
@@ -2373,7 +2421,7 @@ async def reconcile_meetings_and_containers():
                 
                 # Check if container/process actually exists and is running
                 try:
-                    container_exists = await verify_container_running(meeting.bot_container_id)
+                    container_exists = await _is_container_running(meeting.bot_container_id)
                 except Exception as e:
                     # Error during verification - log but don't mark as zombie
                     # This could happen if orchestrator is unavailable or misconfigured
@@ -2393,7 +2441,7 @@ async def reconcile_meetings_and_containers():
                         # For container names, be more conservative - check if any processes are running
                         # If registry is empty but meeting is active, might be a timing issue
                         try:
-                            all_running = await get_running_bots_status(meeting.user_id)
+                            all_running = await _get_running_bots_status_safe(meeting.user_id)
                             if len(all_running) > 0:
                                 logger.warning(
                                     f"[Reconciliation] Meeting {meeting.id} has container name '{meeting.bot_container_id}' "
@@ -2460,7 +2508,7 @@ async def reconcile_meetings_and_containers():
                 # For each user, get their running bots
                 for user_id in user_ids:
                     try:
-                        user_bots = await get_running_bots_status(user_id)
+                        user_bots = await _get_running_bots_status_safe(user_id)
                         all_running_bots.extend(user_bots)
                     except Exception as e:
                         logger.error(f"[Reconciliation] Error getting running bots for user {user_id}: {e}", exc_info=True)

@@ -397,6 +397,9 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               } else if (!whisperLiveService.isReady() && data["status"] === "SERVER_READY") {
                 whisperLiveService.setServerReady(true);
                 (window as any).logBot("Teams Server is ready.");
+                if ((window as any).__vexaEmitCurrentSpeakers) {
+                  (window as any).__vexaEmitCurrentSpeakers();
+                }
               } else if (data["language"]) {
                 (window as any).logBot(`Teams Language detected: ${data["language"]}`);
               } else if (data["message"] === "DISCONNECT") {
@@ -481,6 +484,14 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                     this.idToElement.delete(identity.id);
                     this.cache.delete(element);
                   }
+                }
+
+                getIdentityById(id: string): ParticipantIdentity | null {
+                  const element = this.idToElement.get(id);
+                  if (!element) {
+                    return null;
+                  }
+                  return this.getIdentity(element);
                 }
 
                 private extractId(element: HTMLElement): string {
@@ -717,12 +728,140 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               const debouncer = new EventDebouncer(300);
               const observers = new Map<HTMLElement, MutationObserver[]>();
               const rafHandles = new Map<string, number>();
+              const signalLossTimers = new Map<string, number>();
+              const speakingKeepaliveTimers = new Map<string, number>();
+
+              const cfgSignalLossGrace = Number((botConfigData as any)?.teamsSpeaker?.signalLossGraceMs);
+              const cfgSpeakingKeepalive = Number((botConfigData as any)?.teamsSpeaker?.speakingKeepaliveMs);
+              const SIGNAL_LOSS_GRACE_MS = Number.isFinite(cfgSignalLossGrace) && cfgSignalLossGrace >= 500
+                ? cfgSignalLossGrace
+                : 2000;
+              const SPEAKING_KEEPALIVE_MS = Number.isFinite(cfgSpeakingKeepalive) && cfgSpeakingKeepalive >= 2000
+                ? cfgSpeakingKeepalive
+                : 8000;
+              const ALLOW_KEEPALIVE = SPEAKING_KEEPALIVE_MS >= 5000; // disable keepalive when set very low
+              
+              // Identity stabilization
+              const nameByNormalized = new Map<string, string>(); // normalized name -> canonical name
+              const idByNormalized = new Map<string, string>();   // normalized name -> canonical id
+              const idToCanonicalName = new Map<string, string>(); // participant id -> canonical name
+
+              const normalizeName = (name: string | undefined | null): string | null => {
+                if (!name) return null;
+                const trimmed = name.trim();
+                if (!trimmed) return null;
+                return trimmed
+                  .normalize('NFD')
+                  .replace(/[\u0300-\u036f]/g, '')
+                  .replace(/\s+/g, ' ')
+                  .toLowerCase();
+              };
+
+              function canonicalizeIdentity(identity: ParticipantIdentity): ParticipantIdentity {
+                const norm = normalizeName(identity.name);
+                if (norm) {
+                  if (!nameByNormalized.has(norm)) nameByNormalized.set(norm, identity.name);
+                  if (!idByNormalized.has(norm)) idByNormalized.set(norm, identity.id);
+                  identity = {
+                    ...identity,
+                    name: nameByNormalized.get(norm) || identity.name,
+                    id: idByNormalized.get(norm) || identity.id,
+                  };
+                }
+
+                const canonicalNameForId = idToCanonicalName.get(identity.id);
+                if (canonicalNameForId) {
+                  identity = { ...identity, name: canonicalNameForId };
+                } else if (identity.name) {
+                  idToCanonicalName.set(identity.id, identity.name);
+                }
+
+                return identity;
+              }
               
               // State for tracking speaking status (for cleanup)
               const speakingStates = new Map<string, SpeakingState>();
+
+              function cancelSignalLossTimer(participantId: string) {
+                const timer = signalLossTimers.get(participantId);
+                if (timer) {
+                  clearTimeout(timer);
+                  signalLossTimers.delete(participantId);
+                }
+              }
+
+              const countSpeaking = () =>
+                Array.from(speakingStates.values()).filter((state) => state === 'speaking').length;
+
+              function stopSpeakingKeepalive(participantId: string) {
+                const timer = speakingKeepaliveTimers.get(participantId);
+                if (timer) {
+                  clearInterval(timer);
+                  speakingKeepaliveTimers.delete(participantId);
+                }
+              }
+
+              function startSpeakingKeepalive(identity: ParticipantIdentity) {
+                if (!ALLOW_KEEPALIVE) return;
+                if (countSpeaking() > 1) return; // avoid inflating overlap when multiple speakers are active
+                stopSpeakingKeepalive(identity.id);
+
+                const timer = setInterval(() => {
+                  try {
+                    if (!identity.element.isConnected) {
+                      stopSpeakingKeepalive(identity.id);
+                      return;
+                    }
+
+                    if (countSpeaking() > 1) {
+                      stopSpeakingKeepalive(identity.id);
+                      return;
+                    }
+
+                    const state = speakingStates.get(identity.id);
+                    if (state !== 'speaking') {
+                      stopSpeakingKeepalive(identity.id);
+                      return;
+                    }
+
+                    // Keep active speaker continuity alive across intermittent detector gaps.
+                    sendTeamsSpeakerEvent('SPEAKER_START', identity);
+                    (window as any).logBot(`🔁 [Unified] SPEAKER_START keepalive: ${identity.name} (ID: ${identity.id})`);
+                  } catch (_error: any) {
+                    stopSpeakingKeepalive(identity.id);
+                  }
+                }, SPEAKING_KEEPALIVE_MS) as unknown as number;
+
+                speakingKeepaliveTimers.set(identity.id, timer);
+              }
+
+              function scheduleSignalLossGrace(identity: ParticipantIdentity) {
+                if (signalLossTimers.has(identity.id)) {
+                  return;
+                }
+
+                const timer = setTimeout(() => {
+                  signalLossTimers.delete(identity.id);
+
+                  if (!identity.element.isConnected) {
+                    handleParticipantRemoved(identity);
+                    return;
+                  }
+
+                  if (!detector.hasRequiredSignal(identity.element)) {
+                    (window as any).logBot(
+                      `⚠️ [Unified] Voice-level signal still missing after ${SIGNAL_LOSS_GRACE_MS}ms for ${identity.name} - removing participant`
+                    );
+                    handleParticipantRemoved(identity);
+                  }
+                }, SIGNAL_LOSS_GRACE_MS) as unknown as number;
+
+                signalLossTimers.set(identity.id, timer);
+              }
               
               // Event emission helper
-              function sendTeamsSpeakerEvent(eventType: string, identity: ParticipantIdentity) {
+              function sendTeamsSpeakerEvent(eventType: string, rawIdentity: ParticipantIdentity) {
+                const identity = canonicalizeIdentity(rawIdentity);
                 const eventAbsoluteTimeMs = Date.now();
                 const sessionStartTime = audioService.getSessionAudioStartTime();
                 
@@ -744,6 +883,25 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                   // Handle errors silently
                 }
               }
+
+              (window as any).__vexaEmitCurrentSpeakers = () => {
+                try {
+                  const activeIds = Array.from(speakingStates.entries())
+                    .filter(([_, state]) => state === 'speaking')
+                    .map(([id]) => id);
+                  if (activeIds.length === 0) {
+                    return;
+                  }
+                  activeIds.forEach((id) => {
+                    const identity = registry.getIdentityById(id);
+                    if (identity) {
+                      sendTeamsSpeakerEvent('SPEAKER_START', identity);
+                    }
+                  });
+                } catch (error: any) {
+                  // Best-effort; avoid breaking speaker detection.
+                }
+              };
               // Unified Observer System
               function observeParticipant(element: HTMLElement) {
                 if ((element as any).dataset.vexaObserverAttached) {
@@ -781,10 +939,11 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                 // Observer on container (detect signal loss)
                 const containerObserver = new MutationObserver(() => {
                   if (!detector.hasRequiredSignal(element)) {
-                    (window as any).logBot(`⚠️ [Unified] Voice-level signal lost for ${identity.name} - stopping observation`);
-                    handleParticipantRemoved(identity);
+                    (window as any).logBot(`⚠️ [Unified] Voice-level signal lost for ${identity.name} - waiting ${SIGNAL_LOSS_GRACE_MS}ms before removal`);
+                    scheduleSignalLossGrace(identity);
                     return;
                   }
+                  cancelSignalLossTimer(identity.id);
                   checkAndEmit(identity);
                 });
                 containerObserver.observe(element, {
@@ -810,6 +969,12 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
                 const detectionResult = detector.detectSpeakingState(identity.element);
 
+                if (detectionResult.hasSignal) {
+                  cancelSignalLossTimer(identity.id);
+                } else {
+                  scheduleSignalLossGrace(identity);
+                }
+
                 if (stateMachine.updateState(identity.id, detectionResult)) {
                   if (detectionResult.hasSignal) {
                     const newState: SpeakingState = detectionResult.isSpeaking ? 'speaking' : 'silent';
@@ -817,6 +982,11 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                     debouncer.debounce(identity.id, () => {
                       emitEvent(newState, identity);
                     });
+                  } else {
+                    // Keep previous state during transient signal loss; grace timer decides cleanup.
+                    if (!speakingStates.has(identity.id)) {
+                      speakingStates.set(identity.id, 'unknown');
+                    }
                   }
                 }
               }
@@ -840,6 +1010,8 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
               function handleParticipantRemoved(identity: ParticipantIdentity) {
                 debouncer.cancel(identity.id);
+                cancelSignalLossTimer(identity.id);
+                stopSpeakingKeepalive(identity.id);
 
                 if (stateMachine.getState(identity.id) === 'speaking') {
                   emitEvent('silent', identity);
@@ -875,6 +1047,12 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
                 (window as any).logBot(`${emoji} [Unified] ${eventType}: ${identity.name} (ID: ${identity.id}) [signal-based]`);
                 sendTeamsSpeakerEvent(eventType, identity);
+
+                if (state === 'speaking') {
+                  startSpeakingKeepalive(identity);
+                } else {
+                  stopSpeakingKeepalive(identity.id);
+                }
               }
 
               function scanAndObserveAll() {
