@@ -1061,12 +1061,14 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
       });
     } catch {}
 
-    // Inject virtual camera init script for avatar display
-    try {
-      await context.addInitScript(getVirtualCameraInitScript());
-      log('[Bot] Virtual camera init script injected (Teams)');
-    } catch (e: any) {
-      log(`[Bot] Warning: addInitScript failed (Teams): ${e.message}`);
+    // Inject virtual camera init script only when voice agent is enabled
+    if (botConfig.voiceAgentEnabled) {
+      try {
+        await context.addInitScript(getVirtualCameraInitScript());
+        log('[Bot] Virtual camera init script injected (Teams)');
+      } catch (e: any) {
+        log(`[Bot] Warning: addInitScript failed (Teams): ${e.message}`);
+      }
     }
 
     page = await context.newPage();
@@ -1095,12 +1097,13 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
 
     // Inject virtual camera RTCPeerConnection patch BEFORE page loads
     // so Google Meet gets our canvas stream from the start.
-    // Always inject — the avatar should show regardless of voice agent state.
-    try {
-      await context.addInitScript(getVirtualCameraInitScript());
-      log('[Bot] Virtual camera init script injected');
-    } catch (e: any) {
-      log(`[Bot] Warning: addInitScript failed: ${e.message}`);
+    if (botConfig.voiceAgentEnabled) {
+      try {
+        await context.addInitScript(getVirtualCameraInitScript());
+        log('[Bot] Virtual camera init script injected');
+      } catch (e: any) {
+        log(`[Bot] Warning: addInitScript failed: ${e.message}`);
+      }
     }
 
     page = await context.newPage();

@@ -1,25 +1,97 @@
 diff --git a/services/vexa-bot/core/src/index.ts b/services/vexa-bot/core/src/index.ts
-index b7bf31d..3248911 100644
+index 3248911..5f07a7f 100644
 --- a/services/vexa-bot/core/src/index.ts
 +++ b/services/vexa-bot/core/src/index.ts
-@@ -1153,11 +1153,15 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
-     Object.defineProperty(window, "outerHeight", { get: () => 1080 });
-   });
+@@ -1061,12 +1061,14 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
+       });
+     } catch {}
  
--  // Always initialize virtual camera and avatar display
--  try {
--    await initVirtualCamera(botConfig, page);
--  } catch (err: any) {
--    log(`[Bot] Virtual camera initialization failed (non-fatal): ${err.message}`);
-+  // Initialize virtual camera and avatar display only when voice agent is enabled
-+  if (botConfig.voiceAgentEnabled) {
+-    // Inject virtual camera init script for avatar display
+-    try {
+-      await context.addInitScript(getVirtualCameraInitScript());
+-      log('[Bot] Virtual camera init script injected (Teams)');
+-    } catch (e: any) {
+-      log(`[Bot] Warning: addInitScript failed (Teams): ${e.message}`);
++    // Inject virtual camera init script only when voice agent is enabled
++    if (botConfig.voiceAgentEnabled) {
++      try {
++        await context.addInitScript(getVirtualCameraInitScript());
++        log('[Bot] Virtual camera init script injected (Teams)');
++      } catch (e: any) {
++        log(`[Bot] Warning: addInitScript failed (Teams): ${e.message}`);
++      }
+     }
+ 
+     page = await context.newPage();
+@@ -1095,12 +1097,13 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
+ 
+     // Inject virtual camera RTCPeerConnection patch BEFORE page loads
+     // so Google Meet gets our canvas stream from the start.
+-    // Always inject — the avatar should show regardless of voice agent state.
+-    try {
+-      await context.addInitScript(getVirtualCameraInitScript());
+-      log('[Bot] Virtual camera init script injected');
+-    } catch (e: any) {
+-      log(`[Bot] Warning: addInitScript failed: ${e.message}`);
++    if (botConfig.voiceAgentEnabled) {
++      try {
++        await context.addInitScript(getVirtualCameraInitScript());
++        log('[Bot] Virtual camera init script injected');
++      } catch (e: any) {
++        log(`[Bot] Warning: addInitScript failed: ${e.message}`);
++      }
+     }
+ 
+     page = await context.newPage();
+diff --git a/services/vexa-bot/core/src/platforms/msteams/join.ts b/services/vexa-bot/core/src/platforms/msteams/join.ts
+index 70d2cbe..d4600e9 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/join.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/join.ts
+@@ -355,15 +355,42 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
+       log("ℹ️ Could not enable camera for voice agent");
+     }
+   } else {
+-    // Normal bot mode — turn camera off to be unobtrusive
++    // Normal bot mode — turn camera and mic off to be unobtrusive
+     try {
+-      const cameraButton = page.locator(teamsCameraButtonSelectors[0]);
+-      await cameraButton.waitFor({ timeout: 5000 });
+-      await cameraButton.click();
+-      log("✅ Camera turned off");
++      const turnOffSelectors = teamsCameraButtonSelectors
++        .filter(s => s.includes("Turn off") || s.includes("Turn camera off") || s.includes("Turn video off"));
++      const turnOffBtn = page.locator(turnOffSelectors.join(", ")).first();
++      const isVisible = await turnOffBtn.isVisible().catch(() => false);
++      if (isVisible) {
++        await turnOffBtn.click();
++        log("✅ Camera turned off");
++      } else {
++        await page.keyboard.press("Control+Shift+O").catch(() => {});
++        log("ℹ️ Camera off button not visible — toggled via keyboard shortcut");
++      }
+     } catch (error) {
+       log("ℹ️ Camera button not found or already off");
+     }
++
++    // Turn microphone off
 +    try {
-+      await initVirtualCamera(botConfig, page);
-+    } catch (err: any) {
-+      log(`[Bot] Virtual camera initialization failed (non-fatal): ${err.message}`);
++      const micOffBtn = page.locator([
++        'button[aria-label="Turn off microphone"]',
++        'button[aria-label="Turn microphone off"]',
++        'button[aria-label="Mute microphone"]',
++        'button[aria-label="Mute"]',
++      ].join(", ")).first();
++      const micOffVisible = await micOffBtn.isVisible().catch(() => false);
++      if (micOffVisible) {
++        await micOffBtn.click();
++        log("✅ Microphone turned off");
++      } else {
++        await page.keyboard.press("Control+Shift+M").catch(() => {});
++        log("ℹ️ Mic off button not visible — toggled via keyboard shortcut");
++      }
++    } catch (error) {
++      log("ℹ️ Microphone button not found or already off");
 +    }
-+  } else {
-+    log("[Bot] Voice agent disabled — skipping virtual camera initialization");
    }
  
-   // Always initialize chat service so chat read/write works for every bot
+   log("Step 4: Trying to set display name...");

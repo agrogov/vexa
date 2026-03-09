@@ -355,14 +355,41 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
       log("ℹ️ Could not enable camera for voice agent");
     }
   } else {
-    // Normal bot mode — turn camera off to be unobtrusive
+    // Normal bot mode — turn camera and mic off to be unobtrusive
     try {
-      const cameraButton = page.locator(teamsCameraButtonSelectors[0]);
-      await cameraButton.waitFor({ timeout: 5000 });
-      await cameraButton.click();
-      log("✅ Camera turned off");
+      const turnOffSelectors = teamsCameraButtonSelectors
+        .filter(s => s.includes("Turn off") || s.includes("Turn camera off") || s.includes("Turn video off"));
+      const turnOffBtn = page.locator(turnOffSelectors.join(", ")).first();
+      const isVisible = await turnOffBtn.isVisible().catch(() => false);
+      if (isVisible) {
+        await turnOffBtn.click();
+        log("✅ Camera turned off");
+      } else {
+        await page.keyboard.press("Control+Shift+O").catch(() => {});
+        log("ℹ️ Camera off button not visible — toggled via keyboard shortcut");
+      }
     } catch (error) {
       log("ℹ️ Camera button not found or already off");
+    }
+
+    // Turn microphone off
+    try {
+      const micOffBtn = page.locator([
+        'button[aria-label="Turn off microphone"]',
+        'button[aria-label="Turn microphone off"]',
+        'button[aria-label="Mute microphone"]',
+        'button[aria-label="Mute"]',
+      ].join(", ")).first();
+      const micOffVisible = await micOffBtn.isVisible().catch(() => false);
+      if (micOffVisible) {
+        await micOffBtn.click();
+        log("✅ Microphone turned off");
+      } else {
+        await page.keyboard.press("Control+Shift+M").catch(() => {});
+        log("ℹ️ Mic off button not visible — toggled via keyboard shortcut");
+      }
+    } catch (error) {
+      log("ℹ️ Microphone button not found or already off");
     }
   }
 
