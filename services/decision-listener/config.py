@@ -17,7 +17,7 @@ OFFSET_SEGMENTS = int(os.environ.get("OFFSET_SEGMENTS", "1"))    # skip last N (
 DEBOUNCE_MS = int(os.environ.get("DEBOUNCE_MS", "800"))
 
 # LLM
-LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-5-mini")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4.1-mini")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", None)        # None = default OpenAI
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 

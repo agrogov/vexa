@@ -1,60 +1,26 @@
+diff --git a/services/decision-listener/config.py b/services/decision-listener/config.py
+index be5366b..c7bdf50 100644
+--- a/services/decision-listener/config.py
++++ b/services/decision-listener/config.py
+@@ -17,7 +17,7 @@ OFFSET_SEGMENTS = int(os.environ.get("OFFSET_SEGMENTS", "1"))    # skip last N (
+ DEBOUNCE_MS = int(os.environ.get("DEBOUNCE_MS", "800"))
+ 
+ # LLM
+-LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-5-mini")
++LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4.1-mini")
+ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", None)        # None = default OpenAI
+ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+ 
 diff --git a/services/decision-listener/enrichment.py b/services/decision-listener/enrichment.py
-index f8ba6ce..5c75ffa 100644
+index 5c75ffa..3f37787 100644
 --- a/services/decision-listener/enrichment.py
 +++ b/services/decision-listener/enrichment.py
-@@ -94,6 +94,7 @@ async def _web_search(query: str) -> str:
-                 },
-                 {"role": "user", "content": query},
-             ],
-+            temperature=0.2,
-             max_completion_tokens=512,
-         )
-         return response.choices[0].message.content.strip()
-@@ -175,6 +176,7 @@ async def _enrich_entity(
-                     },
-                 ],
-                 response_format={"type": "json_object"},
-+                temperature=0.1,
-                 max_completion_tokens=512,
-             )
-             synthesis = json.loads(response.choices[0].message.content)
-diff --git a/services/decision-listener/llm.py b/services/decision-listener/llm.py
-index 37ef866..35abc54 100644
---- a/services/decision-listener/llm.py
-+++ b/services/decision-listener/llm.py
-@@ -69,6 +69,7 @@ async def analyze_window(segments: List[dict]) -> Optional[dict]:
-             ],
-             tools=[tool_schema],
-             tool_choice={"type": "function", "function": {"name": "capture_meeting_item"}},
-+            temperature=0.1,
-             max_completion_tokens=256,
-         )
- 
-@@ -131,6 +132,7 @@ async def is_duplicate_llm(new_summary: str, existing_summaries: List[str]) -> b
-                 {"role": "system", "content": system},
-                 {"role": "user", "content": user},
-             ],
-+            temperature=0,
-             max_completion_tokens=5,
-         )
-         answer = response.choices[0].message.content.strip().upper()
-diff --git a/services/decision-listener/narrative.py b/services/decision-listener/narrative.py
-index f36a208..eaf617c 100644
---- a/services/decision-listener/narrative.py
-+++ b/services/decision-listener/narrative.py
-@@ -139,6 +139,7 @@ async def generate_summary(
-                 {"role": "user", "content": user_message},
-             ],
-             response_format={"type": "json_object"},
-+            temperature=0.2,
-             max_completion_tokens=256,
-         )
- 
-@@ -206,6 +207,7 @@ async def generate_narrative(
-                 {"role": "user", "content": user_message},
-             ],
-             response_format={"type": "json_object"},
-+            temperature=0.3,
-             max_completion_tokens=4096,
-         )
- 
+@@ -82,7 +82,7 @@ async def _web_search(query: str) -> str:
+     try:
+         client = _get_client()
+         response = await client.chat.completions.create(
+-            model="gpt-5-mini",
++            model=LLM_MODEL,
+             messages=[
+                 {
+                     "role": "system",
