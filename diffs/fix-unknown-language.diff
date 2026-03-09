@@ -1,0 +1,22 @@
+diff --git a/services/transcription-service/main.py b/services/transcription-service/main.py
+index 2ab430a..dd87611 100644
+--- a/services/transcription-service/main.py
++++ b/services/transcription-service/main.py
+@@ -201,7 +201,7 @@ async def _transcribe_via_azure(
+         except Exception:
+             duration = 0.0
+         text = result.get("text", "")
+-        language = result.get("language") or (language or "unknown")
++        language = result.get("language") or language
+         temperature_val = float(temperature) if temperature else 0.0
+         result = {
+             "text": text,
+@@ -605,7 +605,7 @@ async def transcribe_audio(
+             segments = last_segments
+             full_text = " ".join([s["text"].strip() for s in segments]).strip()
+             duration = segments[-1]["end"] if segments else 0.0
+-            best = (full_text, info.language if info else (language or "unknown"), duration, segments)
++            best = (full_text, info.language if info else language, duration, segments)
+ 
+         full_text, detected_language, duration, segments = best
+         logger.info(f"Worker {WORKER_ID} transcription completed - language: {detected_language}")

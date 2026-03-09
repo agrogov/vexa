@@ -20,10 +20,6 @@ export type BotConfig = {
   reconnectionIntervalMs?: number,
   meeting_id: number,  // Required, not optional
   botManagerCallbackUrl?: string;
-  teamsSpeaker?: {
-    signalLossGraceMs?: number;
-    speakingKeepaliveMs?: number;
-  };
   recordingEnabled?: boolean;
   captureModes?: string[];  // e.g., ['audio'], ['audio', 'video'], ['audio', 'screenshots']
   recordingUploadUrl?: string;  // bot-manager internal upload endpoint
@@ -31,4 +27,8 @@ export type BotConfig = {
   // Voice agent / meeting interaction interface
   voiceAgentEnabled?: boolean;  // Enable TTS, chat, screen share capabilities
   defaultAvatarUrl?: string;   // Custom default avatar image URL for virtual camera
+  teamsSpeaker?: {
+    signalLossGraceMs?: number;
+    speakingKeepaliveMs?: number;
+  };
 }

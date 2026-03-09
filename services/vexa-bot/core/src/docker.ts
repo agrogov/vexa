@@ -24,16 +24,16 @@ export const BotConfigSchema = z.object({
   reconnectionIntervalMs: z.number().int().optional(), // ADDED: Optional reconnection interval
   meeting_id: z.number().int().optional(), // Allow optional internal ID
   botManagerCallbackUrl: z.string().url().optional(), // ADDED: Optional callback URL
-  teamsSpeaker: z.object({
-    signalLossGraceMs: z.number().int().positive().optional(),
-    speakingKeepaliveMs: z.number().int().positive().optional(),
-  }).optional(),
   recordingEnabled: z.boolean().optional(),
   captureModes: z.array(z.string()).optional(),
   recordingUploadUrl: z.string().url().optional(),
   // Voice agent / meeting interaction interface
   voiceAgentEnabled: z.boolean().optional(),
   defaultAvatarUrl: z.string().url().optional(),
+  teamsSpeaker: z.object({
+    signalLossGraceMs: z.number().int().positive().optional(),
+    speakingKeepaliveMs: z.number().int().positive().optional(),
+  }).optional()
 });
 
 

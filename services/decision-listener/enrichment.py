@@ -94,8 +94,7 @@ async def _web_search(query: str) -> str:
                 },
                 {"role": "user", "content": query},
             ],
-            temperature=0.2,
-            max_tokens=512,
+            max_completion_tokens=512,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -176,8 +175,7 @@ async def _enrich_entity(
                     },
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=512,
+                max_completion_tokens=512,
             )
             synthesis = json.loads(response.choices[0].message.content)
         except Exception as e:

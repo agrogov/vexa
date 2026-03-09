@@ -139,8 +139,7 @@ async def generate_summary(
                 {"role": "user", "content": user_message},
             ],
             response_format={"type": "json_object"},
-            temperature=0.2,
-            max_tokens=256,
+            max_completion_tokens=256,
         )
 
         content = response.choices[0].message.content
@@ -207,8 +206,7 @@ async def generate_narrative(
                 {"role": "user", "content": user_message},
             ],
             response_format={"type": "json_object"},
-            temperature=0.3,
-            max_tokens=4096,
+            max_completion_tokens=4096,
         )
 
         content = response.choices[0].message.content

@@ -69,8 +69,7 @@ async def analyze_window(segments: List[dict]) -> Optional[dict]:
             ],
             tools=[tool_schema],
             tool_choice={"type": "function", "function": {"name": "capture_meeting_item"}},
-            temperature=0.1,
-            max_tokens=256,
+            max_completion_tokens=256,
         )
 
         msg = response.choices[0].message
@@ -132,8 +131,7 @@ async def is_duplicate_llm(new_summary: str, existing_summaries: List[str]) -> b
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            temperature=0,
-            max_tokens=5,
+            max_completion_tokens=5,
         )
         answer = response.choices[0].message.content.strip().upper()
         logger.debug(f"Dedup LLM answer: {answer!r} for: {new_summary[:60]}")
