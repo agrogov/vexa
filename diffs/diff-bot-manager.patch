@@ -1,0 +1,482 @@
+diff --git a/services/bot-manager/app/main.py b/services/bot-manager/app/main.py
+index 2a499a6..19442dc 100644
+--- a/services/bot-manager/app/main.py
++++ b/services/bot-manager/app/main.py
+@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
+ import logging
+ import os
+ import base64
++import inspect
+ from typing import Optional, List, Dict, Any
+ import redis.asyncio as aioredis
+ import asyncio
+@@ -420,6 +421,37 @@ async def _delayed_container_stop(container_id: str, meeting_id: int, delay_seco
+         logger.error(f"[Delayed Stop] Error during safety finalizer for meeting {meeting_id}: {e}", exc_info=True)
+ # --- ------------------------ ---
+ 
++async def _is_container_running(container_id: str) -> bool:
++    """Normalize sync/async orchestrator checks for container status."""
++    try:
++        result = verify_container_running(container_id)
++        if inspect.isawaitable(result):
++            return await result
++        return bool(result)
++    except Exception as e:
++        logger.error(f"[Stop Bot] Failed to verify container {container_id}: {e}", exc_info=True)
++        return False
++
++async def _get_running_bots_status_safe(user_id: int) -> List[Dict[str, Any]]:
++    """Normalize sync/async orchestrator status listing."""
++    try:
++        result = get_running_bots_status(user_id)
++        if inspect.isawaitable(result):
++            return await result
++        return list(result)
++    except Exception as e:
++        logger.error(f"[Bot Status] Failed to get running bots for user {user_id}: {e}", exc_info=True)
++        return []
++
++async def _record_session_start_safe(meeting_id: int, connection_id: str) -> None:
++    """Run session start hook if provided and awaitable."""
++    try:
++        result = _record_session_start(meeting_id, connection_id)
++        if inspect.isawaitable(result):
++            await result
++    except Exception as e:
++        logger.error(f"[Session Start] Failed to record session start for meeting {meeting_id}: {e}", exc_info=True)
++
+ @app.get("/", include_in_schema=False)
+ async def root():
+     return {"message": "Vexa Bot Manager is running"}
+@@ -627,7 +659,7 @@ async def request_bot(
+                 detail={"status": "error", "message": error_msg, "meeting_id": meeting_id}
+             )
+ 
+-        asyncio.create_task(_record_session_start(meeting_id, connection_id))
++        asyncio.create_task(_record_session_start_safe(meeting_id, connection_id))
+         logger.info(f"Scheduled background task to record session start for meeting {meeting_id}, session {connection_id}")
+ 
+         # REMOVED: Status update to 'active' - now handled by bot startup callback
+@@ -804,15 +836,31 @@ async def stop_bot(
+         logger.warning(f"Stop request: No meeting found for {platform_value}/{native_meeting_id} for user {current_user.id}")
+         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No meeting found to stop.")
+ 
++    terminal_states = [MeetingStatus.COMPLETED.value, MeetingStatus.FAILED.value]
++    terminal_meetings = [m for m in all_meetings if m.status in terminal_states]
++
++    # If terminal meetings still have running containers, attempt to stop them.
++    running_terminal_meetings: List[Meeting] = []
++    for meeting in terminal_meetings:
++        if not meeting.bot_container_id:
++            continue
++        if await _is_container_running(meeting.bot_container_id):
++            logger.info(f"Stop request: Meeting {meeting.id} is terminal ('{meeting.status}') but container {meeting.bot_container_id} is still running. Stopping it.")
++            background_tasks.add_task(_delayed_container_stop, meeting.bot_container_id, meeting.id, 0)
++            running_terminal_meetings.append(meeting)
++
+     # Filter to non-terminal meetings
+     non_terminal_meetings = [
+         m for m in all_meetings 
+-        if m.status not in [MeetingStatus.COMPLETED.value, MeetingStatus.FAILED.value]
++        if m.status not in terminal_states
+     ]
+ 
+     # If all meetings are terminal, return idempotent response
+     if not non_terminal_meetings:
+         meeting = all_meetings[0]
++        if running_terminal_meetings:
++            logger.info(f"Stop request: {len(running_terminal_meetings)} terminal meeting(s) had running containers. Stop scheduled.")
++            return {"message": "Stop requested for running bots in terminal meetings."}
+         logger.info(f"Stop request: Meeting {meeting.id} already in terminal state '{meeting.status}'. Returning 202 idempotently.")
+         return {"message": f"Meeting already {meeting.status}."}
+ 
+@@ -921,7 +969,7 @@ async def get_user_bots_status(
+     
+     try:
+         # Call the function from orchestrator_utils - ADD AWAIT HERE
+-        running_bots_list = await get_running_bots_status(user_id)
++        running_bots_list = await _get_running_bots_status_safe(user_id)
+         # Wrap the list in the response model
+         return BotStatusResponse(running_bots=running_bots_list)
+     except Exception as e:
+@@ -1542,7 +1590,7 @@ async def reconcile_meetings_and_containers():
+                 
+                 # Check if container/process actually exists and is running
+                 try:
+-                    container_exists = await verify_container_running(meeting.bot_container_id)
++                    container_exists = await _is_container_running(meeting.bot_container_id)
+                 except Exception as e:
+                     # Error during verification - log but don't mark as zombie
+                     # This could happen if orchestrator is unavailable or misconfigured
+@@ -1562,7 +1610,7 @@ async def reconcile_meetings_and_containers():
+                         # For container names, be more conservative - check if any processes are running
+                         # If registry is empty but meeting is active, might be a timing issue
+                         try:
+-                            all_running = await get_running_bots_status(meeting.user_id)
++                            all_running = await _get_running_bots_status_safe(meeting.user_id)
+                             if len(all_running) > 0:
+                                 logger.warning(
+                                     f"[Reconciliation] Meeting {meeting.id} has container name '{meeting.bot_container_id}' "
+@@ -1629,7 +1677,7 @@ async def reconcile_meetings_and_containers():
+                 # For each user, get their running bots
+                 for user_id in user_ids:
+                     try:
+-                        user_bots = await get_running_bots_status(user_id)
++                        user_bots = await _get_running_bots_status_safe(user_id)
+                         all_running_bots.extend(user_bots)
+                     except Exception as e:
+                         logger.error(f"[Reconciliation] Error getting running bots for user {user_id}: {e}", exc_info=True)
+@@ -1700,4 +1748,4 @@ if __name__ == "__main__":
+         host="0.0.0.0",
+         port=8080, # Default port for bot-manager
+         reload=True # Enable reload for development if needed
+-    ) 
+\ No newline at end of file
++    ) 
+diff --git a/services/bot-manager/app/orchestrators/__init__.py b/services/bot-manager/app/orchestrators/__init__.py
+index f89f95f..6590977 100644
+--- a/services/bot-manager/app/orchestrators/__init__.py
++++ b/services/bot-manager/app/orchestrators/__init__.py
+@@ -7,6 +7,7 @@ Supported orchestrators:
+ - docker (default): Uses Docker socket to spawn bot containers
+ - nomad: Uses HashiCorp Nomad to dispatch parameterized jobs
+ - process: Spawns bots as local Node.js processes (for Lite deployments)
++- kubernetes: Spawns bots as Pods via the Kubernetes API
+ """
+ import os
+ import importlib
+@@ -21,6 +22,8 @@ if _orchestrator == "nomad":
+     module_name = "app.orchestrators.nomad"
+ elif _orchestrator == "process":
+     module_name = "app.orchestrators.process"
++elif _orchestrator == "kubernetes":
++    module_name = "app.orchestrators.kubernetes"
+ else:
+     # Default to Docker orchestrator
+     module_name = "app.orchestrators.docker"
+@@ -37,4 +40,4 @@ start_bot_container = mod.start_bot_container  # type: ignore
+ stop_bot_container = getattr(mod, "stop_bot_container", lambda *args, **kwargs: None)
+ _record_session_start = getattr(mod, "_record_session_start", lambda *args, **kwargs: None)
+ get_running_bots_status = getattr(mod, "get_running_bots_status", lambda *args, **kwargs: {})
+-verify_container_running = getattr(mod, "verify_container_running", lambda *args, **kwargs: False) 
+\ No newline at end of file
++verify_container_running = getattr(mod, "verify_container_running", lambda *args, **kwargs: False) 
+diff --git a/services/bot-manager/app/orchestrators/kubernetes.py b/services/bot-manager/app/orchestrators/kubernetes.py
+new file mode 100644
+index 0000000..63ca21b
+--- /dev/null
++++ b/services/bot-manager/app/orchestrators/kubernetes.py
+@@ -0,0 +1,301 @@
++# services/bot-manager/app/orchestrators/kubernetes.py
++
++import asyncio
++import base64
++import hmac
++import json
++import os
++import uuid
++from datetime import datetime
++from typing import Any, Dict, List, Optional, Tuple
++
++from kubernetes import client, config
++from kubernetes.client import ApiException
++
++def _b64url_encode(data: bytes) -> str:
++    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
++
++
++def _mint_meeting_token(
++    meeting_id: int,
++    user_id: int,
++    platform: str,
++    native_meeting_id: str,
++    ttl_seconds: int = 3600,
++) -> str:
++    secret = os.environ.get("ADMIN_TOKEN")
++    if not secret:
++        raise RuntimeError("ADMIN_TOKEN not configured; cannot mint MeetingToken")
++
++    now = int(datetime.utcnow().timestamp())
++    header = {"alg": "HS256", "typ": "JWT"}
++    payload = {
++        "meeting_id": meeting_id,
++        "user_id": user_id,
++        "platform": platform,
++        "native_meeting_id": native_meeting_id,
++        "scope": "transcribe:write",
++        "iss": "bot-manager",
++        "aud": "transcription-collector",
++        "iat": now,
++        "exp": now + ttl_seconds,
++        "jti": str(uuid.uuid4()),
++    }
++
++    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
++    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
++    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
++    signature = hmac.new(secret.encode("utf-8"), signing_input, digestmod="sha256").digest()
++    signature_b64 = _b64url_encode(signature)
++    return f"{header_b64}.{payload_b64}.{signature_b64}"
++
++
++_core_v1: Optional[client.CoreV1Api] = None
++
++
++def _get_core_v1() -> client.CoreV1Api:
++    global _core_v1
++    if _core_v1 is None:
++        config.load_incluster_config()
++        _core_v1 = client.CoreV1Api()
++    return _core_v1
++
++
++def _namespace() -> str:
++    # Prefer explicit BOT_NAMESPACE; fall back to the Pod namespace; then default.
++    return (
++            os.environ.get("BOT_NAMESPACE")
++            or os.environ.get("POD_NAMESPACE")
++            or "default"
++    )
++
++
++def _bot_image() -> str:
++    return os.environ.get("BOT_IMAGE_NAME", "vexa-bot:dev")
++
++
++def _bot_sa_name() -> Optional[str]:
++    # Optional: attach a ServiceAccount to bot pods (usually not required).
++    v = os.environ.get("BOT_SERVICE_ACCOUNT_NAME", "").strip()
++    return v or None
++
++
++def _bot_resources() -> Optional[client.V1ResourceRequirements]:
++    cpu_request = os.environ.get("BOT_POD_CPU_REQUEST", "500m").strip()
++    cpu_limit = os.environ.get("BOT_POD_CPU_LIMIT", "2000m").strip()
++    mem_request = os.environ.get("BOT_POD_MEMORY_REQUEST", "512Mi").strip()
++    mem_limit = os.environ.get("BOT_POD_MEMORY_LIMIT", "4Gi").strip()
++
++    return client.V1ResourceRequirements(
++        requests={"cpu": cpu_request, "memory": mem_request},
++        limits={"cpu": cpu_limit, "memory": mem_limit},
++    )
++
++
++def _bot_manager_callback_url() -> Optional[str]:
++    # Optional in BotConfig, but useful for lifecycle callbacks.
++    # In k8s: point to bot-manager service DNS.
++    return os.environ.get("BOT_MANAGER_CALLBACK_URL")  # e.g. http://vexa-bot-manager:8080/bots/internal/callback/exited
++
++
++def _default_automatic_leave() -> Dict[str, int]:
++    # Defaults documented for bot automatic leave timeouts (ms)
++    return {
++        "waitingRoomTimeout": int(os.environ.get("BOT_WAITING_ROOM_TIMEOUT_MS", "300000")),
++        "noOneJoinedTimeout": int(os.environ.get("BOT_NO_ONE_JOINED_TIMEOUT_MS", "120000")),
++        "everyoneLeftTimeout": int(os.environ.get("BOT_EVERYONE_LEFT_TIMEOUT_MS", "60000")),
++    }
++
++def _teams_speaker_tuning() -> Dict[str, int]:
++    return {
++        "signalLossGraceMs": int(os.environ.get("TEAMS_SIGNAL_LOSS_GRACE_MS", "2000")),
++        "speakingKeepaliveMs": int(os.environ.get("TEAMS_SPEAKING_KEEPALIVE_MS", "8000")),
++    }
++
++
++def _build_bot_pod(
++    user_id: int,
++    meeting_id: int,
++    meeting_url: str,
++    platform: str,
++    bot_name: str,
++    user_token: str,
++    native_meeting_id: str,
++    language: Optional[str],
++    task: Optional[str],
++) -> Tuple[str, str]:
++    connection_id = str(uuid.uuid4())
++    pod_name = f"vexa-bot-{meeting_id}-{connection_id[:8]}"
++
++    redis_url = os.environ.get("REDIS_URL")
++    whisper_url = os.environ.get("WHISPER_LIVE_URL")
++    if not redis_url:
++        raise RuntimeError("REDIS_URL is required in bot-manager env")
++    if not whisper_url:
++        raise RuntimeError("WHISPER_LIVE_URL is required in bot-manager env")
++
++    meeting_token = _mint_meeting_token(
++        meeting_id=meeting_id,
++        user_id=user_id,
++        platform=platform,
++        native_meeting_id=native_meeting_id,
++    )
++
++    bot_config: Dict[str, Any] = {
++        "platform": platform,
++        "meetingUrl": meeting_url,
++        "botName": bot_name,
++        "token": meeting_token,
++        "connectionId": connection_id,
++        "nativeMeetingId": native_meeting_id,
++        "meeting_id": meeting_id,
++        "redisUrl": redis_url,
++        "language": language,
++        "task": task,
++        "container_name": pod_name,
++        "automaticLeave": _default_automatic_leave(),
++        "teamsSpeaker": _teams_speaker_tuning(),
++    }
++
++    cb = _bot_manager_callback_url()
++    if cb:
++        bot_config["botManagerCallbackUrl"] = cb
++
++    bot_env = [
++        client.V1EnvVar(name="BOT_CONFIG", value=json.dumps(bot_config)),
++        client.V1EnvVar(name="WHISPER_LIVE_URL", value=whisper_url),
++        client.V1EnvVar(name="LOG_LEVEL", value=os.environ.get("BOT_LOG_LEVEL", "INFO")),
++    ]
++
++    resources = _bot_resources()
++
++    container = client.V1Container(
++        name="bot",
++        image=_bot_image(),
++        image_pull_policy=os.environ.get("BOT_IMAGE_PULL_POLICY", "IfNotPresent"),
++        env=bot_env,
++        resources=resources,
++        volume_mounts=[client.V1VolumeMount(name="dshm", mount_path="/dev/shm")],
++    )
++
++    pod_spec = client.V1PodSpec(
++        restart_policy="Never",
++        termination_grace_period_seconds=10,
++        containers=[container],
++        volumes=[
++            client.V1Volume(
++                name="dshm",
++                empty_dir=client.V1EmptyDirVolumeSource(medium="Memory"),
++            )
++        ],
++    )
++
++    sa = _bot_sa_name()
++    if sa:
++        pod_spec.service_account_name = sa
++
++    pod = client.V1Pod(
++        api_version="v1",
++        kind="Pod",
++        metadata=client.V1ObjectMeta(
++            name=pod_name,
++            labels={
++                "app.kubernetes.io/name": "vexa",
++                "app.kubernetes.io/component": "vexa-bot",
++                "vexa.user_id": str(user_id),
++                "vexa.meeting_id": str(meeting_id),
++            },
++        ),
++        spec=pod_spec,
++    )
++
++    return pod, connection_id
++
++
++async def start_bot_container(
++    user_id: int,
++    meeting_id: int,
++    meeting_url: str,
++    platform: str,
++    bot_name: str,
++    user_token: str,
++    native_meeting_id: str,
++    language: Optional[str],
++    task: Optional[str],
++) -> Tuple[str, str]:
++    core = _get_core_v1()
++    pod, connection_id = _build_bot_pod(
++        user_id,
++        meeting_id,
++        meeting_url,
++        platform,
++        bot_name,
++        user_token,
++        native_meeting_id,
++        language,
++        task,
++    )
++    await asyncio.to_thread(core.create_namespaced_pod, namespace=_namespace(), body=pod)
++    return pod.metadata.name, connection_id
++
++
++def stop_bot_container(container_id: str) -> bool:
++    core = _get_core_v1()
++    grace_seconds = int(os.environ.get("BOT_POD_DELETE_GRACE_SECONDS", "0"))
++    propagation_policy = os.environ.get("BOT_POD_DELETE_PROPAGATION", "Background")
++    body = client.V1DeleteOptions(
++        grace_period_seconds=grace_seconds,
++        propagation_policy=propagation_policy,
++    )
++    try:
++        core.delete_namespaced_pod(name=container_id, namespace=_namespace(), body=body)
++        return True
++    except ApiException as exc:
++        if exc.status == 404:
++            return True
++        raise
++
++
++# Import shared session recorder so main.py can create MeetingSession records.
++from app.orchestrator_utils import _record_session_start  # noqa: E402
++
++
++def verify_container_running(container_id: str) -> bool:
++    core = _get_core_v1()
++    try:
++        pod = core.read_namespaced_pod(name=container_id, namespace=_namespace())
++    except ApiException as exc:
++        if exc.status == 404:
++            return False
++        raise
++    phase = pod.status.phase or ""
++    return phase in ("Pending", "Running")
++
++
++def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:
++    core = _get_core_v1()
++    label_selector = f"vexa.user_id={user_id},app.kubernetes.io/component=vexa-bot"
++    pods = core.list_namespaced_pod(namespace=_namespace(), label_selector=label_selector)
++    out: List[Dict[str, Any]] = []
++    for pod in pods.items:
++        out.append(
++            {
++                "container_id": pod.metadata.name,
++                "status": pod.status.phase,
++                "start_time": pod.status.start_time,
++                "labels": pod.metadata.labels or {},
++            }
++        )
++    return out
++
++
++# Optional no-op compatibility hooks (docker orchestrator has these)
++def get_socket_session():
++    return None
++
++
++def close_docker_client():
++    return None
++
++
++# Session recording hook (shared with other orchestrators)
+diff --git a/services/bot-manager/requirements.txt b/services/bot-manager/requirements.txt
+index 5b313d3..2193905 100644
+--- a/services/bot-manager/requirements.txt
++++ b/services/bot-manager/requirements.txt
+@@ -27,4 +27,5 @@ aiosqlite # If using sqlite async (often for testing)
+ requests
+ httpx
+ psycopg2-binary
+-aiodocker 
+\ No newline at end of file
++aiodocker 
++kubernetes==35.0.0

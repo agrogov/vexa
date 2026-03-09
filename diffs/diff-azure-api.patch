@@ -1,0 +1,237 @@
+diff --git a/services/transcription-service/main.py b/services/transcription-service/main.py
+index c6f9f79..4a4c3ef 100644
+--- a/services/transcription-service/main.py
++++ b/services/transcription-service/main.py
+@@ -8,6 +8,7 @@ import time
+ import logging
+ import asyncio
+ import json
++import httpx
+ from concurrent.futures import ThreadPoolExecutor
+ from datetime import datetime
+ from typing import Optional, List, Dict, Any, Tuple
+@@ -93,6 +94,16 @@ VAD_MIN_SILENCE_DURATION_MS = _env_int("VAD_MIN_SILENCE_DURATION_MS", 160)
+ USE_TEMPERATURE_FALLBACK = _env_bool("USE_TEMPERATURE_FALLBACK", False)
+ TEMPERATURE_FALLBACK_CHAIN = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+ 
++AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
++AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
++AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-03-01-preview").strip()
++REMOTE_ONLY = os.getenv("REMOTE_TRANSCRIBER_ONLY", "").strip().lower() in ("1", "true", "yes", "y", "on")
++
++def _remote_enabled() -> bool:
++    if REMOTE_ONLY:
++        return True
++    return bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY)
++
+ def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
+     """Heuristic: treat as silence if all segments look like no-speech."""
+     if not segments:
+@@ -105,6 +116,119 @@ def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
+             return False
+     return True
+ 
++# Azure OpenAI: gpt-4o-transcribe deployments
++def _use_azure_transcribe(model_name: str) -> bool:
++    name = (model_name or "").strip().lower()
++    return name.startswith("gpt-4o-") and "transcribe" in name
++
++async def _transcribe_via_azure(
++    model_name: str,
++    audio_bytes: bytes,
++    filename: str,
++    content_type: str,
++    language: Optional[str],
++    prompt: Optional[str],
++    response_format: str,
++    temperature: str,
++    timestamp_granularities: str,
++    task: str,
++) -> Dict[str, Any]:
++    if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_API_KEY:
++        raise HTTPException(
++            status_code=500,
++            detail="Azure OpenAI transcription requested but AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY not configured",
++        )
++
++    url = (
++        f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{model_name}/audio/transcriptions"
++        f"?api-version={AZURE_OPENAI_API_VERSION}"
++    )
++
++    files: List[tuple[str, Tuple[Optional[str], Any, Optional[str]]]] = [
++        (
++            "file",
++            (
++                filename or "audio",
++                audio_bytes,
++                content_type or "application/octet-stream",
++            ),
++        ),
++        ("model", (None, model_name, None)),
++        ("response_format", (None, response_format, None)),
++        ("task", (None, task, None)),
++    ]
++    if language:
++        files.append(("language", (None, language, None)))
++    if prompt:
++        files.append(("prompt", (None, prompt, None)))
++    if temperature:
++        files.append(("temperature", (None, temperature, None)))
++    if timestamp_granularities and response_format == "verbose_json":
++        # Azure expects array-like keys for timestamp granularities.
++        files.append(("timestamp_granularities[]", (None, timestamp_granularities, None)))
++
++    headers = {"api-key": AZURE_OPENAI_API_KEY}
++
++    def _post_sync() -> httpx.Response:
++        with httpx.Client(timeout=60.0) as client:
++            return client.post(url, files=files, headers=headers)
++
++    resp = await asyncio.to_thread(_post_sync)
++    if resp.status_code != 200:
++        logger.error(
++            "Azure OpenAI transcription failed: status=%s body=%s",
++            resp.status_code,
++            resp.text,
++        )
++        raise HTTPException(
++            status_code=resp.status_code,
++            detail=f"Azure OpenAI transcription failed: {resp.text}",
++        )
++    result = resp.json()
++
++    # Azure "json" response does not include segments; synthesize a single segment so
++    # downstream consumers (WhisperLive/collector/UI) can display live text.
++    if (
++        isinstance(result, dict)
++        and "segments" not in result
++        and "text" in result
++        and str(result.get("text", "")).strip()
++    ):
++        duration = 0.0
++        try:
++            audio_array, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype=np.float32)
++            duration = float(audio_array.shape[0]) / float(sample_rate or 1)
++        except Exception:
++            duration = 0.0
++        text = result.get("text", "")
++        language = result.get("language") or (language or "unknown")
++        temperature_val = float(temperature) if temperature else 0.0
++        result = {
++            "text": text,
++            "language": language,
++            "duration": duration,
++            "segments": [
++                {
++                    "id": 0,
++                    "seek": 0,
++                    "start": 0.0,
++                    "end": duration,
++                    "text": text,
++                    "tokens": [],
++                    "temperature": temperature_val,
++                    "avg_logprob": 0.0,
++                    "compression_ratio": 0.0,
++                    "no_speech_prob": 0.0,
++                    "audio_start": 0.0,
++                    "audio_end": duration,
++                    "completed": True,
++                    "language": language,
++                }
++            ],
++        }
++
++    return result
++
+ def _looks_like_hallucination(segments: List[Dict[str, Any]]) -> bool:
+     """Heuristic: reject segments that look like hallucinations / low-confidence."""
+     for s in segments:
+@@ -200,18 +324,23 @@ async def startup_event():
+     """Initialize Whisper model on startup"""
+     global model
+     logger.info(f"Worker {WORKER_ID} starting up...")
+-    logger.info(f"Device: {DEVICE}, Model: {MODEL_SIZE}, Compute: {COMPUTE_TYPE}")
+-    logger.info(
+-        "Quality params - "
+-        f"beam_size={BEAM_SIZE}, best_of={BEST_OF}, "
+-        f"cond_prev_text={CONDITION_ON_PREVIOUS_TEXT}, "
+-        f"compression_ratio_threshold={COMPRESSION_RATIO_THRESHOLD}, "
+-        f"log_prob_threshold={LOG_PROB_THRESHOLD}, "
+-        f"no_speech_threshold={NO_SPEECH_THRESHOLD}, "
+-        f"vad_filter={VAD_FILTER}"
+-    )
+-    
++
++    if _remote_enabled():
++        logger.info("Remote transcriber enabled; skipping local model load.")
++        return
++
+     try:
++        logger.info(f"Device: {DEVICE}, Model: {MODEL_SIZE}, Compute: {COMPUTE_TYPE}")
++        logger.info(
++            "Quality params - "
++            f"beam_size={BEAM_SIZE}, best_of={BEST_OF}, "
++            f"cond_prev_text={CONDITION_ON_PREVIOUS_TEXT}, "
++            f"compression_ratio_threshold={COMPRESSION_RATIO_THRESHOLD}, "
++            f"log_prob_threshold={LOG_PROB_THRESHOLD}, "
++            f"no_speech_threshold={NO_SPEECH_THRESHOLD}, "
++            f"vad_filter={VAD_FILTER}"
++        )
++
+         # Build model initialization parameters
+         model_kwargs = {
+             "model_size_or_path": MODEL_SIZE,
+@@ -235,20 +364,22 @@ async def startup_event():
+ @app.get("/health")
+ async def health_check():
+     """Health check endpoint for load balancer"""
++    remote_enabled = _remote_enabled()
+     health_status = {
+-        "status": "healthy" if model is not None else "unhealthy",
++        "status": "healthy" if (model is not None or remote_enabled) else "unhealthy",
+         "worker_id": WORKER_ID,
+         "timestamp": datetime.utcnow().isoformat(),
+         "model": MODEL_SIZE,
+         "device": DEVICE,
+         "gpu_available": DEVICE == "cuda",
++        "remote_enabled": remote_enabled,
+     }
+     
+     if DEVICE == "cuda":
+         # CTranslate2 (via faster-whisper) handles GPU automatically
+         health_status["compute_type"] = COMPUTE_TYPE
+     
+-    if model is None:
++    if model is None and not remote_enabled:
+         return JSONResponse(content=health_status, status_code=503)
+     
+     return health_status
+@@ -350,6 +481,27 @@ async def transcribe_audio(
+         # Read audio file
+         audio_bytes = await file.read()
+         logger.info(f"Worker {WORKER_ID} read {len(audio_bytes)} bytes of audio data")
++
++        if _use_azure_transcribe(requested_model):
++            # Azure gpt-4o-*-transcribe does not support verbose_json; force json and drop timestamps.
++            azure_response_format = "json"
++            return await _transcribe_via_azure(
++                requested_model,
++                audio_bytes,
++                file.filename or "audio",
++                file.content_type or "application/octet-stream",
++                language,
++                prompt,
++                azure_response_format,
++                temperature,
++                "",
++                task,
++            )
++        if model is None:
++            raise HTTPException(
++                status_code=503,
++                detail="Local model not available and requested model is not remote-capable.",
++            )
+         
+         # Convert to format suitable for faster-whisper
+         # Use soundfile to properly decode audio formats (WAV, MP3, etc.)
