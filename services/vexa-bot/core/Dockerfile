@@ -1,6 +1,12 @@
 # --- Build Stage ---
 FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS base
 
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 # Install required OS dependencies (e.g., for Xvfb and other utilities)
 RUN apt-get update && apt-get install -y \
     xvfb \
@@ -38,6 +44,12 @@ RUN arch=$(uname -m) && if [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ]; then
 
 # --- Runtime Stage ---
 FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS runtime
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Set working directory
 WORKDIR /app
