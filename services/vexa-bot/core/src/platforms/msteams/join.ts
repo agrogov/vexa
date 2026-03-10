@@ -365,8 +365,7 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
         await turnOffBtn.click();
         log("✅ Camera turned off");
       } else {
-        await page.keyboard.press("Control+Shift+O").catch(() => {});
-        log("ℹ️ Camera off button not visible — toggled via keyboard shortcut");
+        log("ℹ️ Camera off button not visible — may already be off");
       }
     } catch (error) {
       log("ℹ️ Camera button not found or already off");
@@ -385,8 +384,7 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
         await micOffBtn.click();
         log("✅ Microphone turned off");
       } else {
-        await page.keyboard.press("Control+Shift+M").catch(() => {});
-        log("ℹ️ Mic off button not visible — toggled via keyboard shortcut");
+        log("ℹ️ Mic off button not visible — may already be off");
       }
     } catch (error) {
       log("ℹ️ Microphone button not found or already off");
