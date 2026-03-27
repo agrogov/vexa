@@ -8,6 +8,9 @@ import time
 import logging
 import asyncio
 import json
+import ctypes
+import glob as _glob
+import subprocess
 import httpx
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -280,8 +283,11 @@ model: Optional[WhisperModel] = None
 
 # Load management: Global concurrency limit and bounded queue
 # These settings control how many transcription requests can be processed concurrently.
+# CTranslate2 serializes CUDA ops, so concurrent requests queue on the GPU.
+# RTX 4090 benchmarks (2026-03-08): 20 concurrent handles fine, latency ~3s worst case.
+# Set high enough to avoid artificial bottlenecks, low enough to bound queue latency.
 # MAX_ACTIVE_REQUESTS is the preferred name; MAX_CONCURRENT_TRANSCRIPTIONS is kept for compatibility.
-MAX_CONCURRENT_TRANSCRIPTIONS = _env_int("MAX_ACTIVE_REQUESTS", _env_int("MAX_CONCURRENT_TRANSCRIPTIONS", 2))
+MAX_CONCURRENT_TRANSCRIPTIONS = _env_int("MAX_ACTIVE_REQUESTS", _env_int("MAX_CONCURRENT_TRANSCRIPTIONS", 20))
 MAX_QUEUE_SIZE = _env_int("MAX_QUEUE_SIZE", 10)  # Max requests waiting in queue
 
 # Backpressure strategy:
@@ -319,15 +325,118 @@ def _deferred_capacity_available(active_rt: int, active_df: int) -> bool:
     return deferred_limit > 0 and active_df < deferred_limit and total_active < MAX_CONCURRENT_TRANSCRIPTIONS
 
 
+def _log_cuda_diagnostics():
+    """Log CUDA environment details to help diagnose GPU/library issues."""
+    logger.info("=== CUDA Diagnostics ===")
+
+    # Python & package versions
+    import sys
+    logger.info(f"Python: {sys.version}")
+    try:
+        import ctranslate2
+        logger.info(f"ctranslate2: {ctranslate2.__version__}, CUDA support: {ctranslate2.get_cuda_device_count() > 0}, devices: {ctranslate2.get_cuda_device_count()}")
+    except Exception as e:
+        logger.warning(f"ctranslate2 import failed: {e}")
+    try:
+        import faster_whisper
+        logger.info(f"faster_whisper: {faster_whisper.__version__}")
+    except Exception as e:
+        logger.warning(f"faster_whisper version unavailable: {e}")
+
+    # Environment
+    logger.info(f"LD_LIBRARY_PATH: {os.getenv('LD_LIBRARY_PATH', '(not set)')}")
+    logger.info(f"CUDA_VISIBLE_DEVICES: {os.getenv('CUDA_VISIBLE_DEVICES', '(not set)')}")
+
+    # nvidia-smi full output
+    try:
+        smi = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=5)
+        if smi.returncode == 0:
+            for line in smi.stdout.splitlines():
+                logger.info(f"nvidia-smi: {line}")
+        else:
+            logger.warning(f"nvidia-smi failed: {smi.stderr.strip()}")
+    except Exception as e:
+        logger.warning(f"nvidia-smi unavailable: {e}")
+
+    # CUDA runtime version from libcudart
+    try:
+        cudart = ctypes.CDLL("libcudart.so.12")
+        version = ctypes.c_int(0)
+        cudart.cudaRuntimeGetVersion(ctypes.byref(version))
+        v = version.value
+        logger.info(f"CUDA runtime version: {v // 1000}.{(v % 1000) // 10}")
+    except Exception as e:
+        logger.warning(f"libcudart.so.12 not loadable: {e}")
+
+    # ctranslate2 package dir
+    try:
+        import ctranslate2 as _ct2
+        ct2_dir = os.path.dirname(_ct2.__file__)
+        ct2_libs = _glob.glob(os.path.join(ct2_dir, "*.so*"))
+        logger.info(f"ctranslate2 package dir: {ct2_dir}")
+        logger.info(f"ctranslate2 bundled libs: {[os.path.basename(p) for p in ct2_libs]}")
+    except Exception as e:
+        logger.warning(f"Could not inspect ctranslate2 package dir: {e}")
+
+    # nvidia pip packages — use glob since __file__ is None for namespace packages
+    nvidia_lib_dirs = _glob.glob("/usr/local/lib/python*/site-packages/nvidia/*/lib")
+    if nvidia_lib_dirs:
+        for lib_dir in sorted(nvidia_lib_dirs):
+            libs = [os.path.basename(p) for p in _glob.glob(os.path.join(lib_dir, "*.so*"))]
+            logger.info(f"nvidia pip lib dir: {lib_dir} → {libs}")
+    else:
+        logger.warning("No nvidia pip lib dirs found (nvidia-cublas-cu12 / nvidia-cuda-runtime-cu12 not installed)")
+
+    # Check critical shared libraries
+    for lib in ["libcublas.so.12", "libcublasLt.so.12", "libcudart.so.12", "libcufft.so.11"]:
+        found = _glob.glob(f"/usr/lib/**/{lib}", recursive=True) + \
+                _glob.glob(f"/usr/local/cuda/**/{lib}", recursive=True) + \
+                _glob.glob(f"/usr/local/lib/**/{lib}", recursive=True)
+        if found:
+            logger.info(f"  {lib}: found at {found[0]}")
+        else:
+            # Try ctypes as a last resort (respects LD_LIBRARY_PATH)
+            try:
+                ctypes.CDLL(lib)
+                logger.info(f"  {lib}: loadable via LD_LIBRARY_PATH")
+            except Exception:
+                logger.warning(f"  {lib}: NOT FOUND")
+
+    logger.info("=== End CUDA Diagnostics ===")
+
+
+def _preload_cuda_libs():
+    """Preload CUDA shared libraries with RTLD_GLOBAL so ctranslate2's lazy dlopen finds them."""
+    # Order matters: cudart first, then cublas dependencies, then cublas
+    candidates = [
+        # nvidia pip package paths (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12)
+        "/usr/local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12",
+        "/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib/libcublasLt.so.12",
+        "/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib/libcublas.so.12",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                logger.info(f"Preloaded CUDA lib: {path}")
+            except Exception as e:
+                logger.warning(f"Failed to preload {path}: {e}")
+        else:
+            logger.warning(f"CUDA lib not found for preload: {path}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize Whisper model on startup"""
     global model
     logger.info(f"Worker {WORKER_ID} starting up...")
+    _log_cuda_diagnostics()
 
     if _remote_enabled():
         logger.info("Remote transcriber enabled; skipping local model load.")
         return
+
+    _preload_cuda_libs()
 
     try:
         logger.info(f"Device: {DEVICE}, Model: {MODEL_SIZE}, Compute: {COMPUTE_TYPE}")

@@ -70,7 +70,7 @@ async def analyze_window(segments: List[dict]) -> Optional[dict]:
             tools=[tool_schema],
             tool_choice={"type": "function", "function": {"name": "capture_meeting_item"}},
             temperature=0.1,
-            max_completion_tokens=256,
+            max_completion_tokens=512,
         )
 
         msg = response.choices[0].message

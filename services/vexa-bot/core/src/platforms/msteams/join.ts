@@ -59,8 +59,18 @@ async function waitForTeamsPreJoinReadiness(page: Page, timeoutMs: number): Prom
       .catch(() => false);
     const computerAudioVisible = await page.locator(teamsComputerAudioRadioSelectors.join(", ")).first().isVisible().catch(() => false);
 
-    if (joinNowVisible || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
-      log("✅ Teams pre-join controls are ready");
+    // Also check DOM presence directly — light-meetings experience renders the join button
+    // before Playwright considers it "visible", so isVisible() returns false even when ready.
+    const joinNowInDom = await page.evaluate(() =>
+      !!(
+        document.getElementById("prejoin-join-button") ||
+        document.querySelector('[data-tid="prejoin-join-button"]') ||
+        document.querySelector('[aria-label="Join now"]')
+      )
+    ).catch(() => false);
+
+    if (joinNowVisible || joinNowInDom || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
+      log(`✅ Teams pre-join controls are ready (joinNowVisible=${joinNowVisible}, joinNowInDom=${joinNowInDom})`);
       return true;
     }
 
@@ -461,27 +471,59 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
 
   log("Step 6: Clicking 'Join now' to enter the meeting...");
   try {
-    // Use the more specific "Join now" selector first to avoid ambiguity
-    const joinNowButton = page.locator('button:has-text("Join now")').first();
-    const joinNowVisible = await joinNowButton.isVisible().catch(() => false);
+    // Primary: JS click by known id/data-tid — bypasses Playwright visibility checks.
+    // The light-meetings experience renders the button in the DOM before Playwright
+    // considers it "visible", so direct JS click is the most reliable approach.
+    const jsClicked = await page.evaluate(() => {
+      const btn = (
+        document.getElementById("prejoin-join-button") ||
+        document.querySelector<HTMLElement>('[data-tid="prejoin-join-button"]') ||
+        document.querySelector<HTMLElement>('[aria-label="Join now"]') ||
+        Array.from(document.querySelectorAll<HTMLElement>("button")).find(
+          (b) => b.innerText?.trim() === "Join now"
+        )
+      );
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
 
-    if (joinNowVisible) {
-      await joinNowButton.click();
-      log("✅ Clicked 'Join now' button");
+    if (jsClicked) {
+      log("✅ Clicked 'Join now' button (JS click)");
     } else {
-      // Fall back to generic join selectors
+      // Fallback: Playwright click with force
       const fallbackJoinButton = page.locator(teamsJoinButtonSelectors.join(', ')).first();
       await fallbackJoinButton.waitFor({ timeout: 10000 });
-      await fallbackJoinButton.click();
+      await fallbackJoinButton.click({ force: true });
       log("✅ Clicked join button (fallback selector)");
     }
     // Wait for Teams to transition from pre-join to lobby/meeting.
-    // Teams needs several seconds to process the join request and show
-    // either the waiting room or the meeting view.
     log("Waiting for Teams to process join request...");
     await page.waitForTimeout(8000);
   } catch (error) {
     log("⚠️ Join button not found — bot may not be able to enter the meeting");
+    // Dump all visible buttons to help diagnose selector mismatches (especially light experience)
+    try {
+      const visibleButtons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("button, [role='button'], input[type='button']"))
+          .filter((el) => {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          })
+          .map((el) => ({
+            tag: el.tagName,
+            text: ((el as HTMLElement).innerText || "").trim().slice(0, 60),
+            ariaLabel: el.getAttribute("aria-label"),
+            dataTid: el.getAttribute("data-tid"),
+            id: el.id || null,
+          }))
+      );
+      log(`[Join Debug] Visible buttons on page (url=${page.url()}):`);
+      for (const b of visibleButtons) {
+        log(`  [Join Debug] <${b.tag}> text="${b.text}" aria-label="${b.ariaLabel}" data-tid="${b.dataTid}" id="${b.id}"`);
+      }
+    } catch (dumpErr: any) {
+      log(`[Join Debug] Could not dump buttons: ${dumpErr?.message}`);
+    }
   }
 
   log("Step 7: Checking current state...");

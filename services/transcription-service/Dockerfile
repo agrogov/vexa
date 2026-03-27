@@ -13,8 +13,13 @@ WORKDIR /app
 # Copy requirements and install  
 COPY requirements.txt .
 # faster-whisper uses CTranslate2 which has built-in CUDA support (no PyTorch needed)
-# CUDA 12.3.2 base image includes all necessary CUDA/cuDNN libraries
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Symlink pip-installed nvidia CUDA libs into /usr/local/lib (always in linker search path).
+# This avoids depending on LD_LIBRARY_PATH or ldconfig cache at runtime.
+RUN find /usr/local/lib/python*/site-packages/nvidia/*/lib -name "*.so*" \
+    | xargs -I{} ln -sf {} /usr/local/lib/ \
+    && ldconfig
 
 # Copy application
 COPY main.py .

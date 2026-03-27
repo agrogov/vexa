@@ -2694,7 +2694,11 @@ async def bot_chat_read(
     user_token, current_user = auth_data
     platform_value = platform.value
 
-    meeting = await _find_active_meeting(db, current_user.id, platform_value, native_meeting_id)
+    # Chat read should work even after meeting end. Prefer active meeting, then fall back
+    # to the latest matching meeting record to avoid noisy 404s in the dashboard.
+    meeting = await _find_latest_meeting(db, current_user.id, platform_value, native_meeting_id)
+    if not meeting:
+        return {"messages": [], "meeting_id": None}
 
     # Read chat messages from Redis
     messages_raw = await redis_client.lrange(f"meeting:{meeting.id}:chat_messages", 0, -1)
@@ -2862,6 +2866,23 @@ async def _find_active_meeting(
         )
 
     return meeting
+
+
+async def _find_latest_meeting(
+    db: AsyncSession,
+    user_id: int,
+    platform_value: str,
+    native_meeting_id: str,
+) -> Optional[Meeting]:
+    """Find the latest meeting for the given platform/native_id (any status)."""
+    stmt = select(Meeting).where(
+        Meeting.user_id == user_id,
+        Meeting.platform == platform_value,
+        Meeting.platform_specific_id == native_meeting_id,
+    ).order_by(desc(Meeting.created_at)).limit(1)
+
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
 
 
 # --- END Voice Agent Endpoints ---

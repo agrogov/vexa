@@ -247,8 +247,19 @@ export const teamsContinueButtonSelectors: string[] = [
 ];
 
 export const teamsJoinButtonSelectors: string[] = [
+  // data-tid based (most reliable, works in both full and light experience)
+  'button[data-tid="prejoin-join-button"]',
+  'button[data-tid*="join-button"]',
+  'button[data-tid*="join_button"]',
+  // aria-label based
+  'button[aria-label="Join now"]',
+  'button[aria-label="Join meeting"]',
+  'button[aria-label*="Join now"]',
+  'button[aria-label*="Join meeting"]',
+  // text based (full experience)
+  'button:has-text("Join now")',
+  'button:has-text("Join meeting")',
   'button:has-text("Join")',
-  'button:has-text("Join now")'
 ];
 
 export const teamsCameraButtonSelectors: string[] = [

@@ -7,6 +7,7 @@ Reference: OWASP SSRF Prevention Cheat Sheet
 """
 
 import ipaddress
+import os
 import socket
 from urllib.parse import urlparse
 
@@ -28,6 +29,16 @@ _BLOCKED_IPV6_NETWORKS = [
     ipaddress.ip_network("fe80::/10"),       # Link-local
     ipaddress.ip_network("ff00::/8"),        # Multicast
 ]
+
+# Explicitly trusted CIDR ranges that bypass the private-IP block.
+# Populated from WEBHOOK_ALLOWED_CIDRS env var (comma-separated, e.g. "10.116.0.0/16").
+_ALLOWED_NETWORKS: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+for _cidr in filter(None, os.getenv("WEBHOOK_ALLOWED_CIDRS", "").split(",")):
+    try:
+        _ALLOWED_NETWORKS.append(ipaddress.ip_network(_cidr.strip(), strict=False))
+    except ValueError:
+        pass
+
 
 # Internal hostnames (Docker services from docker-compose + cloud metadata)
 _BLOCKED_HOSTNAMES = frozenset([
@@ -55,6 +66,9 @@ def _is_blocked_ip(ip_str: str) -> bool:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
         return True  # Invalid IP, block
+    for net in _ALLOWED_NETWORKS:
+        if ip in net:
+            return False
     if ip.version == 4:
         for net in _BLOCKED_IPV4_NETWORKS:
             if ip in net:

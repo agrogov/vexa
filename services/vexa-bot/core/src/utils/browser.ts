@@ -39,25 +39,43 @@ export class BrowserAudioService {
       // Get all media elements
       const allMediaElements = Array.from(document.querySelectorAll("audio, video")) as HTMLMediaElement[];
       (window as any).logBot(`[Audio] Attempt ${i + 1}/${retries}: Found ${allMediaElements.length} total media elements in DOM`);
-      
+
+      // Try to play any paused elements that have a valid MediaStream with audio tracks.
+      // Teams (especially the light-meetings experience) may leave elements paused even
+      // after the bot is admitted — calling play() unblocks audio capture.
+      for (const el of allMediaElements as any[]) {
+        if (
+          el.paused &&
+          el.srcObject instanceof MediaStream &&
+          el.srcObject.getAudioTracks().length > 0
+        ) {
+          try {
+            await el.play();
+            (window as any).logBot(`[Audio] Triggered play() on paused element (readyState: ${el.readyState})`);
+          } catch (playErr: any) {
+            (window as any).logBot(`[Audio] play() failed: ${playErr?.message || playErr}`);
+          }
+        }
+      }
+
       // Filter for active media elements with proper checks
       const mediaElements = allMediaElements.filter((el: any) => {
         // Check if element has srcObject
         if (!el.srcObject) {
           return false;
         }
-        
+
         // Check if srcObject is a MediaStream
         if (!(el.srcObject instanceof MediaStream)) {
           return false;
         }
-        
+
         // Check if MediaStream has audio tracks
         const audioTracks = el.srcObject.getAudioTracks();
         if (audioTracks.length === 0) {
           return false;
         }
-        
+
         // Check if element is not paused (like Node.js version)
         if (el.paused) {
           (window as any).logBot(`[Audio] Element found but is paused (readyState: ${el.readyState})`);
@@ -71,12 +89,14 @@ export class BrowserAudioService {
           return false;
         }
         
-        // Check if audio tracks are enabled
-        const hasEnabledTracks = audioTracks.some((track: MediaStreamTrack) => track.enabled && !track.muted);
-        if (!hasEnabledTracks) {
-          (window as any).logBot(`[Audio] Element found but all audio tracks are disabled or muted`);
-          return false;
-        }
+        // Log track state for diagnostics but do NOT reject on muted/enabled state.
+        // In Teams, remote audio tracks are frequently muted=true when no one is speaking
+        // (read-only browser property, transient) or enabled=false while Teams initialises
+        // the stream. The AudioContext will capture audio correctly once it starts flowing.
+        const enabledCount = audioTracks.filter((t: MediaStreamTrack) => t.enabled).length;
+        const mutedCount = audioTracks.filter((t: MediaStreamTrack) => t.muted).length;
+        (window as any).logBot(`[Audio] Track state: enabled=${enabledCount}/${audioTracks.length}, muted=${mutedCount}/${audioTracks.length} — accepting element`);
+
         
         return true;
       });

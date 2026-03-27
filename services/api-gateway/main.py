@@ -217,6 +217,27 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
         print(f"DEBUG: Request error: {exc}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
 
+
+def _split_compound_platform_meeting_id(compound_id: str) -> Tuple[Platform, str]:
+    """
+    Parse legacy combined IDs like:
+    - teams_123456789
+    - zoom_987654321
+    - google_meet_abc-defg-hij
+    """
+    for platform in sorted(list(Platform), key=lambda p: len(p.value), reverse=True):
+        prefix = f"{platform.value}_"
+        if compound_id.startswith(prefix) and len(compound_id) > len(prefix):
+            return platform, compound_id[len(prefix):]
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            f"Invalid combined meeting id '{compound_id}'. "
+            f"Expected format '<platform>_<native_meeting_id>'."
+        ),
+    )
+
 # --- Root Endpoint --- 
 @app.get("/", tags=["General"], summary="API Gateway Root")
 async def root():
@@ -352,7 +373,47 @@ async def chat_send_proxy(platform: Platform, native_meeting_id: str, request: R
 async def chat_read_proxy(platform: Platform, native_meeting_id: str, request: Request):
     """Forward chat read request to Bot Manager."""
     url = f"{BOT_MANAGER_URL}/bots/{platform.value}/{native_meeting_id}/chat"
-    return await forward_request(app.state.http_client, "GET", url, request)
+    resp = await forward_request(app.state.http_client, "GET", url, request)
+    if resp.status_code == status.HTTP_404_NOT_FOUND:
+        return Response(
+            content=json.dumps({"messages": [], "meeting_id": None}),
+            status_code=status.HTTP_200_OK,
+            media_type="application/json",
+        )
+    return resp
+
+
+@app.post("/bots/{platform_and_native_meeting_id}/chat",
+          tags=["Voice Agent"],
+          summary="Send a chat message in the meeting (legacy combined ID)",
+          description="Legacy compatibility route. Accepts /bots/{platform}_{native_meeting_id}/chat.",
+          dependencies=[Depends(api_key_scheme)],
+          include_in_schema=False)
+async def chat_send_legacy_proxy(platform_and_native_meeting_id: str, request: Request):
+    """Forward legacy chat send request to Bot Manager."""
+    platform, native_meeting_id = _split_compound_platform_meeting_id(platform_and_native_meeting_id)
+    url = f"{BOT_MANAGER_URL}/bots/{platform.value}/{native_meeting_id}/chat"
+    return await forward_request(app.state.http_client, "POST", url, request)
+
+
+@app.get("/bots/{platform_and_native_meeting_id}/chat",
+         tags=["Voice Agent"],
+         summary="Read chat messages from the meeting (legacy combined ID)",
+         description="Legacy compatibility route. Accepts /bots/{platform}_{native_meeting_id}/chat.",
+         dependencies=[Depends(api_key_scheme)],
+         include_in_schema=False)
+async def chat_read_legacy_proxy(platform_and_native_meeting_id: str, request: Request):
+    """Forward legacy chat read request to Bot Manager."""
+    platform, native_meeting_id = _split_compound_platform_meeting_id(platform_and_native_meeting_id)
+    url = f"{BOT_MANAGER_URL}/bots/{platform.value}/{native_meeting_id}/chat"
+    resp = await forward_request(app.state.http_client, "GET", url, request)
+    if resp.status_code == status.HTTP_404_NOT_FOUND:
+        return Response(
+            content=json.dumps({"messages": [], "meeting_id": None}),
+            status_code=status.HTTP_200_OK,
+            media_type="application/json",
+        )
+    return resp
 
 @app.post("/bots/{platform}/{native_meeting_id}/screen",
           tags=["Voice Agent"],
@@ -450,6 +511,7 @@ async def download_media_raw_proxy(recording_id: int, media_file_id: int, reques
     """Forward request to Bot Manager for raw media streaming."""
     url = f"{BOT_MANAGER_URL}/recordings/{recording_id}/media/{media_file_id}/raw"
     return await forward_request(app.state.http_client, "GET", url, request)
+
 
 @app.delete("/recordings/{recording_id}",
             tags=["Recordings"],
