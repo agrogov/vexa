@@ -60,7 +60,12 @@ async def start_bot_container(
     recording_enabled: Optional[bool] = None,
     transcribe_enabled: Optional[bool] = None,
     zoom_obf_token: Optional[str] = None,
-    voice_agent_enabled: Optional[bool] = None
+    voice_agent_enabled: Optional[bool] = None,
+    tts_enabled: Optional[bool] = None,
+    default_avatar_url: Optional[str] = None,
+    video_receive_enabled: Optional[bool] = None,
+    camera_enabled: Optional[bool] = None,
+    agent_enabled: Optional[bool] = None,
 ) -> Optional[Tuple[str, str]]:
     """Dispatch a parameterised *vexa-bot* Nomad job.
 
@@ -100,6 +105,9 @@ async def start_bot_container(
         "transcription_tier": transcription_tier or "realtime",
         "zoom_obf_token": (zoom_obf_token or "") if platform == "zoom" else "",
         "voice_agent_enabled": str(bool(voice_agent_enabled)).lower() if voice_agent_enabled is not None else "",
+        "tts_enabled": str(bool(tts_enabled)).lower() if tts_enabled is not None else "",
+        "video_receive_enabled": str(bool(video_receive_enabled)).lower() if video_receive_enabled is not None else "",
+        "camera_enabled": str(bool(camera_enabled)).lower() if camera_enabled is not None else "",
     }
 
     # Nomad job dispatch endpoint

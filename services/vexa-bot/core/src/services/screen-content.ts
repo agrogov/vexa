@@ -1198,6 +1198,19 @@ export function getVirtualCameraInitScript(): string {
             if (idx >= 0) window.__vexa_peer_connections.splice(idx, 1);
           }
         });
+
+        // Disable incoming video to save CPU/memory.
+        // The bot only needs audio for transcription — receiving and rendering
+        // all participants' video wastes ~87% CPU and ~2GB RAM per bot.
+        if (!window.__vexa_voice_agent_enabled) {
+          pc.addEventListener('track', (event) => {
+            if (event.track && event.track.kind === 'video') {
+              event.track.enabled = false;
+              console.log('[Vexa] Incoming video track disabled (id=' + event.track.id + ')');
+            }
+          });
+        }
+
         return pc;
       };
       window.RTCPeerConnection.prototype = OrigRTC.prototype;
@@ -1232,6 +1245,96 @@ export function getVirtualCameraInitScript(): string {
       console.log('[Vexa] getUserMedia + RTCPeerConnection + addTrack + createOffer + enumerateDevices patched for virtual camera');
       } catch (e) {
         console.error('[Vexa] Init script FAILED:', e);
+      }
+    })();
+  `;
+}
+
+/**
+ * Lightweight init script for transcription-only bots (no avatar/voice agent).
+ * Only patches RTCPeerConnection to:
+ * 1. Disable incoming video tracks (track.enabled = false)
+ * 2. Stop video transceivers to prevent Chrome from decoding video
+ * 3. Block outgoing video by setting video transceiver direction to 'inactive'
+ *
+ * This avoids the heavy virtual camera setup (canvas, getUserMedia, addTrack patches)
+ * while still reducing CPU/memory from incoming video decoding.
+ */
+export function getVideoBlockInitScript(): string {
+  return `
+    (() => {
+      console.log('[Vexa] Video block init script START (transcription-only mode)');
+      try {
+        const OrigRTC = window.RTCPeerConnection;
+        if (!OrigRTC) {
+          console.warn('[Vexa] RTCPeerConnection not available');
+          return;
+        }
+
+        // Track all peer connections for diagnostics
+        window.__vexa_peer_connections = window.__vexa_peer_connections || [];
+
+        window.RTCPeerConnection = function(...args) {
+          const pc = new OrigRTC(...args);
+          const pcIndex = window.__vexa_peer_connections.length;
+          window.__vexa_peer_connections.push(pc);
+          console.log('[Vexa] New RTCPeerConnection created #' + pcIndex);
+
+          // Log connection state changes
+          pc.addEventListener('connectionstatechange', () => {
+            console.log('[Vexa] PC#' + pcIndex + ' connectionState=' + pc.connectionState);
+          });
+          pc.addEventListener('iceconnectionstatechange', () => {
+            console.log('[Vexa] PC#' + pcIndex + ' iceConnectionState=' + pc.iceConnectionState);
+          });
+
+          // Block incoming video: disable track rendering only.
+          // IMPORTANT: Do NOT call track.stop() or set transceiver to inactive —
+          // that breaks WebRTC renegotiation and causes Google Meet to kick the bot
+          // when new video tracks arrive (e.g. screen share/presentation).
+          pc.addEventListener('track', (event) => {
+            console.log('[Vexa] PC#' + pcIndex + ' track event: kind=' + event.track.kind + ' id=' + event.track.id + ' enabled=' + event.track.enabled + ' muted=' + event.track.muted);
+            if (event.track && event.track.kind === 'video') {
+              event.track.enabled = false;
+              console.log('[Vexa] Incoming video track disabled (id=' + event.track.id + ')');
+            }
+            // Monitor audio track muted state changes
+            if (event.track && event.track.kind === 'audio') {
+              event.track.addEventListener('unmute', () => {
+                console.log('[Vexa] PC#' + pcIndex + ' audio track UNMUTED id=' + event.track.id);
+              });
+              event.track.addEventListener('mute', () => {
+                console.log('[Vexa] PC#' + pcIndex + ' audio track MUTED id=' + event.track.id);
+              });
+            }
+          });
+
+          // Periodic stats check for diagnostics
+          let statsCheckCount = 0;
+          const statsInterval = setInterval(async () => {
+            statsCheckCount++;
+            if (statsCheckCount > 30) { clearInterval(statsInterval); return; } // Stop after 5 min
+            if (pc.connectionState === 'closed') { clearInterval(statsInterval); return; }
+            try {
+              const stats = await pc.getStats();
+              stats.forEach(report => {
+                if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+                  console.log('[Vexa] PC#' + pcIndex + ' inbound-audio: packets=' + report.packetsReceived + ' bytes=' + report.bytesReceived + ' lost=' + report.packetsLost);
+                }
+              });
+            } catch(e) {}
+          }, 10000);
+
+          return pc;
+        };
+        window.RTCPeerConnection.prototype = OrigRTC.prototype;
+        Object.keys(OrigRTC).forEach(key => {
+          try { window.RTCPeerConnection[key] = OrigRTC[key]; } catch {}
+        });
+
+        console.log('[Vexa] RTCPeerConnection patched for video blocking (transcription-only)');
+      } catch (e) {
+        console.error('[Vexa] Video block init script FAILED:', e);
       }
     })();
   `;

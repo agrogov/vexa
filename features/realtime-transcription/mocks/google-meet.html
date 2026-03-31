@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Meet Mock</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Google Sans', Roboto, Arial, sans-serif;
+      background: #202124;
+      color: #e8eaed;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Phase 1: Pre-join screen ── */
+    #prejoin-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 24px;
+    }
+    #prejoin-screen h1 {
+      font-size: 28px;
+      font-weight: 400;
+      color: #e8eaed;
+    }
+    #prejoin-screen .preview-box {
+      width: 480px;
+      height: 270px;
+      background: #3c4043;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    #prejoin-screen .preview-box .avatar {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: #5f6368;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      color: #e8eaed;
+    }
+    #prejoin-screen .controls-row {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+    #prejoin-screen .toggle-btn {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #3c4043;
+      color: #e8eaed;
+      transition: background 0.2s;
+    }
+    #prejoin-screen .toggle-btn:hover { background: #525457; }
+    #prejoin-screen .toggle-btn.off { background: #ea4335; color: white; }
+    #prejoin-screen .name-input {
+      padding: 12px 16px;
+      font-size: 16px;
+      border: 1px solid #5f6368;
+      border-radius: 4px;
+      background: #202124;
+      color: #e8eaed;
+      width: 300px;
+      outline: none;
+    }
+    #prejoin-screen .name-input:focus { border-color: #8ab4f8; }
+    #join-btn {
+      padding: 12px 32px;
+      font-size: 16px;
+      font-weight: 500;
+      border: none;
+      border-radius: 24px;
+      cursor: pointer;
+      background: #1a73e8;
+      color: white;
+      transition: background 0.2s;
+    }
+    #join-btn:hover { background: #1765cc; }
+
+    /* ── Phase 2: In-meeting screen ── */
+    #meeting-screen {
+      display: none;
+      flex-direction: column;
+      height: 100vh;
+    }
+    #meeting-screen .meeting-header {
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #202124;
+    }
+    #meeting-screen .meeting-header .meeting-title {
+      font-size: 18px;
+      font-weight: 400;
+    }
+    #meeting-screen .meeting-header .meeting-id-badge {
+      font-size: 13px;
+      color: #9aa0a6;
+    }
+    #meeting-screen .video-grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 8px;
+      padding: 8px;
+      background: #202124;
+    }
+    .participant-tile {
+      background: #3c4043;
+      border-radius: 8px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 200px;
+      overflow: hidden;
+      transition: box-shadow 0.3s;
+    }
+    .participant-tile .avatar-circle {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      font-weight: 500;
+      color: white;
+    }
+    .participant-tile .name-tag {
+      position: absolute;
+      bottom: 8px;
+      left: 12px;
+      font-size: 13px;
+      color: #e8eaed;
+      background: rgba(32,33,36,0.7);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+    .participant-tile .mic-icon {
+      position: absolute;
+      bottom: 8px;
+      right: 12px;
+      font-size: 16px;
+    }
+    /* Speaking indicator classes the bot looks for */
+    .participant-tile.speaking,
+    .participant-tile.Oaajhc {
+      box-shadow: 0 0 0 3px #1a73e8;
+    }
+    .participant-tile.silent,
+    .participant-tile.gjg47c {
+      box-shadow: none;
+    }
+
+    /* ── Toolbar ── */
+    .meeting-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 0 16px 0;
+      gap: 12px;
+      background: #202124;
+    }
+    .meeting-toolbar button {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #3c4043;
+      color: #e8eaed;
+      transition: background 0.2s;
+    }
+    .meeting-toolbar button:hover { background: #525457; }
+    .meeting-toolbar .leave-btn {
+      background: #ea4335;
+      color: white;
+      width: 56px;
+      border-radius: 24px;
+    }
+    .meeting-toolbar .leave-btn:hover { background: #d93025; }
+
+    /* Status bar */
+    #mock-status {
+      position: fixed;
+      top: 0;
+      right: 0;
+      background: rgba(0,0,0,0.8);
+      color: #4caf50;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 0 0 0 6px;
+      z-index: 9999;
+      max-width: 400px;
+      white-space: pre-line;
+    }
+
+    /* ── Chat panel ── */
+    #chat-panel {
+      display: none;
+      position: fixed;
+      right: 0; top: 0; bottom: 60px;
+      width: 340px;
+      background: #292a2d;
+      border-left: 1px solid #3c4043;
+      flex-direction: column;
+      z-index: 100;
+    }
+    #chat-panel.open { display: flex; }
+    #chat-panel .chat-header {
+      padding: 12px 16px;
+      font-size: 16px;
+      border-bottom: 1px solid #3c4043;
+    }
+    #chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 16px;
+    }
+    .chat-msg-group { margin-bottom: 12px; }
+    .chat-msg-group .poVWob { color: #8ab4f8; font-size: 13px; margin-bottom: 2px; }
+    .chat-msg-group .jO4O1 { color: #e8eaed; font-size: 14px; padding: 2px 0; }
+    #chat-input-area {
+      display: flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-top: 1px solid #3c4043;
+      gap: 8px;
+    }
+    #chat-input-area textarea {
+      flex: 1;
+      background: #3c4043;
+      border: none;
+      border-radius: 20px;
+      color: #e8eaed;
+      padding: 8px 14px;
+      font-size: 14px;
+      resize: none;
+      height: 36px;
+      font-family: inherit;
+    }
+    #chat-input-area button {
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 18px;
+      color: #8ab4f8;
+      padding: 4px;
+    }
+
+    /* Hidden audio elements container */
+    #audio-container {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ════════ PHASE 1: Pre-join ════════ -->
+  <div id="prejoin-screen">
+    <h1>Mock Google Meet</h1>
+    <div class="preview-box">
+      <div class="avatar" id="preview-avatar">?</div>
+    </div>
+    <div class="controls-row">
+      <button class="toggle-btn off" aria-label="Turn on microphone" id="mic-toggle" onclick="toggleMic()">🎤</button>
+      <button class="toggle-btn off" aria-label="Turn on camera" id="cam-toggle" onclick="toggleCam()">📷</button>
+    </div>
+    <input type="text" aria-label="Your name" class="name-input" id="name-input" placeholder="Your name" oninput="updateAvatar()">
+    <button id="join-btn" onclick="askToJoin()"><span>Ask to join</span></button>
+  </div>
+
+  <!-- ════════ PHASE 2: In-meeting ════════ -->
+  <div id="meeting-screen" aria-label="meeting">
+    <div class="meeting-header">
+      <span class="meeting-title">Mock Meeting</span>
+      <span class="meeting-id-badge" data-meeting-id="mock-meeting-001">mock-meeting-001</span>
+    </div>
+
+    <div class="video-grid" id="video-grid">
+      <!-- Participant tiles are injected by JS -->
+    </div>
+
+    <div class="meeting-toolbar" role="toolbar">
+      <button aria-label="Turn off microphone" id="toolbar-mic">🎤</button>
+      <button aria-label="Turn off camera" id="toolbar-cam">📷</button>
+      <button aria-label="Share screen">🖥️</button>
+      <button aria-label="People" id="people-btn" data-tooltip="People">👥</button>
+      <button aria-label="Chat with everyone" data-tooltip="Chat" id="chat-toggle-btn" onclick="toggleChat()">💬</button>
+      <button aria-label="Present now">📺</button>
+      <button aria-label="Leave call" class="leave-btn" onclick="leaveMeeting()">📞</button>
+    </div>
+  </div>
+
+  <!-- Chat panel (Google Meet style) -->
+  <div id="chat-panel">
+    <div class="chat-header">In-call messages</div>
+    <div id="chat-messages"></div>
+    <div id="chat-input-area">
+      <textarea aria-label="Send a message to everyone" id="chat-input" placeholder="Send a message to everyone" rows="1"></textarea>
+      <button aria-label="Send a message" id="chat-send-btn" onclick="sendChatMessage()">➤</button>
+    </div>
+  </div>
+
+  <!-- Hidden container for audio/video elements with real MediaStreams -->
+  <div id="audio-container"></div>
+
+  <div id="mock-status">MOCK: Pre-join</div>
+
+  <script>
+    // ──────────────────────────────────────────────────
+    //  Configuration
+    // ──────────────────────────────────────────────────
+    const PARTICIPANTS = [
+      { id: 'p-alice-001',   name: 'Alice Johnson',   color: '#1a73e8', speakerKey: 'Alice' },
+      { id: 'p-bob-002',     name: 'Bob Smith',       color: '#ea4335', speakerKey: 'Bob' },
+      { id: 'p-carol-003',   name: 'Carol Williams',  color: '#34a853', speakerKey: 'Carol' },
+    ];
+
+    // Scenario to load — WAV files from cache/<scenario>/
+    const SCENARIO = 'full-messy';
+    const WAV_BASE = `cache/${SCENARIO}`;
+
+    // Speaking schedule derived from scenario utterances (full-messy)
+    // Each entry: [startSec, durationSec, participantIndex]
+    // Duration is approximate — WAV playback provides real audio
+    const SPEAKING_SCHEDULE = [
+      [0, 8, 0],     // Alice: "Good morning everyone..."
+      [3, 1, 1],     // Bob: "yeah" (interjection)
+      [9, 6, 1],     // Bob: "The infrastructure cost report..."
+      [26, 5, 0],    // Alice: "Moving on to the customer feedback..."
+      [33, 5, 2],    // Carol: Russian utterance
+      [40, 2, 0],    // Alice: "Great point Carol..."
+      [42.5, 3, 1],  // Bob: "No blockers..."
+    ];
+    const SCHEDULE_LOOP_SEC = 48; // Slightly longer than longest WAV
+
+    let botName = '';
+    let meetingStartTime = null;
+    let audioCtx = null;
+    let mediaElements = [];
+    let speakingInterval = null;
+
+    // ──────────────────────────────────────────────────
+    //  Phase 1: Pre-join interactions
+    // ──────────────────────────────────────────────────
+    function updateAvatar() {
+      const name = document.getElementById('name-input').value.trim();
+      const avatar = document.getElementById('preview-avatar');
+      avatar.textContent = name ? name.charAt(0).toUpperCase() : '?';
+    }
+
+    function toggleMic() {
+      const btn = document.getElementById('mic-toggle');
+      if (btn.classList.contains('off')) {
+        btn.classList.remove('off');
+        btn.setAttribute('aria-label', 'Turn off microphone');
+      } else {
+        btn.classList.add('off');
+        btn.setAttribute('aria-label', 'Turn on microphone');
+      }
+    }
+
+    function toggleCam() {
+      const btn = document.getElementById('cam-toggle');
+      if (btn.classList.contains('off')) {
+        btn.classList.remove('off');
+        btn.setAttribute('aria-label', 'Turn off camera');
+      } else {
+        btn.classList.add('off');
+        btn.setAttribute('aria-label', 'Turn on camera');
+      }
+    }
+
+    function askToJoin() {
+      botName = document.getElementById('name-input').value.trim() || 'Vexa Bot';
+      setStatus('MOCK: Joining as "' + botName + '"...');
+
+      // Brief "waiting room" phase then auto-admit
+      document.getElementById('prejoin-screen').style.display = 'none';
+
+      // Small delay to simulate admission (the bot polls for admission indicators)
+      setTimeout(() => {
+        enterMeeting();
+      }, 500);
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Phase 2: Enter the meeting
+    // ──────────────────────────────────────────────────
+    function enterMeeting() {
+      meetingStartTime = Date.now();
+      document.getElementById('meeting-screen').style.display = 'flex';
+      setStatus('MOCK: In meeting');
+
+      // Create AudioContext (needed for Web Audio API streams)
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+      // Build participant tiles and audio elements
+      const grid = document.getElementById('video-grid');
+      const audioContainer = document.getElementById('audio-container');
+
+      // Add the bot itself as a participant tile (no audio)
+      const botTile = createParticipantTile('p-bot-self', botName, '#5f6368', true);
+      grid.appendChild(botTile);
+
+      // Add other participants with real audio MediaStreams from WAV files
+      PARTICIPANTS.forEach((p, idx) => {
+        // Create participant tile
+        const tile = createParticipantTile(p.id, p.name, p.color, false);
+        grid.appendChild(tile);
+
+        // Create audio element with WAV-backed MediaStream
+        const mediaEntry = createAudioElement(p, idx);
+        audioContainer.appendChild(mediaEntry.element);
+        mediaElements.push(mediaEntry);
+      });
+
+      // Start speaking simulation
+      startSpeakingSimulation();
+
+      setStatus('MOCK: In meeting | ' + (PARTICIPANTS.length + 1) + ' participants | Audio streams active');
+    }
+
+    function createParticipantTile(id, name, color, isSelf) {
+      const tile = document.createElement('div');
+      tile.className = 'participant-tile video-tile silent';
+      tile.setAttribute('data-participant-id', id);
+      if (isSelf) {
+        tile.setAttribute('data-self-name', name);
+      }
+
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar-circle';
+      avatar.style.background = color;
+      avatar.textContent = name.charAt(0).toUpperCase();
+      tile.appendChild(avatar);
+
+      const nameTag = document.createElement('div');
+      nameTag.className = 'name-tag';
+      // Use span.notranslate for name - this is what the bot looks for
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'notranslate';
+      nameSpan.textContent = name;
+      nameTag.appendChild(nameSpan);
+      tile.appendChild(nameTag);
+
+      const micIcon = document.createElement('div');
+      micIcon.className = 'mic-icon';
+      micIcon.textContent = '🎤';
+      tile.appendChild(micIcon);
+
+      return tile;
+    }
+
+    // Store AudioBufferSourceNodes so we can restart them on loop
+    let audioBuffers = {}; // speakerKey -> AudioBuffer
+
+    async function loadWavBuffer(speakerKey) {
+      const url = `${WAV_BASE}/${speakerKey.toLowerCase()}.wav`;
+      console.log(`[MockGoogleMeet] Loading WAV: ${url}`);
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(`[MockGoogleMeet] Failed to load ${url}: ${response.status}`);
+        return null;
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+      console.log(`[MockGoogleMeet] Loaded ${speakerKey}: ${audioBuffer.duration.toFixed(1)}s, ${audioBuffer.sampleRate}Hz`);
+      return audioBuffer;
+    }
+
+    function createAudioElement(participant, index) {
+      // Create a MediaStream destination — this gives us a real MediaStream
+      // that the bot's ScriptProcessor can capture
+      const dest = audioCtx.createMediaStreamDestination();
+
+      // Gain node to control volume (0 = silent, 1.0 = full)
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.setValueAtTime(0, audioCtx.currentTime); // Start silent
+      gainNode.connect(dest);
+
+      // Create an <audio> element and attach the real MediaStream
+      const audioEl = document.createElement('audio');
+      audioEl.id = 'audio-' + participant.id;
+      audioEl.srcObject = dest.stream;
+      audioEl.autoplay = true;
+      audioEl.muted = false;
+      audioEl.volume = 1.0;
+
+      // Force play to ensure readyState advances and paused=false
+      const playPromise = audioEl.play();
+      if (playPromise) {
+        playPromise.catch(e => {
+          console.warn('Audio autoplay blocked for', participant.name, '- will retry on user interaction');
+        });
+      }
+
+      // Load WAV file asynchronously and start playback
+      loadWavBuffer(participant.speakerKey).then(buffer => {
+        if (buffer) {
+          audioBuffers[participant.speakerKey] = buffer;
+          startWavPlayback(participant.speakerKey, gainNode);
+        }
+      });
+
+      return { element: audioEl, gainNode, dest, participant };
+    }
+
+    // Active source nodes per speaker (needed to restart on loop)
+    let activeSources = {};
+
+    function startWavPlayback(speakerKey, gainNode) {
+      const buffer = audioBuffers[speakerKey];
+      if (!buffer) return;
+
+      // Create a new source node (they're one-shot, can't be restarted)
+      const source = audioCtx.createBufferSource();
+      source.buffer = buffer;
+      source.loop = true; // Loop the WAV so it keeps playing across schedule loops
+      source.connect(gainNode);
+      source.start(0);
+      activeSources[speakerKey] = source;
+      console.log(`[MockGoogleMeet] Started WAV playback for ${speakerKey} (loop=true, duration=${buffer.duration.toFixed(1)}s)`);
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Phase 3: Speaking simulation
+    // ──────────────────────────────────────────────────
+    function startSpeakingSimulation() {
+      speakingInterval = setInterval(() => {
+        if (!meetingStartTime) return;
+
+        const elapsed = (Date.now() - meetingStartTime) / 1000;
+        const loopTime = elapsed % SCHEDULE_LOOP_SEC;
+
+        // Determine who should be speaking right now
+        const currentlySpeaking = new Set();
+        SPEAKING_SCHEDULE.forEach(([start, duration, pIdx]) => {
+          if (loopTime >= start && loopTime < start + duration) {
+            currentlySpeaking.add(pIdx);
+          }
+        });
+
+        // Update each participant's speaking state
+        PARTICIPANTS.forEach((p, idx) => {
+          const tile = document.querySelector('[data-participant-id="' + p.id + '"]');
+          const mediaEntry = mediaElements[idx];
+          if (!tile || !mediaEntry) return;
+
+          if (currentlySpeaking.has(idx)) {
+            // Speaking: add speaking classes, unmute audio (full volume for WAV speech)
+            tile.classList.add('speaking', 'Oaajhc', 'active-speaker');
+            tile.classList.remove('silent', 'gjg47c');
+            mediaEntry.gainNode.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.05);
+          } else {
+            // Silent: remove speaking classes, mute audio
+            tile.classList.remove('speaking', 'Oaajhc', 'active-speaker');
+            tile.classList.add('silent', 'gjg47c');
+            mediaEntry.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+          }
+        });
+      }, 200); // Check every 200ms for responsive transitions
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Leave meeting
+    // ──────────────────────────────────────────────────
+    function leaveMeeting() {
+      if (speakingInterval) clearInterval(speakingInterval);
+
+      // Stop all audio sources
+      Object.values(activeSources).forEach(src => {
+        try { src.stop(); } catch(e) {}
+      });
+
+      // Close audio context
+      if (audioCtx) {
+        audioCtx.close().catch(() => {});
+      }
+
+      document.getElementById('meeting-screen').style.display = 'none';
+
+      // Show "Meeting ended" screen
+      const ended = document.createElement('div');
+      ended.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;';
+      ended.innerHTML = '<h1 style="font-weight:400;color:#e8eaed;">You left the meeting</h1>' +
+                         '<p style="color:#9aa0a6;">The mock meeting has ended.</p>';
+      document.body.appendChild(ended);
+      setStatus('MOCK: Meeting ended');
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Utility
+    // ──────────────────────────────────────────────────
+    function setStatus(msg) {
+      document.getElementById('mock-status').textContent = msg;
+      console.log('[MockGoogleMeet]', msg);
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Chat panel
+    // ──────────────────────────────────────────────────
+    let chatMsgCounter = 0;
+
+    function toggleChat() {
+      const panel = document.getElementById('chat-panel');
+      panel.classList.toggle('open');
+    }
+
+    function addChatMessage(senderName, text) {
+      chatMsgCounter++;
+      const container = document.getElementById('chat-messages');
+      const group = document.createElement('div');
+      group.className = 'chat-msg-group';
+      group.setAttribute('data-message-id', 'msg-' + chatMsgCounter);
+
+      const sender = document.createElement('div');
+      sender.className = 'poVWob';
+      sender.textContent = senderName;
+
+      const body = document.createElement('div');
+      body.className = 'jO4O1';
+      body.textContent = text;
+
+      group.appendChild(sender);
+      group.appendChild(body);
+      container.appendChild(group);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function sendChatMessage() {
+      const input = document.getElementById('chat-input');
+      const text = input.value.trim();
+      if (!text) return;
+      // "You" is the bot or whoever typed
+      addChatMessage('You', text);
+      input.value = '';
+      input.dispatchEvent(new Event('input'));
+
+      // Simulate a reply from a random participant after 1s
+      setTimeout(() => {
+        const p = PARTICIPANTS[Math.floor(Math.random() * PARTICIPANTS.length)];
+        addChatMessage(p.name, 'Got it, thanks!');
+      }, 1000);
+    }
+
+    // Handle Enter key to send
+    document.addEventListener('DOMContentLoaded', () => {
+      const input = document.getElementById('chat-input');
+      if (input) {
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendChatMessage();
+          }
+        });
+      }
+    });
+
+    // Retry autoplay when AudioContext is suspended (common in headless browsers)
+    document.addEventListener('click', () => {
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().then(() => {
+          setStatus('MOCK: AudioContext resumed');
+          // Replay all audio elements
+          mediaElements.forEach(m => {
+            m.element.play().catch(() => {});
+          });
+        });
+      }
+    });
+  </script>
+</body>
+</html>

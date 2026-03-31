@@ -1,0 +1,78 @@
+---
+title: "Token Prefix Scoping"
+---
+API tokens in Vexa carry a scope prefix that declares what the token is allowed to do. This page explains the prefix format, available scopes, and how to create scoped tokens.
+
+## Token Format
+
+All new tokens follow the pattern:
+
+```
+vxa_<scope>_<random>
+```
+
+Example: `vxa_bot_a7f2b9c1d3e5f6g7h8i9j0k1l2m3n4o5`
+
+Tokens without the `vxa_` prefix are **legacy tokens** with full access, preserved for backward compatibility.
+
+## Scopes
+
+| Prefix | Scope | Intended use |
+|--------|-------|-------------|
+| `vxa_bot_` | `bot` | Bot management — creating bots, checking status, stopping bots |
+| `vxa_tx_` | `tx` | Transcription access — reading transcripts, meetings, recordings |
+| `vxa_admin_` | `admin` | Full admin access — user CRUD, token management, analytics |
+| `vxa_user_` | `user` | Full access — dashboard / webapp SSO login sessions |
+
+## Creating Scoped Tokens
+
+Scoped tokens are created through the Admin API. Use the `POST /admin/users/{user_id}/tokens` endpoint:
+
+```bash
+curl -X POST "$ADMIN_URL/admin/users/1/tokens" \
+  -H "X-Admin-API-Key: $ADMIN_API_TOKEN"
+```
+
+The response includes the full token string with its prefix:
+
+```json
+{
+  "id": 42,
+  "token": "vxa_bot_a7f2b9c1d3e5f6g7h8i9j0k1l2m3n4o5",
+  "user_id": 1,
+  "created_at": "2026-03-15T10:00:00Z"
+}
+```
+
+<Info>
+Save the token immediately after creation — it cannot be retrieved later. Only the token ID is stored for revocation.
+</Info>
+
+For the full Admin API workflow (create user, mint token, test access), see [Self-Hosted Management](self-hosted-management).
+
+## How Scope Checking Works
+
+When a request arrives, the token is parsed:
+
+1. If the token matches `vxa_<scope>_...`, the scope is extracted.
+2. If the scope is in the endpoint's allowed set, the request proceeds.
+3. Legacy tokens (no `vxa_` prefix) are always allowed for backward compatibility.
+
+Enforcement is checked in three services: **admin-api**, **bot-manager**, and **transcription-collector**.
+
+| Scope | What it can access | Enforced in |
+|-------|-------------------|-------------|
+| `user` | Everything (dashboard/webapp tokens from SSO login) | admin-api, bot-manager, transcription-collector |
+| `bot` | Bot management only (create, stop, status, interactive) | bot-manager |
+| `tx` | Transcription access only (transcripts, meetings, recordings) | transcription-collector |
+| `admin` | Everything (admin operations) | all services |
+| Legacy (no prefix) | Everything (backward compatible) | all services |
+
+<Info>
+A `bot`-scoped token cannot read transcripts. A `tx`-scoped token cannot create bots. Use `user` or separate tokens if you need both.
+</Info>
+
+## Related
+
+- [Self-Hosted Management](self-hosted-management) — creating users and tokens via the Admin API
+- [Security](security) — authentication and data handling overview

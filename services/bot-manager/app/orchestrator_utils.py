@@ -40,6 +40,7 @@ from sqlalchemy import select as sa_select
 DOCKER_HOST = os.environ.get("DOCKER_HOST", "unix://var/run/docker.sock")
 DOCKER_NETWORK = os.environ.get("DOCKER_NETWORK", "vexa_default")
 BOT_IMAGE_NAME = os.environ.get("BOT_IMAGE_NAME", "vexa-bot:dev")
+BOT_EXPERIMENT_IMAGE_NAME = os.environ.get("BOT_EXPERIMENT_IMAGE_NAME", "vexa-bot:experiment")
 
 # For example, use 'cuda' for NVIDIA GPUs or 'cpu' for CPU
 DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "cuda").lower()
@@ -154,7 +155,12 @@ async def start_bot_container(
     transcribe_enabled: Optional[bool] = None,
     zoom_obf_token: Optional[str] = None,
     voice_agent_enabled: Optional[bool] = None,
-    default_avatar_url: Optional[str] = None
+    tts_enabled: Optional[bool] = None,
+    default_avatar_url: Optional[str] = None,
+    video_receive_enabled: Optional[bool] = None,
+    camera_enabled: Optional[bool] = None,
+    agent_enabled: Optional[bool] = None,
+    extra_bot_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[tuple[str, str]]:
     """
     Starts a vexa-bot container via requests_unixsocket AFTER checking user limit.
@@ -235,46 +241,48 @@ async def start_bot_container(
         "recordingEnabled": user_recording_config.get("enabled", os.getenv("RECORDING_ENABLED", "false").lower() == "true"),
         "transcribeEnabled": True if transcribe_enabled is None else bool(transcribe_enabled),
         "captureModes": user_recording_config.get("capture_modes", os.getenv("CAPTURE_MODES", "audio").split(",")),
-        "recordingUploadUrl": f"http://bot-manager:8080/internal/recordings/upload"
+        "recordingUploadUrl": f"http://bot-manager:8080/internal/recordings/upload",
+        "transcriptionServiceUrl": os.getenv("TRANSCRIPTION_SERVICE_URL"),
+        "transcriptionServiceToken": os.getenv("TRANSCRIPTION_SERVICE_TOKEN"),
     }
     if recording_enabled is not None:
         bot_config_data["recordingEnabled"] = bool(recording_enabled)
     if voice_agent_enabled is not None:
         bot_config_data["voiceAgentEnabled"] = bool(voice_agent_enabled)
+    if tts_enabled is not None:
+        bot_config_data["ttsEnabled"] = bool(tts_enabled)
+    if video_receive_enabled is not None:
+        bot_config_data["videoReceiveEnabled"] = bool(video_receive_enabled)
+    if camera_enabled is not None:
+        bot_config_data["cameraEnabled"] = bool(camera_enabled)
     if default_avatar_url:
         bot_config_data["defaultAvatarUrl"] = default_avatar_url
+    # Merge extra bot config (e.g., authenticated mode S3 credentials)
+    if extra_bot_config and isinstance(extra_bot_config, dict):
+        bot_config_data.update(extra_bot_config)
     # Remove keys with None values before serializing
     cleaned_config_data = {k: v for k, v in bot_config_data.items() if v is not None}
     bot_config_json = json.dumps(cleaned_config_data)
 
     logger.debug(f"Bot config: {bot_config_json}") # Log the full config
 
-    # Get the WhisperLive URL from bot-manager's own environment.
-    # This is set in docker-compose.yml to ws://whisperlive.internal/ws to go through Traefik.
-    whisper_live_url_for_bot = os.getenv('WHISPER_LIVE_URL')
-
-    if not whisper_live_url_for_bot:
-        # This should ideally not happen if docker-compose.yml is correctly configured.
-        logger.error("CRITICAL: WHISPER_LIVE_URL is not set in bot-manager's environment. Falling back to default, but this should be fixed in docker-compose.yml for bot-manager service.")
-        whisper_live_url_for_bot = 'ws://whisperlive.internal/ws' # Fallback, but log an error.
-
-    logger.info(f"Passing WHISPER_LIVE_URL to bot: {whisper_live_url_for_bot}")
-
-    # These are the environment variables passed to the Node.js process  of the vexa-bot started by your entrypoint.sh.
+    # These are the environment variables passed to the Node.js process of the vexa-bot started by your entrypoint.sh.
     environment = [
-        f"BOT_CONFIG={bot_config_json}",
-        f"WHISPER_LIVE_URL={whisper_live_url_for_bot}", # Use the URL from bot-manager's env
         f"LOG_LEVEL={os.getenv('LOG_LEVEL', 'INFO').upper()}",
     ]
 
-    # Add voice agent environment variables (TTS service URL required)
-    if voice_agent_enabled:
+    # Agent-only mode (agent_enabled + no meeting_url): skip BOT_CONFIG → entrypoint does sleep infinity
+    if not agent_enabled or meeting_url:
+        environment.insert(0, f"BOT_CONFIG={bot_config_json}")
+    # Add TTS service URL when voice agent or TTS-only mode is enabled
+    if voice_agent_enabled or tts_enabled:
         tts_service_url = os.getenv("TTS_SERVICE_URL", "").strip()
         if tts_service_url:
             environment.append(f"TTS_SERVICE_URL={tts_service_url}")
             logger.info(f"Added TTS_SERVICE_URL to bot environment: {tts_service_url}")
         else:
-            logger.warning("voice_agent_enabled but TTS_SERVICE_URL not set - TTS will fail")
+            mode = "voice_agent_enabled" if voice_agent_enabled else "tts_enabled"
+            logger.warning(f"{mode} but TTS_SERVICE_URL not set - TTS will fail")
 
     # Add Zoom-specific environment variables if platform is Zoom
     if platform == "zoom":
@@ -298,14 +306,30 @@ async def start_bot_container(
     socket_url_base = f'http+unix://{socket_path_encoded}'
 
     # Docker API payload for creating a container
+    image = BOT_EXPERIMENT_IMAGE_NAME if agent_enabled else BOT_IMAGE_NAME
+    host_config = {
+        "NetworkMode": DOCKER_NETWORK,
+        "AutoRemove": not agent_enabled,  # Agent containers persist for interactive use
+        "ExtraHosts": ["host.docker.internal:host-gateway"],
+    }
+
+    if agent_enabled:
+        vexa_repo_path = os.environ.get("VEXA_REPO_PATH", "/home/dima/dev/vexa")
+        claude_home = os.environ.get("CLAUDE_HOME", "/home/dima")
+        host_config["Binds"] = [
+            # Claude CLI credentials
+            f"{claude_home}/.claude/.credentials.json:/root/.claude/.credentials.json:ro",
+            f"{claude_home}/.claude.json:/root/.claude.json:ro",
+            # Agent context (CLAUDE.md + settings) for Claude CLI
+            f"{vexa_repo_path}/experiments/.claude:/app/vexa-bot/core/.claude:ro",
+        ]
+        host_config["ShmSize"] = 2 * 1024 * 1024 * 1024  # 2GB shared memory for Chromium
+
     create_payload = {
-        "Image": BOT_IMAGE_NAME,
+        "Image": image,
         "Env": environment,
-        "Labels": {"vexa.user_id": str(user_id)}, # *** ADDED Label ***
-        "HostConfig": {
-            "NetworkMode": DOCKER_NETWORK,
-            "AutoRemove": True,
-        },
+        "Labels": {"vexa.user_id": str(user_id)},
+        "HostConfig": host_config,
     }
 
     create_url = f'{socket_url_base}/containers/create?name={container_name}'
@@ -313,7 +337,7 @@ async def start_bot_container(
 
     container_id = None # Initialize container_id
     try:
-        logger.info(f"Attempting to create bot container '{container_name}' ({BOT_IMAGE_NAME}) via socket ({socket_url_base})...")
+        logger.info(f"Attempting to create bot container '{container_name}' ({image}) via socket ({socket_url_base})...")
         response = session.post(create_url, json=create_payload)
         response.raise_for_status()
         container_info = response.json()
@@ -561,3 +585,96 @@ async def verify_container_running(container_id: str) -> bool:
     except Exception as e:
         logger.error(f"[Verify Container] Unexpected error inspecting container {container_id}: {e}", exc_info=True)
         return False # Treat other errors as "not verifiable" or "not running"
+
+
+async def start_browser_session_container(
+    user_id: int,
+    meeting_id: int,
+    container_name: str,
+    bot_config_json: str,
+) -> Optional[tuple[str, str]]:
+    """
+    Starts a vexa-bot container in browser_session mode.
+
+    Key differences from meeting bot:
+    - Sets BOT_MODE=browser_session env var
+    - No AutoRemove (browser session stays until explicit stop)
+    - Ports 6080 (VNC) and 9222 (CDP) accessible within Docker network
+
+    Returns:
+        A tuple (container_id, container_name) if successful, (None, None) otherwise.
+    """
+    session = get_socket_session()
+    if not session:
+        logger.error("Cannot start browser session container, requests_unixsocket session not available.")
+        return None, None
+
+    logger.info(f"Starting browser session container '{container_name}' for user {user_id}, meeting {meeting_id}")
+
+    # Ensure absolute path for URL encoding
+    socket_path_relative = DOCKER_HOST.split('//', 1)[1]
+    socket_path_abs = f"/{socket_path_relative}"
+    socket_path_encoded = socket_path_abs.replace("/", "%2F")
+    socket_url_base = f'http+unix://{socket_path_encoded}'
+
+    environment = [
+        f"BOT_CONFIG={bot_config_json}",
+        f"BOT_MODE=browser_session",
+        f"LOG_LEVEL={os.getenv('LOG_LEVEL', 'INFO').upper()}",
+    ]
+
+    host_config = {
+        "NetworkMode": DOCKER_NETWORK,
+        "AutoRemove": False,  # Browser sessions persist until explicit stop
+        "ExtraHosts": ["host.docker.internal:host-gateway"],
+        "ShmSize": 2 * 1024 * 1024 * 1024,  # 2GB shared memory for Chromium
+    }
+
+    create_payload = {
+        "Image": BOT_IMAGE_NAME,
+        "Env": environment,
+        "Labels": {
+            "vexa.user_id": str(user_id),
+            "vexa.mode": "browser_session",
+        },
+        "HostConfig": host_config,
+        # Expose ports within Docker network (no host port mapping)
+        "ExposedPorts": {
+            "6080/tcp": {},
+            "9223/tcp": {},
+        },
+    }
+
+    create_url = f'{socket_url_base}/containers/create?name={container_name}'
+    start_url_template = f'{socket_url_base}/containers/{{}}/start'
+
+    container_id = None
+    try:
+        logger.info(f"Creating browser session container '{container_name}' ({BOT_IMAGE_NAME})...")
+        response = session.post(create_url, json=create_payload)
+        response.raise_for_status()
+        container_info = response.json()
+        container_id = container_info.get('Id')
+
+        if not container_id:
+            logger.error(f"Failed to create browser session container: No ID in response: {container_info}")
+            return None, None
+
+        logger.info(f"Browser session container {container_id} created. Starting...")
+
+        start_url = start_url_template.format(container_id)
+        response = session.post(start_url)
+
+        if response.status_code != 204:
+            logger.error(f"Failed to start browser session container {container_id}. Status: {response.status_code}, Response: {response.text}")
+            return None, None
+
+        logger.info(f"Successfully started browser session container {container_id} for meeting {meeting_id}")
+        return container_id, container_name
+
+    except RequestException as e:
+        logger.error(f"HTTP error starting browser session container: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"Unexpected error starting browser session container: {e}", exc_info=True)
+
+    return None, None

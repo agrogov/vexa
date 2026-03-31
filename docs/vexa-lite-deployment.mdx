@@ -27,7 +27,6 @@ Vexa Lite runs the following services internally via supervisord:
 | Admin API | 8057 | User and API token management |
 | Bot Manager | 8080 | Bot lifecycle management (process orchestrator) |
 | Transcription Collector | 8123 | Stores transcription segments in PostgreSQL |
-| WhisperLive | 9090 | Transcription relay (routes to remote service) |
 | MCP Service | 18888 | Model Context Protocol for Claude/Cursor |
 | TTS Service | 8059 | Text-to-speech via OpenAI API |
 | Redis | 6379 | Built-in message broker |
@@ -289,7 +288,7 @@ To build the image locally from the Vexa repository:
 
 ```bash
 git clone https://github.com/Vexa-ai/vexa.git
-cd vexa/docker/lite
+cd vexa/deploy/lite
 make build
 ```
 
@@ -331,6 +330,13 @@ Then run Vexa Lite with `--network vexa-network` and `DB_HOST=vexa-postgres`.
 </Accordion>
 
 ---
+
+## Source Code
+
+- [api-gateway](https://github.com/Vexa-ai/vexa/blob/main/services/api-gateway/README.md) -- REST/WebSocket API
+- [bot-manager](https://github.com/Vexa-ai/vexa/blob/main/services/bot-manager/README.md) -- bot lifecycle orchestration
+- [dashboard](https://github.com/Vexa-ai/vexa/blob/main/services/dashboard/README.md) -- web UI
+- [admin-api](https://github.com/Vexa-ai/vexa/blob/main/services/admin-api/README.md) -- user and token management
 
 ## Next Steps
 

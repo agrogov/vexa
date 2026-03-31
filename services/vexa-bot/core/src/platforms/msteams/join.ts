@@ -59,18 +59,8 @@ async function waitForTeamsPreJoinReadiness(page: Page, timeoutMs: number): Prom
       .catch(() => false);
     const computerAudioVisible = await page.locator(teamsComputerAudioRadioSelectors.join(", ")).first().isVisible().catch(() => false);
 
-    // Also check DOM presence directly — light-meetings experience renders the join button
-    // before Playwright considers it "visible", so isVisible() returns false even when ready.
-    const joinNowInDom = await page.evaluate(() =>
-      !!(
-        document.getElementById("prejoin-join-button") ||
-        document.querySelector('[data-tid="prejoin-join-button"]') ||
-        document.querySelector('[aria-label="Join now"]')
-      )
-    ).catch(() => false);
-
-    if (joinNowVisible || joinNowInDom || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
-      log(`✅ Teams pre-join controls are ready (joinNowVisible=${joinNowVisible}, joinNowInDom=${joinNowInDom})`);
+    if (joinNowVisible || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
+      log("✅ Teams pre-join controls are ready");
       return true;
     }
 
@@ -306,99 +296,15 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
   // The pre-join screen shows camera toggle, name input, and audio settings.
   // We must configure all of these before clicking "Join now" in Step 6.
 
-  log("Step 3: Camera handling...");
-  if (botConfig.voiceAgentEnabled) {
-    // Voice agent needs camera ON so the virtual camera canvas stream is sent via WebRTC.
-    // The getUserMedia + enumerateDevices patches ensure Teams gets our canvas stream.
-    // Try to turn camera ON if it's off.
-    log("ℹ️ Voice agent enabled — keeping camera ON for virtual camera feed");
-    try {
-      const turnOnBtn = page.locator([
-        'button[aria-label="Turn on video"]',
-        'button[aria-label="Turn on camera"]',
-        'button[aria-label="Turn camera on"]',
-        'button[aria-label="Turn video on"]'
-      ].join(', ')).first();
-      const turnOffBtn = page.locator([
-        'button[aria-label="Turn off video"]',
-        'button[aria-label="Turn off camera"]',
-        'button[aria-label="Turn camera off"]',
-        'button[aria-label="Turn video off"]'
-      ].join(', ')).first();
-      const videoOptionsBtn = page.locator(teamsVideoOptionsButtonSelectors.join(", ")).first();
-
-      let turnOnVisible = await turnOnBtn.isVisible().catch(() => false);
-      let turnOffVisible = await turnOffBtn.isVisible().catch(() => false);
-
-      if (!turnOnVisible && !turnOffVisible) {
-        const selectedFromVideoOptions = await trySelectCameraFromVideoOptions(page);
-        if (selectedFromVideoOptions) {
-          await page.waitForTimeout(800);
-          turnOnVisible = await turnOnBtn.isVisible().catch(() => false);
-          turnOffVisible = await turnOffBtn.isVisible().catch(() => false);
-        }
-      }
-
-      if (turnOnVisible) {
-        await turnOnBtn.click();
-        log("✅ Camera/video turned ON for voice agent");
-        await page.waitForTimeout(1000);
-      } else if (turnOffVisible) {
-        log("ℹ️ Camera/video already ON");
-      } else {
-        const videoOptionsVisible = await videoOptionsBtn.isVisible().catch(() => false);
-        if (videoOptionsVisible) {
-          log("ℹ️ Only video options control is visible; trying keyboard toggle as fallback...");
-          await page.keyboard.press("Control+Shift+O").catch(() => {});
-          await page.waitForTimeout(800);
-          const turnOffAfterShortcut = await turnOffBtn.isVisible().catch(() => false);
-          if (turnOffAfterShortcut) {
-            log("✅ Camera/video turned ON via keyboard shortcut");
-          } else {
-            log("ℹ️ Video options present but no camera ON state detected after fallback");
-          }
-        } else {
-          log("ℹ️ No camera/video button found — may be unavailable in this container");
-        }
-      }
-    } catch (error) {
-      log("ℹ️ Could not enable camera for voice agent");
-    }
-  } else {
-    // Normal bot mode — turn camera and mic off to be unobtrusive
-    try {
-      const turnOffSelectors = teamsCameraButtonSelectors
-        .filter(s => s.includes("Turn off") || s.includes("Turn camera off") || s.includes("Turn video off"));
-      const turnOffBtn = page.locator(turnOffSelectors.join(", ")).first();
-      const isVisible = await turnOffBtn.isVisible().catch(() => false);
-      if (isVisible) {
-        await turnOffBtn.click();
-        log("✅ Camera turned off");
-      } else {
-        log("ℹ️ Camera off button not visible — may already be off");
-      }
-    } catch (error) {
-      log("ℹ️ Camera button not found or already off");
-    }
-
-    // Turn microphone off
-    try {
-      const micOffBtn = page.locator([
-        'button[aria-label="Turn off microphone"]',
-        'button[aria-label="Turn microphone off"]',
-        'button[aria-label="Mute microphone"]',
-        'button[aria-label="Mute"]',
-      ].join(", ")).first();
-      const micOffVisible = await micOffBtn.isVisible().catch(() => false);
-      if (micOffVisible) {
-        await micOffBtn.click();
-        log("✅ Microphone turned off");
-      } else {
-        log("ℹ️ Mic off button not visible — may already be off");
-      }
-    } catch (error) {
-      log("ℹ️ Microphone button not found or already off");
-    }
+  // Camera always OFF — slim bot, no video streaming
+  log("Step 3: Turning camera off...");
+  try {
+    const cameraButton = page.locator(teamsCameraButtonSelectors[0]);
+    await cameraButton.waitFor({ timeout: 5000 });
+    await cameraButton.click();
+    log("✅ Camera turned off");
+  } catch (error) {
+    log("ℹ️ Camera button not found or already off");
   }
 
   log("Step 4: Trying to set display name...");
@@ -471,59 +377,27 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
 
   log("Step 6: Clicking 'Join now' to enter the meeting...");
   try {
-    // Primary: JS click by known id/data-tid — bypasses Playwright visibility checks.
-    // The light-meetings experience renders the button in the DOM before Playwright
-    // considers it "visible", so direct JS click is the most reliable approach.
-    const jsClicked = await page.evaluate(() => {
-      const btn = (
-        document.getElementById("prejoin-join-button") ||
-        document.querySelector<HTMLElement>('[data-tid="prejoin-join-button"]') ||
-        document.querySelector<HTMLElement>('[aria-label="Join now"]') ||
-        Array.from(document.querySelectorAll<HTMLElement>("button")).find(
-          (b) => b.innerText?.trim() === "Join now"
-        )
-      );
-      if (btn) { btn.click(); return true; }
-      return false;
-    });
+    // Use the more specific "Join now" selector first to avoid ambiguity
+    const joinNowButton = page.locator('button:has-text("Join now")').first();
+    const joinNowVisible = await joinNowButton.isVisible().catch(() => false);
 
-    if (jsClicked) {
-      log("✅ Clicked 'Join now' button (JS click)");
+    if (joinNowVisible) {
+      await joinNowButton.click();
+      log("✅ Clicked 'Join now' button");
     } else {
-      // Fallback: Playwright click with force
+      // Fall back to generic join selectors
       const fallbackJoinButton = page.locator(teamsJoinButtonSelectors.join(', ')).first();
       await fallbackJoinButton.waitFor({ timeout: 10000 });
-      await fallbackJoinButton.click({ force: true });
+      await fallbackJoinButton.click();
       log("✅ Clicked join button (fallback selector)");
     }
     // Wait for Teams to transition from pre-join to lobby/meeting.
+    // Teams needs several seconds to process the join request and show
+    // either the waiting room or the meeting view.
     log("Waiting for Teams to process join request...");
     await page.waitForTimeout(8000);
   } catch (error) {
     log("⚠️ Join button not found — bot may not be able to enter the meeting");
-    // Dump all visible buttons to help diagnose selector mismatches (especially light experience)
-    try {
-      const visibleButtons = await page.evaluate(() =>
-        Array.from(document.querySelectorAll("button, [role='button'], input[type='button']"))
-          .filter((el) => {
-            const r = (el as HTMLElement).getBoundingClientRect();
-            return r.width > 0 && r.height > 0;
-          })
-          .map((el) => ({
-            tag: el.tagName,
-            text: ((el as HTMLElement).innerText || "").trim().slice(0, 60),
-            ariaLabel: el.getAttribute("aria-label"),
-            dataTid: el.getAttribute("data-tid"),
-            id: el.id || null,
-          }))
-      );
-      log(`[Join Debug] Visible buttons on page (url=${page.url()}):`);
-      for (const b of visibleButtons) {
-        log(`  [Join Debug] <${b.tag}> text="${b.text}" aria-label="${b.ariaLabel}" data-tid="${b.dataTid}" id="${b.id}"`);
-      }
-    } catch (dumpErr: any) {
-      log(`[Join Debug] Could not dump buttons: ${dumpErr?.message}`);
-    }
   }
 
   log("Step 7: Checking current state...");

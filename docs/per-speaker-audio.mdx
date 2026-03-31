@@ -1,0 +1,92 @@
+---
+title: "Per-Speaker Audio Architecture"
+---
+Vexa captures audio differently depending on the meeting platform. This architectural difference directly affects transcription quality, speaker attribution accuracy, and how overlapping speech is handled.
+
+## Platform Comparison
+
+<Tabs>
+  <Tab title="Google Meet">
+### Per-Speaker WebRTC Tracks
+
+Google Meet exposes individual `<audio>` and `<video>` DOM elements per participant. Each element carries a separate WebRTC media stream.
+
+**How it works:**
+- The bot discovers one audio stream per participant via DOM media elements.
+- Each stream contains **only that speaker's voice** — clean, single-voice audio.
+- Speaker identity is resolved by correlating DOM speaking indicators with audio tracks using a **voting/locking** system: the bot observes which DOM tile shows the "speaking" indicator while audio arrives on a track, votes on the match, and permanently locks the identity after reaching a confidence threshold.
+
+**Result:**
+- No diarization needed — segments arrive pre-labeled with the speaker's name.
+- High transcription accuracy — the model receives clean single-voice audio without cross-talk.
+- Overlapping speech is handled naturally — each speaker's audio is on a separate track, so simultaneous speech does not interfere.
+  </Tab>
+
+  <Tab title="Microsoft Teams">
+### Single Mixed Audio Stream
+
+Teams provides a single `RTCPeerConnection` stream containing all participants' audio mixed together.
+
+**How it works:**
+- The bot receives one combined audio stream via the RTCPeerConnection.
+- The active speaker is detected by observing DOM elements that indicate who is currently speaking.
+- Audio segments are **routed** to the detected speaker based on temporal overlap — when the DOM shows Alice is speaking and audio arrives, that segment is attributed to Alice.
+
+**Result:**
+- Speaker attribution depends on DOM active speaker detection accuracy.
+- When two people speak simultaneously, the mixed audio is attributed to whoever the DOM indicates as the active speaker, which may miss the other speaker.
+- Transcription quality is slightly lower for overlapping speech because the model receives mixed audio rather than clean single-voice input.
+  </Tab>
+
+  <Tab title="Zoom">
+### SDK Raw Audio or PulseAudio Fallback
+
+Zoom uses the native Meeting SDK when available, with a PulseAudio fallback for web-based capture.
+
+**How it works:**
+- **SDK mode** (primary): The Zoom Meeting SDK provides a raw audio callback with per-speaker data and participant metadata.
+- **PulseAudio fallback**: When the SDK is unavailable, the bot captures system audio via PulseAudio — this is a single mixed stream similar to Teams.
+
+**Result:**
+- SDK mode gives per-speaker audio with accurate speaker identity from Zoom's participant API.
+- PulseAudio fallback behaves like Teams — mixed audio with DOM-based speaker detection.
+
+<Note>
+Zoom support is **self-hosted only** — it requires your own Zoom Marketplace app and SDK binaries. Not available on the hosted service. A web-app mode (Playwright, no SDK) is in development.
+</Note>
+  </Tab>
+</Tabs>
+
+## Why This Matters
+
+| Factor | Google Meet | Teams | Zoom (SDK) |
+|--------|-----------|-------|------------|
+| Audio per speaker | Separate tracks | Mixed stream | Separate (SDK) |
+| Diarization needed | No | No (DOM-routed) | No (SDK metadata) |
+| Overlapping speech | Both speakers captured cleanly | One speaker may be missed | Both captured (SDK) |
+| Transcription accuracy | Highest | Good, lower for cross-talk | High (SDK) |
+| Speaker attribution | Voting/locking on audio tracks | DOM active speaker detection | SDK participant API |
+
+If your use case requires the highest possible transcription accuracy — especially for meetings with frequent cross-talk or overlapping speech — Google Meet will give the best results due to its per-speaker audio architecture.
+
+## The Confirmation Buffer
+
+Regardless of platform, all audio feeds into the same per-speaker pipeline:
+
+1. **Track discovery** — audio streams are found (per-speaker on Meet, mixed on Teams).
+2. **Speaker identity** — resolved via voting/locking (`speaker-identity.ts`).
+3. **VAD filtering** — Silero VAD removes silence before transcription.
+4. **Confirmation buffer** — the buffer resubmits audio every 2 seconds and publishes results in two stages:
+   - **Draft** (`completed: false`) — published immediately on each transcription result (~2s latency to dashboard).
+   - **Confirmed** (`completed: true`) — published after 2 consecutive matching transcriptions replace the draft.
+   - **Hard cap** — 10-second wall-clock limit forces a flush regardless of confirmation status.
+5. **Redis publish** — `XADD` to the transcription stream (persistence) and `PUBLISH` to the channel (real-time dashboard).
+
+This two-stage approach balances low latency (drafts appear quickly) with accuracy (confirmed segments replace drafts once stable).
+
+## Related
+
+- [Google Meet](platforms/google-meet) — platform-specific setup and known issues
+- [Microsoft Teams](platforms/microsoft-teams) — platform-specific setup
+- [Zoom](platforms/zoom) — Zoom SDK requirements and setup
+- [Core Concepts](concepts) — transcript segments, timing, and recording model

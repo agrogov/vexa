@@ -49,6 +49,7 @@ class PaginatedMeetingUserStatResponse(BaseModel):
 API_KEY_HEADER = APIKeyHeader(name="X-Admin-API-Key", auto_error=False) # Use a distinct header
 USER_API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False) # For user-facing endpoints
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN") # Read from environment
+ANALYTICS_API_TOKEN = os.getenv("ANALYTICS_API_TOKEN") # Read-only analytics token
 
 async def verify_admin_token(admin_api_key: str = Security(API_KEY_HEADER)):
     """Dependency to verify the admin API token."""
@@ -66,12 +67,37 @@ async def verify_admin_token(admin_api_key: str = Security(API_KEY_HEADER)):
             detail="Invalid or missing admin token."
         )
     logger.info("Admin token verified successfully.")
-    # No need to return anything, just raises exception on failure 
+    # No need to return anything, just raises exception on failure
+
+async def verify_analytics_or_admin_token(api_key: str = Security(API_KEY_HEADER)):
+    """Dependency that accepts either the full admin token or the read-only analytics token."""
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Missing API key"
+        )
+    
+    # Check if it matches admin token
+    if ADMIN_API_TOKEN and api_key == ADMIN_API_TOKEN:
+        return
+    
+    # Check if it matches analytics token
+    if ANALYTICS_API_TOKEN and api_key == ANALYTICS_API_TOKEN:
+        return
+    
+    logger.warning("Invalid token provided for analytics endpoint.")
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Invalid API key"
+    ) 
 
 async def get_current_user(api_key: str = Security(USER_API_KEY_HEADER), db: AsyncSession = Depends(get_db)) -> User:
     """Dependency to verify user API key and return user object."""
     if not api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API Key")
+
+    if not check_token_scope(api_key, {"user", "admin"}):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token scope not authorized for this endpoint")
 
     result = await db.execute(
         select(APIToken).where(APIToken.token == api_key).options(selectinload(APIToken.user))
@@ -80,7 +106,7 @@ async def get_current_user(api_key: str = Security(USER_API_KEY_HEADER), db: Asy
 
     if not db_token or not db_token.user:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API Key")
-    
+
     return db_token.user
 
 # Router setup (all routes require admin token verification)
@@ -90,6 +116,13 @@ admin_router = APIRouter(
     dependencies=[Depends(verify_admin_token)]
 )
 
+# Analytics router - accepts either admin or analytics token (read-only access)
+analytics_router = APIRouter(
+    prefix="/admin",
+    tags=["Analytics"],
+    dependencies=[Depends(verify_analytics_or_admin_token)]
+)
+
 # New router for user-facing actions
 user_router = APIRouter(
     prefix="/user",
@@ -97,10 +130,11 @@ user_router = APIRouter(
     dependencies=[Depends(get_current_user)]
 )
 
-# --- Helper Functions --- 
-def generate_secure_token(length=40):
-    alphabet = string.ascii_letters + string.digits
-    return ''.join(secrets.choice(alphabet) for i in range(length))
+# --- Helper Functions ---
+from shared_models.token_scope import generate_prefixed_token, check_token_scope
+
+def generate_secure_token(length=40, scope: str = "user"):
+    return generate_prefixed_token(scope, length)
 
 # --- User Endpoints ---
 @user_router.put("/webhook",
@@ -209,7 +243,7 @@ async def create_user(user_in: UserCreate, response: Response, db: AsyncSession 
         await db.commit()
     return UserResponse.model_validate(db_user)
 
-@admin_router.get("/users", 
+@analytics_router.get("/users", 
             response_model=List[UserResponse], # Use List import
             summary="List all users")
 async def list_users(skip: int = 0, limit: int = 100, db: AsyncSession = Depends(get_db)):
@@ -328,8 +362,8 @@ async def update_user(user_id: int, user_update: UserUpdate, db: AsyncSession = 
         if new_data is not None:
             logger.info(f"Admin updating data field for user ID: {user_id}. Current: {db_user.data}, New: {new_data}")
             
-            # Replace the data field entirely (rather than merging)
-            db_user.data = new_data
+            # Merge incoming keys into existing data (preserves keys not in the patch)
+            db_user.data = {**(db_user.data or {}), **new_data}
             
             # Flag the 'data' field as modified for SQLAlchemy to detect the change
             attributes.flag_modified(db_user, "data")
@@ -370,16 +404,16 @@ async def update_user(user_id: int, user_update: UserUpdate, db: AsyncSession = 
 
     return UserResponse.model_validate(db_user)
 
-@admin_router.post("/users/{user_id}/tokens", 
+@admin_router.post("/users/{user_id}/tokens",
              response_model=TokenResponse,
              status_code=status.HTTP_201_CREATED,
              summary="Generate a new API token for a user")
-async def create_token_for_user(user_id: int, db: AsyncSession = Depends(get_db)):
+async def create_token_for_user(user_id: int, scope: str = "user", db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-    
-    token_value = generate_secure_token()
+
+    token_value = generate_secure_token(scope=scope)
     # Use the APIToken model from shared_models
     # Use timezone-naive datetime for TIMESTAMP WITHOUT TIME ZONE column
     db_token = APIToken(
@@ -416,7 +450,7 @@ async def delete_token(token_id: int, db: AsyncSession = Depends(get_db)):
     return 
 
 # --- Usage Stats Endpoints ---
-@admin_router.get("/stats/meetings-users",
+@analytics_router.get("/stats/meetings-users",
             response_model=PaginatedMeetingUserStatResponse,
             summary="Get paginated list of meetings joined with users")
 async def list_meetings_with_users(
@@ -454,7 +488,7 @@ async def list_meetings_with_users(
     return PaginatedMeetingUserStatResponse(total=total, items=response_items)
 
 # --- Analytics Endpoints ---
-@admin_router.get("/analytics/users",
+@analytics_router.get("/analytics/users",
                   response_model=List[UserTableResponse],
                   summary="Get users table structure without sensitive data")
 async def get_users_table(
@@ -485,7 +519,7 @@ async def get_users_table(
     
     return [UserTableResponse.model_validate(u) for u in users]
 
-@admin_router.get("/analytics/meetings",
+@analytics_router.get("/analytics/meetings",
                   response_model=List[MeetingTableResponse], 
                   summary="Get meetings table structure without sensitive data")
 async def get_meetings_table(
@@ -676,8 +710,9 @@ async def startup_event():
     # await init_db()
     pass
 
-# Include the admin router
+# Include the routers
 app.include_router(admin_router)
+app.include_router(analytics_router)
 app.include_router(user_router)
 
 # Root endpoint (optional)

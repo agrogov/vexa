@@ -193,8 +193,7 @@ async def consume_speaker_events_stream(redis_c: aioredis.Redis):
                 
                 for message_id_bytes, message_data_bytes in messages:
                     message_id_str = message_id_bytes.decode('utf-8') if isinstance(message_id_bytes, bytes) else message_id_bytes
-                    # Speaker event messages are expected to be flat JSON strings in the 'payload' field from WhisperLive
-                    # However, WhisperLive sends them as top-level fields. We need to adapt.
+                    # Speaker event messages contain top-level fields directly.
                     # The `message_data_bytes` from xreadgroup for speaker_events stream will directly contain the speaker event fields.
                     message_data_decoded: Dict[str, Any] = {}
                     if isinstance(message_data_bytes, dict):

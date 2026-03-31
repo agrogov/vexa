@@ -1,5 +1,6 @@
 import uvicorn
 from fastapi import FastAPI, Request, Response, HTTPException, status, Depends, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.security import APIKeyHeader
@@ -10,6 +11,8 @@ import json # For request body processing
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional, Set, Tuple
 import asyncio
+import logging
+import websockets
 import redis.asyncio as aioredis
 from datetime import datetime, timedelta, timezone
 import secrets
@@ -52,15 +55,6 @@ if not all([ADMIN_API_URL, BOT_MANAGER_URL, TRANSCRIPTION_COLLECTOR_URL, MCP_URL
     ]
     raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-# Response Models
-# class BotResponseModel(BaseModel): ...
-# class MeetingModel(BaseModel): ...
-# class MeetingsResponseModel(BaseModel): ...
-# class TranscriptSegmentModel(BaseModel): ...
-# class TranscriptResponseModel(BaseModel): ...
-# class UserModel(BaseModel): ...
-# class TokenModel(BaseModel): ...
-
 # Security Schemes for OpenAPI
 api_key_scheme = APIKeyHeader(name="X-API-Key", description="API Key for client operations", auto_error=False)
 admin_api_key_scheme = APIKeyHeader(name="X-Admin-API-Key", description="API Key for admin operations", auto_error=False)
@@ -84,14 +78,14 @@ app = FastAPI(
     
     Include the appropriate header in your requests.
     """,
-    version="1.2.0", # Incremented version
+    version="1.5.0", # Interactive bots, recordings, MCP, webhooks, transcript sharing, voice agent
     contact={
         "name": "Vexa Support",
-        "url": "https://vexa.io/support", # Placeholder URL
-        "email": "support@vexa.io", # Placeholder Email
+        "url": "https://vexa.ai",
+        "email": "support@vexa.ai",
     },
     license_info={
-        "name": "Proprietary",
+        "name": "Apache-2.0",
     },
     # Include security schemes in OpenAPI spec
     # Note: Applying them globally or per-route is done below
@@ -141,9 +135,14 @@ def custom_openapi():
 app.openapi = custom_openapi
 
 # Add CORS middleware
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -216,27 +215,6 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
     except httpx.RequestError as exc:
         print(f"DEBUG: Request error: {exc}")
         raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
-
-
-def _split_compound_platform_meeting_id(compound_id: str) -> Tuple[Platform, str]:
-    """
-    Parse legacy combined IDs like:
-    - teams_123456789
-    - zoom_987654321
-    - google_meet_abc-defg-hij
-    """
-    for platform in sorted(list(Platform), key=lambda p: len(p.value), reverse=True):
-        prefix = f"{platform.value}_"
-        if compound_id.startswith(prefix) and len(compound_id) > len(prefix):
-            return platform, compound_id[len(prefix):]
-
-    raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail=(
-            f"Invalid combined meeting id '{compound_id}'. "
-            f"Expected format '<platform>_<native_meeting_id>'."
-        ),
-    )
 
 # --- Root Endpoint --- 
 @app.get("/", tags=["General"], summary="API Gateway Root")
@@ -373,47 +351,7 @@ async def chat_send_proxy(platform: Platform, native_meeting_id: str, request: R
 async def chat_read_proxy(platform: Platform, native_meeting_id: str, request: Request):
     """Forward chat read request to Bot Manager."""
     url = f"{BOT_MANAGER_URL}/bots/{platform.value}/{native_meeting_id}/chat"
-    resp = await forward_request(app.state.http_client, "GET", url, request)
-    if resp.status_code == status.HTTP_404_NOT_FOUND:
-        return Response(
-            content=json.dumps({"messages": [], "meeting_id": None}),
-            status_code=status.HTTP_200_OK,
-            media_type="application/json",
-        )
-    return resp
-
-
-@app.post("/bots/{platform_and_native_meeting_id}/chat",
-          tags=["Voice Agent"],
-          summary="Send a chat message in the meeting (legacy combined ID)",
-          description="Legacy compatibility route. Accepts /bots/{platform}_{native_meeting_id}/chat.",
-          dependencies=[Depends(api_key_scheme)],
-          include_in_schema=False)
-async def chat_send_legacy_proxy(platform_and_native_meeting_id: str, request: Request):
-    """Forward legacy chat send request to Bot Manager."""
-    platform, native_meeting_id = _split_compound_platform_meeting_id(platform_and_native_meeting_id)
-    url = f"{BOT_MANAGER_URL}/bots/{platform.value}/{native_meeting_id}/chat"
-    return await forward_request(app.state.http_client, "POST", url, request)
-
-
-@app.get("/bots/{platform_and_native_meeting_id}/chat",
-         tags=["Voice Agent"],
-         summary="Read chat messages from the meeting (legacy combined ID)",
-         description="Legacy compatibility route. Accepts /bots/{platform}_{native_meeting_id}/chat.",
-         dependencies=[Depends(api_key_scheme)],
-         include_in_schema=False)
-async def chat_read_legacy_proxy(platform_and_native_meeting_id: str, request: Request):
-    """Forward legacy chat read request to Bot Manager."""
-    platform, native_meeting_id = _split_compound_platform_meeting_id(platform_and_native_meeting_id)
-    url = f"{BOT_MANAGER_URL}/bots/{platform.value}/{native_meeting_id}/chat"
-    resp = await forward_request(app.state.http_client, "GET", url, request)
-    if resp.status_code == status.HTTP_404_NOT_FOUND:
-        return Response(
-            content=json.dumps({"messages": [], "meeting_id": None}),
-            status_code=status.HTTP_200_OK,
-            media_type="application/json",
-        )
-    return resp
+    return await forward_request(app.state.http_client, "GET", url, request)
 
 @app.post("/bots/{platform}/{native_meeting_id}/screen",
           tags=["Voice Agent"],
@@ -512,7 +450,6 @@ async def download_media_raw_proxy(recording_id: int, media_file_id: int, reques
     url = f"{BOT_MANAGER_URL}/recordings/{recording_id}/media/{media_file_id}/raw"
     return await forward_request(app.state.http_client, "GET", url, request)
 
-
 @app.delete("/recordings/{recording_id}",
             tags=["Recordings"],
             summary="Delete a recording",
@@ -542,6 +479,17 @@ async def update_recording_config_proxy(request: Request):
     """Forward request to Bot Manager to update recording config."""
     url = f"{BOT_MANAGER_URL}/recording-config"
     return await forward_request(app.state.http_client, "PUT", url, request)
+
+# --- Deferred Transcription Route ---
+
+@app.post("/meetings/{meeting_id}/transcribe",
+          tags=["Meetings"],
+          summary="Transcribe a completed meeting recording",
+          dependencies=[Depends(api_key_scheme)])
+async def transcribe_meeting_proxy(meeting_id: int, request: Request):
+    """Forward transcribe request to Bot Manager."""
+    url = f"{BOT_MANAGER_URL}/meetings/{meeting_id}/transcribe"
+    return await forward_request(app.state.http_client, "POST", url, request)
 
 # --- Transcription Collector Routes ---
 @app.get("/meetings",
@@ -979,6 +927,411 @@ async def forward_mcp_path(request: Request, path: str):
         raise HTTPException(status_code=503, detail=f"MCP service unavailable: {exc}")
 
 # --- Removed internal ID resolution and full transcript fetching from Gateway ---
+
+# --- Auth routes (proxied to bot-manager) ---
+
+@app.api_route("/auth/{path:path}", methods=["GET", "POST", "PUT", "DELETE"],
+               tags=["Auth"], include_in_schema=False)
+async def proxy_auth(path: str, request: Request):
+    """Proxy /auth/* routes to bot-manager."""
+    url = f"{BOT_MANAGER_URL}/auth/{path}"
+    return await forward_request(app.state.http_client, request.method, url, request)
+
+
+# --- Remote Browser Session Routes ---
+# Token-based access: /b/{token} serves UI, /b/{token}/vnc/* proxies noVNC, /b/{token}/cdp proxies CDP
+# No X-API-Key needed — the token IS the auth.
+
+logger = logging.getLogger("api-gateway.browser")
+
+
+async def resolve_browser_session(token: str) -> Optional[dict]:
+    """Resolve session token to container info from Redis.
+
+    Expected Redis value at ``browser_session:{token}`` is a JSON object with at
+    least ``container_name`` and ``meeting_id`` keys.  Example::
+
+        {
+            "container_name": "vexa-bot-abc123",
+            "meeting_id": "42",
+            "user_id": "7"
+        }
+    """
+    try:
+        data = await app.state.redis.get(f"browser_session:{token}")
+    except Exception as exc:
+        logger.warning("Redis error resolving browser session %s: %s", token, exc)
+        return None
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def _browser_dashboard_html(token: str, session: dict) -> str:
+    """Return the inline HTML for the remote browser dashboard."""
+    meeting_id = session.get("meeting_id", "")
+    vnc_iframe_url = f"/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify"
+    return f"""\
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Remote Browser</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    html, body {{ height: 100%; background: #1a1a2e; color: #eee; font-family: system-ui, -apple-system, sans-serif; }}
+    .toolbar {{
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 16px; background: #0f3460; height: 48px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }}
+    .toolbar h1 {{ font-size: 16px; font-weight: 600; margin-right: auto; white-space: nowrap; }}
+    .btn {{
+      border: none; padding: 7px 16px; border-radius: 4px; cursor: pointer;
+      font-size: 13px; font-weight: 600; color: #fff; transition: background 0.15s;
+    }}
+    .btn:disabled {{ opacity: 0.5; cursor: wait; }}
+    .btn-green {{ background: #27ae60; }}
+    .btn-green:hover:not(:disabled) {{ background: #219a52; }}
+    .btn-purple {{ background: #8e44ad; }}
+    .btn-purple:hover:not(:disabled) {{ background: #7d3c98; }}
+    .btn-blue {{ background: #2980b9; }}
+    .btn-blue:hover:not(:disabled) {{ background: #2471a3; }}
+    .vnc-frame {{
+      width: 100%; border: none; display: block;
+      height: calc(100vh - 48px);
+    }}
+    .toast {{
+      position: fixed; top: 60px; right: 20px; background: #16213e;
+      border: 1px solid #0f3460; padding: 12px 20px; border-radius: 6px;
+      max-width: 400px; z-index: 999; font-size: 13px;
+      transition: opacity 0.3s; white-space: pre-line;
+    }}
+    .toast.hidden {{ opacity: 0; pointer-events: none; }}
+    #storage-panel {{
+      display: none; position: fixed; top: 48px; right: 0; width: 480px;
+      bottom: 0; background: #16213e; border-left: 1px solid #0f3460;
+      z-index: 100; overflow-y: auto; font-size: 13px;
+    }}
+    #storage-panel.open {{ display: block; }}
+    .panel-header {{
+      padding: 12px 16px; background: #0f3460;
+      display: flex; justify-content: space-between; align-items: center;
+    }}
+    .panel-header h2 {{ font-size: 15px; }}
+    .panel-body {{ padding: 16px; color: #8899aa; }}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <h1>Remote Browser</h1>
+    <button class="btn btn-green" onclick="saveStorage()" id="save-btn">Save Storage</button>
+    <button class="btn btn-purple" onclick="toggleAudit()">Storage Audit</button>
+    <button class="btn btn-blue" onclick="window.open('/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
+  </div>
+  <div class="toast hidden" id="toast"></div>
+
+  <div id="storage-panel">
+    <div class="panel-header">
+      <h2>Storage Audit</h2>
+      <button class="btn" style="background:#555;padding:5px 12px;font-size:12px" onclick="toggleAudit()">Close</button>
+    </div>
+    <div class="panel-body">
+      <p>Storage audit coming soon.</p>
+      <p style="margin-top:12px;font-size:12px;color:#556">
+        This panel will show cookies, localStorage, and IndexedDB
+        from the browser session for inspection and debugging.
+      </p>
+    </div>
+  </div>
+
+  <iframe class="vnc-frame" src="{vnc_iframe_url}" id="vnc-iframe"></iframe>
+
+  <script>
+    const TOKEN = "{token}";
+    const MEETING_ID = "{meeting_id}";
+    const toast = document.getElementById('toast');
+    let toastTimer;
+
+    function showToast(msg, ms) {{
+      toast.textContent = msg;
+      toast.classList.remove('hidden');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.add('hidden'), ms || 4000);
+    }}
+
+    async function saveStorage() {{
+      const btn = document.getElementById('save-btn');
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+      showToast('Saving browser storage to MinIO...');
+      try {{
+        const res = await fetch('/b/' + TOKEN + '/save', {{ method: 'POST' }});
+        const data = await res.json();
+        if (res.ok) {{
+          showToast(data.message || 'Storage saved!', 5000);
+        }} else {{
+          showToast('Error: ' + (data.detail || res.statusText), 6000);
+        }}
+      }} catch (e) {{
+        showToast('Error: ' + e.message, 6000);
+      }} finally {{
+        btn.disabled = false;
+        btn.textContent = 'Save Storage';
+      }}
+    }}
+
+    function toggleAudit() {{
+      document.getElementById('storage-panel').classList.toggle('open');
+    }}
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/b/{token}", tags=["Remote Browser"], summary="Browser session dashboard",
+         response_class=HTMLResponse)
+async def browser_session_page(token: str):
+    """Serve the remote browser dashboard UI. Token is the auth."""
+    session = await resolve_browser_session(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Browser session not found or expired")
+    return HTMLResponse(content=_browser_dashboard_html(token, session))
+
+
+@app.api_route("/b/{token}/vnc/{path:path}", methods=["GET", "POST"],
+               tags=["Remote Browser"], summary="Proxy noVNC static files",
+               include_in_schema=False)
+async def browser_vnc_proxy(token: str, path: str, request: Request):
+    """Proxy HTTP requests (noVNC static files) to the container's port 6080."""
+    session = await resolve_browser_session(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Browser session not found or expired")
+
+    container = session["container_name"]
+    target_url = f"http://{container}:6080/{path}"
+
+    # Forward query string
+    qs = str(request.url.query)
+    if qs:
+        target_url += f"?{qs}"
+
+    excluded_headers = {"host", "content-length", "transfer-encoding"}
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in excluded_headers}
+
+    content = await request.body()
+
+    try:
+        resp = await app.state.http_client.request(
+            request.method, target_url, headers=headers, content=content,
+            timeout=30.0,
+        )
+        # Filter hop-by-hop response headers
+        resp_headers = {k: v for k, v in resp.headers.items()
+                        if k.lower() not in ("transfer-encoding", "connection", "keep-alive")}
+        return Response(content=resp.content, status_code=resp.status_code, headers=resp_headers)
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach browser container: {exc}")
+
+
+@app.websocket("/b/{token}/vnc/websockify")
+async def browser_vnc_ws(websocket: WebSocket, token: str):
+    """Bidirectional WebSocket proxy for VNC (noVNC <-> websockify on container:6080)."""
+    session = await resolve_browser_session(token)
+    if not session:
+        await websocket.close(code=4404)
+        return
+
+    container = session["container_name"]
+    upstream_url = f"ws://{container}:6080/websockify"
+
+    await websocket.accept(subprotocol="binary")
+
+    try:
+        async with websockets.connect(
+            upstream_url,
+            subprotocols=["binary"],
+            max_size=16 * 1024 * 1024,  # 16 MB max frame
+            open_timeout=10,
+        ) as upstream:
+
+            async def client_to_upstream():
+                try:
+                    while True:
+                        data = await websocket.receive()
+                        if "bytes" in data and data["bytes"] is not None:
+                            await upstream.send(data["bytes"])
+                        elif "text" in data and data["text"] is not None:
+                            await upstream.send(data["text"])
+                except (WebSocketDisconnect, Exception):
+                    pass
+
+            async def upstream_to_client():
+                try:
+                    async for message in upstream:
+                        if isinstance(message, bytes):
+                            await websocket.send_bytes(message)
+                        else:
+                            await websocket.send_text(message)
+                except Exception:
+                    pass
+
+            # Run both directions concurrently; when one ends, cancel the other
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(client_to_upstream()),
+                 asyncio.create_task(upstream_to_client())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+    except Exception as exc:
+        logger.warning("VNC WebSocket proxy error for token %s: %s", token, exc)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.api_route("/b/{token}/cdp/{path:path}", methods=["GET"],
+               include_in_schema=False)
+async def browser_cdp_http(token: str, path: str, request: Request):
+    """HTTP proxy for CDP endpoints (e.g. /json/version) needed by Playwright connectOverCDP."""
+    session = await resolve_browser_session(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Browser session not found")
+    container = session["container_name"]
+    try:
+        qs = f"?{request.url.query}" if request.url.query else ""
+        resp = await app.state.http_client.get(
+            f"http://{container}:9223/{path}{qs}", timeout=10.0,
+            headers={"Host": "localhost"}  # CDP rejects non-localhost Host headers
+        )
+        # Rewrite webSocketDebuggerUrl to point through our CDP WebSocket proxy
+        import re
+        host = request.headers.get('host', 'localhost:8056')
+        proxy_ws_url = f"ws://{host}/b/{token}/cdp"
+        content = re.sub(r'"webSocketDebuggerUrl":\s*"[^"]*"',
+                        f'"webSocketDebuggerUrl": "{proxy_ws_url}"',
+                        resp.text)
+        return Response(content=content, status_code=resp.status_code,
+                       headers={"content-type": resp.headers.get("content-type", "application/json")})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"CDP HTTP proxy error: {exc}")
+
+
+@app.websocket("/b/{token}/cdp-ws")
+async def browser_cdp_ws_direct(websocket: WebSocket, token: str):
+    """CDP WebSocket proxy (used by rewritten webSocketDebuggerUrl)."""
+    await browser_cdp_ws(websocket, token)
+
+
+@app.websocket("/b/{token}/cdp")
+async def browser_cdp_ws(websocket: WebSocket, token: str):
+    """Bidirectional WebSocket proxy for Chrome DevTools Protocol."""
+    session = await resolve_browser_session(token)
+    if not session:
+        await websocket.close(code=4404)
+        return
+
+    container = session["container_name"]
+
+    # Discover CDP WebSocket URL from the browser's /json/version endpoint
+    try:
+        resp = await app.state.http_client.get(
+            f"http://{container}:9223/json/version", timeout=10.0,
+            headers={"Host": "localhost"}
+        )
+        version_info = resp.json()
+        cdp_ws_url = version_info.get("webSocketDebuggerUrl", "")
+        # Replace localhost with container:9223 (socat proxy port)
+        # Original may be ws://localhost/devtools/... or ws://localhost:9222/devtools/...
+        import re
+        cdp_ws_url = re.sub(r'ws://(localhost|127\.0\.0\.1)(:\d+)?/', f'ws://{container}:9223/', cdp_ws_url)
+    except Exception as exc:
+        logger.warning("Failed to discover CDP URL for %s: %s", container, exc)
+        await websocket.close(code=4502)
+        return
+
+    if not cdp_ws_url:
+        await websocket.close(code=4502)
+        return
+
+    print(f"CDP proxy: original URL={version_info.get('webSocketDebuggerUrl', '')}, rewritten URL={cdp_ws_url}", flush=True)
+    await websocket.accept()
+
+    try:
+        async with websockets.connect(
+            cdp_ws_url,
+            max_size=64 * 1024 * 1024,  # 64 MB — CDP can send large payloads (screenshots)
+            open_timeout=10,
+            additional_headers={"Host": "localhost"},  # CDP rejects non-localhost Host
+        ) as upstream:
+
+            async def client_to_upstream():
+                try:
+                    while True:
+                        data = await websocket.receive_text()
+                        await upstream.send(data)
+                except (WebSocketDisconnect, Exception):
+                    pass
+
+            async def upstream_to_client():
+                try:
+                    async for message in upstream:
+                        if isinstance(message, str):
+                            await websocket.send_text(message)
+                        else:
+                            await websocket.send_bytes(message)
+                except Exception:
+                    pass
+
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(client_to_upstream()),
+                 asyncio.create_task(upstream_to_client())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+    except Exception as exc:
+        logger.warning("CDP WebSocket proxy error for token %s: %s", token, exc)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.post("/b/{token}/save", tags=["Remote Browser"], summary="Save browser storage to MinIO")
+async def browser_save_storage(token: str):
+    """Convenience proxy: save browser userdata to MinIO via bot-manager."""
+    session = await resolve_browser_session(token)
+    if not session:
+        raise HTTPException(status_code=404, detail="Browser session not found or expired")
+
+    meeting_id = session.get("meeting_id")
+    if not meeting_id:
+        raise HTTPException(status_code=500, detail="Session missing meeting_id")
+
+    # Forward to bot-manager (internal call, no user API key needed)
+    try:
+        resp = await app.state.http_client.post(
+            f"{BOT_MANAGER_URL}/internal/browser-sessions/{token}/save",
+            timeout=60.0,  # sync can take a while
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json()
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to reach bot-manager: {exc}")
+
+
+# --- End Remote Browser Session Routes ---
 
 # --- WebSocket Multiplex Endpoint ---
 @app.websocket("/ws")

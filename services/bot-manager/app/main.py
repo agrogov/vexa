@@ -1,11 +1,12 @@
 import uvicorn
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status, UploadFile, File, Form, Query, Response, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import logging
 import os
 import base64
-import inspect
+import secrets
 from typing import Optional, List, Dict, Any
 import redis.asyncio as aioredis
 import asyncio
@@ -23,12 +24,13 @@ from .config import BOT_IMAGE_NAME, REDIS_URL
 from app.orchestrators import (
     get_socket_session, close_docker_client, start_bot_container,
     stop_bot_container, _record_session_start, get_running_bots_status,
-    verify_container_running,
+    verify_container_running, start_browser_session_container,
 )
 # Note: get_running_bots_status and verify_container_running are abstracted
 # and work for both Docker containers and process orchestrator (Lite setup)
 from shared_models.database import init_db, get_db, async_session_local
-from shared_models.models import User, Meeting, MeetingSession, Transcription, Recording, MediaFile
+from shared_models.models import User, Meeting, MeetingSession, Transcription, Recording, MediaFile, APIToken
+from shared_models.token_scope import generate_prefixed_token
 from shared_models.schemas import (
     MeetingCreate, MeetingResponse, Platform, BotStatusResponse, MeetingConfigUpdate,
     MeetingStatus, MeetingCompletionReason, MeetingFailureStage,
@@ -50,7 +52,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import and_, desc, func
 from sqlalchemy.orm import attributes
-from datetime import datetime # For start_time
+from datetime import datetime, timezone # For start_time
 
 # Delayed stop timeout for fallback container shutdown after stop command.
 # Keep this above typical recording upload time to avoid interrupting uploads.
@@ -96,14 +98,6 @@ async def update_meeting_status(
         await db.commit()
     
     # Validate transition
-    # #region agent log
-    try:
-        with open('/home/dima/dev/.cursor/debug.log', 'a') as f:
-            import json
-            f.write(json.dumps({"location": "bot-manager/main.py:79", "message": "Validating status transition", "data": {"meeting_id": meeting.id, "current_status": current_status.value, "new_status": new_status.value}, "timestamp": __import__('time').time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "D"}) + "\n")
-    except: pass
-    # #endregion
-    
     if not is_valid_status_transition(current_status, new_status):
         logger.warning(f"Invalid status transition from '{current_status.value}' to '{new_status.value}' for meeting {meeting.id}")
         logger.error(f"[DEBUG] Invalid transition: current='{current_status.value}', requested='{new_status.value}', meeting_id={meeting.id}")
@@ -191,6 +185,8 @@ async def update_meeting_status(
 
 from app.tasks.bot_exit_tasks import run_all_tasks
 from app.tasks.webhook_runner import run_status_webhook_task
+from shared_models.webhook_delivery import set_redis_client as set_webhook_redis
+from shared_models.webhook_retry_worker import start_retry_worker, stop_retry_worker, set_session_factory as set_retry_session_factory
 
 def _b64url_encode(data: bytes) -> str:
     """URL-safe base64 encoding without padding."""
@@ -317,9 +313,14 @@ logger = logging.getLogger("bot_manager")
 app = FastAPI(title="Vexa Bot Manager")
 
 # Add CORS middleware
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:3001").split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -431,6 +432,7 @@ class BotStatusChangePayload(BaseModel):
     completion_reason: Optional[MeetingCompletionReason] = Field(None, description="Reason for completion if applicable.")
     failure_stage: Optional[MeetingFailureStage] = Field(None, description="Stage where failure occurred if applicable.")
     timestamp: Optional[str] = Field(None, description="Timestamp of the status change.")
+    speaker_events: Optional[List[Dict]] = Field(None, description="Accumulated speaker events from bot browser.")
 
 # --- --------------------------------------------- ---
 
@@ -440,10 +442,12 @@ async def startup_event():
     logger.info("Starting up Bot Manager...")
     # await init_db() # Removed - Admin API should handle this
     # await init_redis() # Removed redis init if not used elsewhere
-    try:
-        get_socket_session()
-    except Exception as e:
-        logger.error(f"Failed to initialize Docker client on startup: {e}", exc_info=True)
+    _orch = os.getenv("ORCHESTRATOR", "docker").lower()
+    if _orch not in ("kubernetes", "process"):
+        try:
+            get_socket_session()
+        except Exception as e:
+            logger.error(f"Failed to initialize Docker client on startup: {e}", exc_info=True)
 
     # --- ADD Redis Client Initialization ---
     try:
@@ -457,17 +461,33 @@ async def startup_event():
     # --------------------------------------
 
     logger.info("Database, Docker Client (attempted), and Redis Client (attempted) initialized.")
-    
-    # Start reconciliation scheduler
-    logger.info("[Startup] Starting reconciliation scheduler...")
-    asyncio.create_task(start_reconciliation_scheduler())
-    logger.info("[Startup] Reconciliation scheduler started")
+
+    # Configure durable webhook delivery via Redis
+    set_retry_session_factory(async_session_local)
+    if redis_client is not None:
+        set_webhook_redis(redis_client)
+        asyncio.create_task(start_retry_worker(redis_client))
+        logger.info("[Startup] Webhook retry worker started")
+    else:
+        logger.warning("[Startup] Webhook retry worker NOT started — Redis unavailable")
+
+    # Start reconciliation scheduler (disabled by default — not K8s-aware, kills production bots)
+    if os.environ.get("ENABLE_RECONCILIATION", "").lower() in ("1", "true", "yes"):
+        logger.info("[Startup] Starting reconciliation scheduler...")
+        asyncio.create_task(start_reconciliation_scheduler())
+        logger.info("[Startup] Reconciliation scheduler started")
+    else:
+        logger.info("[Startup] Reconciliation scheduler DISABLED (set ENABLE_RECONCILIATION=1 to enable)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global redis_client # <-- Add global reference
     logger.info("Shutting down Bot Manager...")
     # await close_redis() # Removed redis close if not used
+
+    # Stop webhook retry worker before closing Redis
+    await stop_retry_worker()
+    logger.info("Webhook retry worker stopped.")
 
     # --- ADD Redis Client Closing ---
     if redis_client:
@@ -554,37 +574,6 @@ async def _delayed_container_stop(container_id: str, meeting_id: int, delay_seco
         logger.error(f"[Delayed Stop] Error during safety finalizer for meeting {meeting_id}: {e}", exc_info=True)
 # --- ------------------------ ---
 
-async def _is_container_running(container_id: str) -> bool:
-    """Normalize sync/async orchestrator checks for container status."""
-    try:
-        result = verify_container_running(container_id)
-        if inspect.isawaitable(result):
-            return await result
-        return bool(result)
-    except Exception as e:
-        logger.error(f"[Stop Bot] Failed to verify container {container_id}: {e}", exc_info=True)
-        return False
-
-async def _get_running_bots_status_safe(user_id: int) -> List[Dict[str, Any]]:
-    """Normalize sync/async orchestrator status listing."""
-    try:
-        result = get_running_bots_status(user_id)
-        if inspect.isawaitable(result):
-            return await result
-        return list(result)
-    except Exception as e:
-        logger.error(f"[Bot Status] Failed to get running bots for user {user_id}: {e}", exc_info=True)
-        return []
-
-async def _record_session_start_safe(meeting_id: int, connection_id: str) -> None:
-    """Run session start hook if provided and awaitable."""
-    try:
-        result = _record_session_start(meeting_id, connection_id)
-        if inspect.isawaitable(result):
-            await result
-    except Exception as e:
-        logger.error(f"[Session Start] Failed to record session start for meeting {meeting_id}: {e}", exc_info=True)
-
 @app.get("/", include_in_schema=False)
 async def root():
     return {"message": "Vexa Bot Manager is running"}
@@ -609,16 +598,180 @@ async def request_bot(
     """
     user_token, current_user = auth_data
 
+    # --- Agent-only mode: no meeting, just a container with Playwright + Claude ---
+    if req.agent_enabled and req.platform is None:
+        logger.info(f"Agent-only bot request from user {current_user.id}")
+        # Create a minimal meeting record to track the container
+        new_meeting = Meeting(
+            user_id=current_user.id,
+            platform="agent",
+            platform_specific_id=f"agent-{uuid_lib.uuid4().hex[:8]}",
+            status=MeetingStatus.REQUESTED.value,
+            data={"agent_enabled": True},
+        )
+        db.add(new_meeting)
+        await db.commit()
+        await db.refresh(new_meeting)
+        meeting_id = new_meeting.id
+        logger.info(f"Created agent-only meeting record with ID: {meeting_id}")
+
+        try:
+            container_id, connection_id = await start_bot_container(
+                user_id=current_user.id,
+                meeting_id=meeting_id,
+                meeting_url=None,
+                platform="agent",
+                bot_name=req.bot_name or "VexaAgent",
+                user_token=user_token,
+                native_meeting_id=new_meeting.platform_specific_id,
+                language=None,
+                task=None,
+                agent_enabled=True,
+            )
+            if not container_id:
+                new_meeting.status = MeetingStatus.FAILED.value
+                await db.commit()
+                raise HTTPException(status_code=500, detail="Failed to start agent container")
+
+            new_meeting.bot_container_id = container_id
+            new_meeting.status = MeetingStatus.ACTIVE.value
+            await db.commit()
+            await db.refresh(new_meeting)
+            logger.info(f"Agent container {container_id} started for meeting {meeting_id}")
+            return MeetingResponse.model_validate(new_meeting)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to start agent container: {e}", exc_info=True)
+            new_meeting.status = MeetingStatus.FAILED.value
+            await db.commit()
+            raise HTTPException(status_code=500, detail=f"Agent container failed: {e}")
+
+    # --- Browser session mode: remote browser with VNC + CDP ---
+    if req.mode == "browser_session":
+        logger.info(f"Browser session request from user {current_user.id}")
+        session_token = secrets.token_urlsafe(24)
+
+        new_meeting = Meeting(
+            user_id=current_user.id,
+            platform="browser_session",
+            platform_specific_id=f"bs-{uuid_lib.uuid4().hex[:8]}",
+            status=MeetingStatus.ACTIVE.value,
+            start_time=datetime.utcnow(),
+            data={
+                "mode": "browser_session",
+                "session_token": session_token,
+            },
+        )
+        db.add(new_meeting)
+        await db.commit()
+        await db.refresh(new_meeting)
+        meeting_id = new_meeting.id
+        logger.info(f"Created browser_session meeting record with ID: {meeting_id}")
+
+        # Build MinIO/S3 config from environment (same env vars used for recordings)
+        s3_endpoint_raw = os.environ.get("MINIO_ENDPOINT", "minio:9000")
+        s3_endpoint = s3_endpoint_raw if s3_endpoint_raw.startswith("http") else f"http://{s3_endpoint_raw}"
+        s3_bucket = os.environ.get("MINIO_BUCKET", "vexa-recordings")
+        s3_access_key = os.environ.get("MINIO_ACCESS_KEY", "")
+        s3_secret_key = os.environ.get("MINIO_SECRET_KEY", "")
+
+        container_name = f"vexa-bot-{meeting_id}-{uuid_lib.uuid4().hex[:8]}"
+        callback_url = f"http://bot-manager:8080/bots/internal/callback/exited"
+
+        bot_config_data = {
+            "mode": "browser_session",
+            "meeting_id": meeting_id,
+            "redisUrl": REDIS_URL,
+            "container_name": container_name,
+            "botManagerCallbackUrl": callback_url,
+            "userdataS3Path": f"users/{current_user.id}/browser-userdata",
+            "s3Endpoint": s3_endpoint,
+            "s3Bucket": s3_bucket,
+            "s3AccessKey": s3_access_key,
+            "s3SecretKey": s3_secret_key,
+        }
+
+        # Add git workspace config if user has it configured in user.data
+        user_data = current_user.data if isinstance(current_user.data, dict) else {}
+        git_workspace = user_data.get("workspace_git")
+        if git_workspace and isinstance(git_workspace, dict):
+            if git_workspace.get("repo"):
+                bot_config_data["workspaceGitRepo"] = git_workspace["repo"]
+            if git_workspace.get("token"):
+                bot_config_data["workspaceGitToken"] = git_workspace["token"]
+            if git_workspace.get("branch"):
+                bot_config_data["workspaceGitBranch"] = git_workspace["branch"]
+
+        bot_config_json = json.dumps(bot_config_data)
+
+        if start_browser_session_container is None:
+            raise HTTPException(status_code=501, detail="Browser sessions not supported with this orchestrator")
+
+        try:
+            container_id, connection_id = await start_browser_session_container(
+                user_id=current_user.id,
+                meeting_id=meeting_id,
+                container_name=container_name,
+                bot_config_json=bot_config_json,
+            )
+            if not container_id:
+                new_meeting.status = MeetingStatus.FAILED.value
+                await db.commit()
+                raise HTTPException(status_code=500, detail="Failed to start browser session container")
+
+            new_meeting.bot_container_id = container_id
+            await db.commit()
+            await db.refresh(new_meeting)
+
+            # Store session_token → container mapping in Redis
+            if redis_client:
+                session_data = json.dumps({
+                    "container_name": container_name,
+                    "meeting_id": meeting_id,
+                    "user_id": current_user.id,
+                })
+                await redis_client.set(
+                    f"browser_session:{session_token}",
+                    session_data,
+                    ex=86400,  # 24h TTL
+                )
+                logger.info(f"Stored browser session token in Redis for meeting {meeting_id}")
+
+            logger.info(f"Browser session container {container_id} started for meeting {meeting_id}")
+
+            # Return response — the URL will be constructed by the frontend/gateway
+            # Store the session_token in meeting.data so it's returned in the response
+            return MeetingResponse.model_validate(new_meeting)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to start browser session container: {e}", exc_info=True)
+            new_meeting.status = MeetingStatus.FAILED.value
+            await db.commit()
+            raise HTTPException(status_code=500, detail=f"Browser session failed: {e}")
+
     logger.info(f"Received bot request for platform '{req.platform.value}' with native ID '{req.native_meeting_id}' from user {current_user.id}")
     native_meeting_id = req.native_meeting_id
 
-    constructed_url = Platform.construct_meeting_url(req.platform.value, native_meeting_id, req.passcode)
-    if not constructed_url:
-        logger.error(f"Invalid meeting URL for platform {req.platform.value} and ID {native_meeting_id}. Rejecting request.")
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid platform/native_meeting_id combination: cannot construct meeting URL"
+    # Determine the meeting URL for the bot container.
+    # Priority: explicit meeting_url (long Teams legacy links) > reconstruct from parts.
+    if req.meeting_url:
+        constructed_url = req.meeting_url
+    else:
+        constructed_url = Platform.construct_meeting_url(
+            req.platform.value,
+            native_meeting_id,
+            req.passcode,
+            base_host=req.teams_base_host,
         )
+        if not constructed_url:
+            logger.error(f"Invalid meeting URL for platform {req.platform.value} and ID {native_meeting_id}. Rejecting request.")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid platform/native_meeting_id combination: cannot construct meeting URL"
+            )
 
     existing_meeting_stmt = select(Meeting).where(
         Meeting.user_id == current_user.id,
@@ -626,7 +779,7 @@ async def request_bot(
         Meeting.platform_specific_id == native_meeting_id,
         Meeting.status.in_(['requested', 'joining', 'awaiting_admission', 'active']) # Block on all non-terminal states (excluding 'stopping' to allow immediate new bot after stop)
     ).order_by(desc(Meeting.created_at)).limit(1) # Get the latest one if multiple somehow exist
-    
+
     result = await db.execute(existing_meeting_stmt)
     existing_meeting = result.scalars().first()
     if existing_meeting:
@@ -638,7 +791,15 @@ async def request_bot(
         )
     
     # --- Fast-fail concurrency limit check (DB-based) ---
-    user_limit = int(getattr(current_user, "max_concurrent_bots", 0) or 0)
+    # Lock the user row (SELECT ... FOR UPDATE) to serialize concurrent bot launches
+    # per-user. This prevents the race condition where two concurrent requests both
+    # read the count as under the limit and both proceed to INSERT.
+    lock_stmt = select(User).where(User.id == current_user.id).with_for_update()
+    lock_result = await db.execute(lock_stmt)
+    locked_user = lock_result.scalars().first()
+    if locked_user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    user_limit = int(getattr(locked_user, "max_concurrent_bots", 0) or 0)
     if user_limit > 0:
         count_stmt = select(func.count()).select_from(Meeting).where(
             and_(
@@ -663,11 +824,22 @@ async def request_bot(
     if existing_meeting is None:
         logger.info(f"No active/valid existing meeting found for user {current_user.id}, platform '{req.platform.value}', native ID '{native_meeting_id}'. Proceeding to create a new meeting record.")
         # Create Meeting record in DB
-        # Prepare data field with passcode if provided
+        # Prepare data field with passcode and any URL metadata
         meeting_data = {}
         if req.passcode:
             meeting_data['passcode'] = req.passcode
-            
+        if req.meeting_url:
+            meeting_data['meeting_url'] = req.meeting_url
+        if req.teams_base_host:
+            meeting_data['teams_base_host'] = req.teams_base_host
+        transcribe = True if req.transcribe_enabled is None else bool(req.transcribe_enabled)
+        meeting_data['transcribe_enabled'] = transcribe
+        # Enable recording by default; callers can opt-out with recording_enabled=false
+        if req.recording_enabled is not None:
+            meeting_data['recording_enabled'] = bool(req.recording_enabled)
+        else:
+            meeting_data['recording_enabled'] = True
+
         new_meeting = Meeting(
             user_id=current_user.id,
             platform=req.platform.value,
@@ -815,6 +987,24 @@ async def request_bot(
                         "Continuing without OBF token."
                     )
 
+        # Build extra bot config for authenticated mode (browser userdata from MinIO)
+        authenticated_extra_config = None
+        if req.authenticated:
+            user_data = current_user.data if isinstance(current_user.data, dict) else {}
+            browser_userdata_info = user_data.get("browser_userdata")
+            if browser_userdata_info and isinstance(browser_userdata_info, dict):
+                logger.info(f"Authenticated mode enabled for meeting {meeting_id}, user {current_user.id}")
+                authenticated_extra_config = {
+                    "authenticated": True,
+                    "userdataS3Path": f"users/{current_user.id}/browser-userdata",
+                    "s3Endpoint": f"http://{os.environ.get('MINIO_ENDPOINT', 'minio:9000')}" if not os.environ.get("MINIO_ENDPOINT", "minio:9000").startswith("http") else os.environ.get("MINIO_ENDPOINT", "minio:9000"),
+                    "s3Bucket": os.environ.get("MINIO_BUCKET", "vexa-recordings"),
+                    "s3AccessKey": os.environ.get("MINIO_ACCESS_KEY", ""),
+                    "s3SecretKey": os.environ.get("MINIO_SECRET_KEY", ""),
+                }
+            else:
+                logger.warning(f"Authenticated mode requested but no browser_userdata found for user {current_user.id}")
+
         logger.info(f"Attempting to start bot container for meeting {meeting_id} (native: {native_meeting_id})...")
         container_id, connection_id = await start_bot_container(
             user_id=current_user.id,
@@ -827,11 +1017,16 @@ async def request_bot(
             language=req.language,
             task=req.task,
             transcription_tier=req.transcription_tier,
-            recording_enabled=req.recording_enabled,
+            recording_enabled=meeting_data.get('recording_enabled', req.recording_enabled),
             transcribe_enabled=req.transcribe_enabled,
             zoom_obf_token=zoom_obf_token_to_use,
             voice_agent_enabled=req.voice_agent_enabled,
-            default_avatar_url=req.default_avatar_url
+            tts_enabled=req.tts_enabled,
+            video_receive_enabled=req.video_receive_enabled,
+            camera_enabled=req.camera_enabled,
+            default_avatar_url=req.default_avatar_url,
+            agent_enabled=req.agent_enabled,
+            extra_bot_config=authenticated_extra_config,
         )
         container_start_time = datetime.utcnow()
         logger.info(f"Call to start_bot_container completed. Container ID: {container_id}, Connection ID: {connection_id}")
@@ -850,8 +1045,8 @@ async def request_bot(
                 detail={"status": "error", "message": error_msg, "meeting_id": meeting_id}
             )
 
-        asyncio.create_task(_record_session_start_safe(meeting_id, connection_id))
-        logger.info(f"Scheduled background task to record session start for meeting {meeting_id}, session {connection_id}")
+        await _record_session_start(meeting_id, connection_id)
+        logger.info(f"Recorded session start for meeting {meeting_id}, session {connection_id}")
 
         # REMOVED: Status update to 'active' - now handled by bot startup callback
         # Only set the container ID, keep status as 'requested' until bot confirms it's running
@@ -903,6 +1098,83 @@ async def request_bot(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"status": "error", "message": f"An unexpected error occurred during bot startup: {str(e)}", "meeting_id": meeting_id}
         )
+
+# --- Agent Chat API (Quorum-style Claude CLI streaming) ---
+
+from app.agent_chat import agent_chat_manager
+
+class AgentChatRequest(BaseModel):
+    message: str = Field(..., description="Message to send to the Claude agent")
+    model: Optional[str] = Field(None, description="Override Claude model (e.g. claude-sonnet-4-6)")
+
+
+async def _get_agent_meeting(meeting_id: int, user_id: int, db: AsyncSession) -> Meeting:
+    """Look up meeting and verify it's an agent-enabled container owned by this user."""
+    meeting = await db.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not your meeting")
+    if not meeting.bot_container_id:
+        raise HTTPException(status_code=400, detail="No container for this meeting")
+    return meeting
+
+
+@app.post("/bots/{meeting_id}/agent/chat",
+          summary="Send a message to the Claude agent inside the bot container",
+          description="Streams SSE events (text_delta, tool_use, done) from Claude CLI running inside the container.",
+          dependencies=[Depends(get_user_and_token)])
+async def agent_chat(
+    meeting_id: int,
+    req: AgentChatRequest,
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    _, current_user = auth_data
+    meeting = await _get_agent_meeting(meeting_id, current_user.id, db)
+
+    async def event_stream():
+        try:
+            async for event in agent_chat_manager.chat(
+                container_id=meeting.bot_container_id,
+                message=req.message,
+                model=req.model,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"Agent chat error for meeting {meeting_id}: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.delete("/bots/{meeting_id}/agent/chat",
+            summary="Interrupt active Claude response",
+            dependencies=[Depends(get_user_and_token)])
+async def agent_interrupt(
+    meeting_id: int,
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    _, current_user = auth_data
+    meeting = await _get_agent_meeting(meeting_id, current_user.id, db)
+    await agent_chat_manager.interrupt(meeting.bot_container_id)
+    return {"status": "interrupted"}
+
+
+@app.post("/bots/{meeting_id}/agent/chat/reset",
+          summary="Reset Claude session (fresh conversation)",
+          dependencies=[Depends(get_user_and_token)])
+async def agent_reset(
+    meeting_id: int,
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    _, current_user = auth_data
+    meeting = await _get_agent_meeting(meeting_id, current_user.id, db)
+    await agent_chat_manager.reset_session(meeting.bot_container_id)
+    return {"status": "session_reset"}
+
 
 # --- ADD PUT Endpoint for Reconfiguration ---
 @app.put("/bots/{platform}/{native_meeting_id}/config",
@@ -1027,31 +1299,15 @@ async def stop_bot(
         logger.warning(f"Stop request: No meeting found for {platform_value}/{native_meeting_id} for user {current_user.id}")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No meeting found to stop.")
 
-    terminal_states = [MeetingStatus.COMPLETED.value, MeetingStatus.FAILED.value]
-    terminal_meetings = [m for m in all_meetings if m.status in terminal_states]
-
-    # If terminal meetings still have running containers, attempt to stop them.
-    running_terminal_meetings: List[Meeting] = []
-    for meeting in terminal_meetings:
-        if not meeting.bot_container_id:
-            continue
-        if await _is_container_running(meeting.bot_container_id):
-            logger.info(f"Stop request: Meeting {meeting.id} is terminal ('{meeting.status}') but container {meeting.bot_container_id} is still running. Stopping it.")
-            background_tasks.add_task(_delayed_container_stop, meeting.bot_container_id, meeting.id, 0)
-            running_terminal_meetings.append(meeting)
-
     # Filter to non-terminal meetings
     non_terminal_meetings = [
         m for m in all_meetings 
-        if m.status not in terminal_states
+        if m.status not in [MeetingStatus.COMPLETED.value, MeetingStatus.FAILED.value]
     ]
 
     # If all meetings are terminal, return idempotent response
     if not non_terminal_meetings:
         meeting = all_meetings[0]
-        if running_terminal_meetings:
-            logger.info(f"Stop request: {len(running_terminal_meetings)} terminal meeting(s) had running containers. Stop scheduled.")
-            return {"message": "Stop requested for running bots in terminal meetings."}
         logger.info(f"Stop request: Meeting {meeting.id} already in terminal state '{meeting.status}'. Returning 202 idempotently.")
         return {"message": f"Meeting already {meeting.status}."}
 
@@ -1160,7 +1416,7 @@ async def get_user_bots_status(
     
     try:
         # Call the function from orchestrator_utils - ADD AWAIT HERE
-        running_bots_list = await _get_running_bots_status_safe(user_id)
+        running_bots_list = await get_running_bots_status(user_id)
         # Wrap the list in the response model
         return BotStatusResponse(running_bots=running_bots_list)
     except Exception as e:
@@ -1284,6 +1540,26 @@ async def bot_exit_callback(
                 meeting.data["last_error"] = error_data
                 logger.info(f"Bot exit callback: Stored error details in meeting {meeting_id} data: {error_data}")
         
+        # Persist chat messages from Redis to meeting.data before final commit
+        try:
+            chat_raw = await redis_client.lrange(f"meeting:{meeting_id}:chat_messages", 0, -1)
+            if chat_raw:
+                chat_messages = []
+                for raw in chat_raw:
+                    try:
+                        chat_messages.append(json.loads(raw))
+                    except json.JSONDecodeError:
+                        pass
+                if chat_messages:
+                    if not meeting.data:
+                        meeting.data = {}
+                    updated_data = dict(meeting.data)
+                    updated_data["chat_messages"] = chat_messages
+                    meeting.data = updated_data
+                    logger.info(f"Bot exit callback: Persisted {len(chat_messages)} chat messages to meeting.data for meeting {meeting_id}")
+        except Exception as chat_err:
+            logger.warning(f"Bot exit callback: Failed to persist chat messages for meeting {meeting_id}: {chat_err}")
+
         meeting.end_time = datetime.utcnow()
         await db.commit()
         await db.refresh(meeting)
@@ -1574,14 +1850,6 @@ async def bot_status_change_callback(
     new_status = payload.status
     reason = payload.reason
 
-    # #region agent log
-    try:
-        with open('/home/dima/dev/.cursor/debug.log', 'a') as f:
-            import json
-            f.write(json.dumps({"location": "bot-manager/main.py:1320", "message": "Unified callback received", "data": {"connection_id": session_uid, "new_status": new_status.value, "reason": reason}, "timestamp": __import__('time').time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
-    except: pass
-    # #endregion
-
     try:
         # Find the meeting session to get the meeting_id
         session_stmt = select(MeetingSession).where(MeetingSession.session_uid == session_uid)
@@ -1590,7 +1858,10 @@ async def bot_status_change_callback(
 
         if not meeting_session:
             logger.error(f"Bot status change callback: Could not find meeting session for connection_id {session_uid}")
-            return {"status": "error", "detail": f"Meeting session not found for connection_id: {session_uid}"}
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Meeting session not found for connection_id: {session_uid}"
+            )
 
         meeting_id = meeting_session.meeting_id
         logger.info(f"Bot status change callback: Found meeting_id {meeting_id} for connection_id {session_uid}")
@@ -1599,7 +1870,10 @@ async def bot_status_change_callback(
         meeting = await db.get(Meeting, meeting_id)
         if not meeting:
             logger.error(f"Bot status change callback: Could not find meeting {meeting_id}")
-            return {"status": "error", "detail": f"Meeting {meeting_id} not found"}
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Meeting {meeting_id} not found"
+            )
         
         # Refresh meeting to get latest status from database
         await db.refresh(meeting)
@@ -1627,9 +1901,20 @@ async def bot_status_change_callback(
             
             if success:
                 meeting.end_time = datetime.utcnow()
+
+                # Persist speaker events to meeting.data (direct bot accumulation)
+                if payload.speaker_events:
+                    if not meeting.data:
+                        meeting.data = {}
+                    meeting_data = dict(meeting.data)
+                    meeting_data['speaker_events'] = payload.speaker_events
+                    meeting.data = meeting_data
+                    attributes.flag_modified(meeting, 'data')
+                    logger.info(f"Persisted {len(payload.speaker_events)} speaker events to meeting.data for meeting {meeting_id}")
+
                 await db.commit()
                 await db.refresh(meeting)
-                
+
                 # Schedule post-meeting tasks (including original webhook)
                 background_tasks.add_task(run_all_tasks, meeting.id)
                 
@@ -1687,33 +1972,10 @@ async def bot_status_change_callback(
                 
         else:
             # Handle other status changes (joining, awaiting_admission)
-            # #region agent log
-            try:
-                with open('/home/dima/dev/.cursor/debug.log', 'a') as f:
-                    import json
-                    f.write(json.dumps({"location": "bot-manager/main.py:1423", "message": "Before update_meeting_status", "data": {"meeting_id": meeting_id, "old_status": meeting.status, "new_status": new_status.value}, "timestamp": __import__('time').time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}) + "\n")
-            except: pass
-            # #endregion
-            
             success = await update_meeting_status(meeting, new_status, db)
-            
-            # #region agent log
-            try:
-                with open('/home/dima/dev/.cursor/debug.log', 'a') as f:
-                    import json
-                    f.write(json.dumps({"location": "bot-manager/main.py:1429", "message": "After update_meeting_status", "data": {"meeting_id": meeting_id, "success": success, "meeting_status": meeting.status}, "timestamp": __import__('time').time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "B"}) + "\n")
-            except: pass
-            # #endregion
-            
+
             if not success:
                 logger.error(f"Bot status change callback: Failed to update meeting {meeting_id} status to '{new_status.value}'")
-                # #region agent log
-                try:
-                    with open('/home/dima/dev/.cursor/debug.log', 'a') as f:
-                        import json
-                        f.write(json.dumps({"location": "bot-manager/main.py:1435", "message": "Status update failed", "data": {"meeting_id": meeting_id, "old_status": old_status, "new_status": new_status.value}, "timestamp": __import__('time').time(), "sessionId": "debug-session", "runId": "run1", "hypothesisId": "C"}) + "\n")
-                except: pass
-                # #endregion
                 return {"status": "error", "detail": "Failed to update meeting status"}
 
         # Publish meeting status change via Redis Pub/Sub
@@ -2421,7 +2683,7 @@ async def reconcile_meetings_and_containers():
                 
                 # Check if container/process actually exists and is running
                 try:
-                    container_exists = await _is_container_running(meeting.bot_container_id)
+                    container_exists = await verify_container_running(meeting.bot_container_id)
                 except Exception as e:
                     # Error during verification - log but don't mark as zombie
                     # This could happen if orchestrator is unavailable or misconfigured
@@ -2441,7 +2703,7 @@ async def reconcile_meetings_and_containers():
                         # For container names, be more conservative - check if any processes are running
                         # If registry is empty but meeting is active, might be a timing issue
                         try:
-                            all_running = await _get_running_bots_status_safe(meeting.user_id)
+                            all_running = await get_running_bots_status(meeting.user_id)
                             if len(all_running) > 0:
                                 logger.warning(
                                     f"[Reconciliation] Meeting {meeting.id} has container name '{meeting.bot_container_id}' "
@@ -2508,7 +2770,7 @@ async def reconcile_meetings_and_containers():
                 # For each user, get their running bots
                 for user_id in user_ids:
                     try:
-                        user_bots = await _get_running_bots_status_safe(user_id)
+                        user_bots = await get_running_bots_status(user_id)
                         all_running_bots.extend(user_bots)
                     except Exception as e:
                         logger.error(f"[Reconciliation] Error getting running bots for user {user_id}: {e}", exc_info=True)
@@ -2560,12 +2822,14 @@ async def reconcile_meetings_and_containers():
     except Exception as e:
         logger.error(f"[Reconciliation] Error during reconciliation: {e}", exc_info=True)
 
-# Schedule reconciliation task to run periodically (every 5 minutes)
+# Schedule reconciliation task to run periodically
+RECONCILIATION_INTERVAL = int(os.environ.get("RECONCILIATION_INTERVAL_SECONDS", "7200"))  # Default 2 hours
+
 async def start_reconciliation_scheduler():
     """Start periodic reconciliation task"""
     while True:
         try:
-            await asyncio.sleep(300)  # Run every 5 minutes
+            await asyncio.sleep(RECONCILIATION_INTERVAL)
             await reconcile_meetings_and_containers()
         except Exception as e:
             logger.error(f"[Reconciliation Scheduler] Error: {e}", exc_info=True)
@@ -2694,13 +2958,9 @@ async def bot_chat_read(
     user_token, current_user = auth_data
     platform_value = platform.value
 
-    # Chat read should work even after meeting end. Prefer active meeting, then fall back
-    # to the latest matching meeting record to avoid noisy 404s in the dashboard.
-    meeting = await _find_latest_meeting(db, current_user.id, platform_value, native_meeting_id)
-    if not meeting:
-        return {"messages": [], "meeting_id": None}
+    meeting = await _find_active_meeting(db, current_user.id, platform_value, native_meeting_id)
 
-    # Read chat messages from Redis
+    # Read chat messages from Redis first, fall back to meeting.data for completed meetings
     messages_raw = await redis_client.lrange(f"meeting:{meeting.id}:chat_messages", 0, -1)
     messages = []
     for raw in messages_raw:
@@ -2708,6 +2968,10 @@ async def bot_chat_read(
             messages.append(json.loads(raw))
         except json.JSONDecodeError:
             pass
+
+    # Fallback: if Redis has no messages, check persisted data
+    if not messages and meeting.data and isinstance(meeting.data, dict):
+        messages = meeting.data.get("chat_messages", [])
 
     return {"messages": messages, "meeting_id": meeting.id}
 
@@ -2868,24 +3132,386 @@ async def _find_active_meeting(
     return meeting
 
 
-async def _find_latest_meeting(
-    db: AsyncSession,
-    user_id: int,
-    platform_value: str,
-    native_meeting_id: str,
-) -> Optional[Meeting]:
-    """Find the latest meeting for the given platform/native_id (any status)."""
-    stmt = select(Meeting).where(
-        Meeting.user_id == user_id,
-        Meeting.platform == platform_value,
-        Meeting.platform_specific_id == native_meeting_id,
-    ).order_by(desc(Meeting.created_at)).limit(1)
-
-    result = await db.execute(stmt)
-    return result.scalar_one_or_none()
-
-
 # --- END Voice Agent Endpoints ---
+
+
+# --- Deferred Transcription Endpoint ---
+
+class TranscribeRequest(BaseModel):
+    language: Optional[str] = None  # ISO 639 code or None for auto-detect
+
+
+def _map_speakers_to_segments(speaker_events, segments):
+    """Map speaker names to transcription segments using speaking_start/stop events."""
+    ranges = []
+    active = {}
+    for event in sorted(speaker_events, key=lambda e: e.get('relative_timestamp_ms', 0)):
+        name = event.get('participant_name', 'Unknown')
+        ts_sec = event.get('relative_timestamp_ms', 0) / 1000.0
+        etype = event.get('event_type', '')
+        if etype in ('SPEAKER_START', 'speaking_start'):
+            active[name] = ts_sec
+        elif etype in ('SPEAKER_END', 'speaking_stop') and name in active:
+            ranges.append((name, active.pop(name), ts_sec))
+    for name, start in active.items():
+        ranges.append((name, start, float('inf')))
+
+    for seg in segments:
+        best_speaker = "Unknown"
+        best_overlap = 0
+        for speaker, r_start, r_end in ranges:
+            overlap = max(0, min(seg['end'], r_end) - max(seg['start'], r_start))
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = speaker
+        seg['speaker'] = best_speaker
+    return segments
+
+
+@app.post("/meetings/{meeting_id}/transcribe",
+          summary="Transcribe a meeting recording",
+          tags=["Meetings"])
+async def transcribe_meeting_recording(
+    meeting_id: int,
+    req: TranscribeRequest = TranscribeRequest(),
+    auth: tuple = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Transcribe a completed meeting's recording using Fireworks Whisper API."""
+    token, current_user = auth
+
+    # 1. Look up meeting
+    meeting = await db.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # 2. Check meeting status
+    if meeting.status != MeetingStatus.COMPLETED.value:
+        raise HTTPException(status_code=400, detail="Meeting is not completed yet")
+
+    # 3. Check no transcriptions exist yet
+    stmt = select(func.count()).select_from(Transcription).where(Transcription.meeting_id == meeting_id)
+    result = await db.execute(stmt)
+    count = result.scalar()
+    if count > 0:
+        raise HTTPException(status_code=409, detail="Meeting already has transcription")
+
+    # 4. Get recording audio
+    audio_bytes = None
+    storage = get_storage_client()
+
+    # Try meeting_data recordings first (default mode)
+    meeting_data = dict(meeting.data or {})
+    for rec in meeting_data.get('recordings', []):
+        if isinstance(rec, dict):
+            for mf in rec.get('media_files', []):
+                if isinstance(mf, dict) and mf.get('type') == 'audio' and mf.get('storage_path'):
+                    try:
+                        audio_bytes = storage.download_file(mf['storage_path'])
+                    except Exception:
+                        logger.warning(f"Failed to download from meeting_data path: {mf['storage_path']}")
+                    if audio_bytes:
+                        break
+        if audio_bytes:
+            break
+
+    # Fallback to recordings table
+    if not audio_bytes:
+        stmt = select(Recording).where(Recording.meeting_id == meeting_id, Recording.status == 'completed')
+        result = await db.execute(stmt)
+        recordings = result.scalars().all()
+        for recording in recordings:
+            await db.refresh(recording, ["media_files"])
+            for mf in recording.media_files:
+                if mf.type == 'audio' and mf.storage_path:
+                    try:
+                        audio_bytes = storage.download_file(mf.storage_path)
+                    except Exception:
+                        logger.warning(f"Failed to download from recording table path: {mf.storage_path}")
+                    if audio_bytes:
+                        break
+            if audio_bytes:
+                break
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="No recording available for this meeting")
+
+    # 5. Get or create a vxa_tx_ token for the user (required by TX Gateway for billing)
+    tx_token_stmt = select(APIToken).where(
+        APIToken.user_id == current_user.id,
+        APIToken.token.like("vxa_tx_%")
+    ).limit(1)
+    tx_token_result = await db.execute(tx_token_stmt)
+    tx_token_row = tx_token_result.scalar_one_or_none()
+    if tx_token_row:
+        tx_api_key = tx_token_row.token
+    else:
+        tx_api_key = generate_prefixed_token("tx")
+        new_token = APIToken(token=tx_api_key, user_id=current_user.id)
+        db.add(new_token)
+        await db.commit()
+        logger.info(f"Created vxa_tx_ token for user {current_user.id} for deferred transcription")
+
+    # 6. Call Transcription Gateway
+    tg_url = os.getenv("TRANSCRIPTION_GATEWAY_URL", "http://vexa-transcription-gateway:8084")
+
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
+            data = {"model": "whisper-v3-turbo", "response_format": "verbose_json"}
+            if req.language:
+                data["language"] = req.language
+            resp = await client.post(
+                f"{tg_url}/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {tx_api_key}"},
+                files=files,
+                data=data,
+            )
+        if resp.status_code != 200:
+            logger.error(f"Transcription Gateway error {resp.status_code}: {resp.text}")
+            raise HTTPException(status_code=502, detail="Transcription service error")
+        result = resp.json()
+    except httpx.HTTPError as e:
+        logger.error(f"Transcription Gateway request failed: {e}")
+        raise HTTPException(status_code=502, detail="Transcription service error")
+
+    # 6. Parse response
+    segments = result.get('segments', [])
+    detected_language = result.get('language', req.language or 'unknown')
+
+    # Filter out segments missing required keys (e.g. silence-only transcriptions)
+    segments = [s for s in segments if 'start' in s and 'end' in s and s.get('text', '').strip()]
+
+    # 7. Map speakers
+    speaker_events = meeting_data.get('speaker_events', [])
+    mapped_segments = _map_speakers_to_segments(speaker_events, segments)
+
+    # 8. Write to transcriptions table
+    # Get actual session_uid from meeting_sessions table
+    session_stmt = select(MeetingSession.session_uid).where(MeetingSession.meeting_id == meeting.id).order_by(MeetingSession.id.desc()).limit(1)
+    session_result = await db.execute(session_stmt)
+    session_uid = session_result.scalar() or str(meeting.id)
+    for seg in mapped_segments:
+        t = Transcription(
+            meeting_id=meeting.id,
+            start_time=seg['start'],
+            end_time=seg['end'],
+            text=seg['text'].strip(),
+            speaker=seg.get('speaker', 'Unknown'),
+            language=detected_language,
+            session_uid=session_uid,
+        )
+        db.add(t)
+
+    # 9. Update meeting.data
+    meeting_data['transcribe_enabled'] = True
+    meeting_data['transcribed_at'] = datetime.now(timezone.utc).isoformat()
+    meeting_data['transcription_language'] = detected_language
+    meeting.data = meeting_data
+    await db.commit()
+
+    # 10. Return result
+    if len(mapped_segments) == 0:
+        return {"status": "completed", "segment_count": 0, "language": detected_language, "message": "No speech detected in recording"}
+    return {"status": "completed", "segment_count": len(mapped_segments), "language": detected_language}
+
+# --- END Deferred Transcription Endpoint ---
+
+
+# --- Browser Session Endpoints ---
+
+@app.post("/bots/{meeting_id}/storage/save",
+          summary="Save browser session storage to MinIO",
+          dependencies=[Depends(get_user_and_token)])
+async def save_browser_session_storage(
+    meeting_id: int,
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Triggers userdata sync from container to MinIO for a browser session."""
+    user_token, current_user = auth_data
+
+    # Verify meeting exists, is owned by user, is browser_session mode, and is active
+    meeting = await db.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    meeting_data = meeting.data if isinstance(meeting.data, dict) else {}
+    if meeting_data.get("mode") != "browser_session":
+        raise HTTPException(status_code=400, detail="Meeting is not a browser session")
+    if meeting.status != MeetingStatus.ACTIVE.value:
+        raise HTTPException(status_code=400, detail="Browser session is not active")
+
+    # Get container name from meeting record
+    container_name = meeting.bot_container_id
+    if not container_name:
+        raise HTTPException(status_code=400, detail="No container associated with this browser session")
+
+    # Publish save command to Redis
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    # Use container name as channel — matches what browser-session.ts subscribes to
+    channel = f"browser_session:{container_name}"
+    try:
+        await redis_client.publish(channel, "save_storage")
+        logger.info(f"Published save_storage command to {channel} for meeting {meeting_id}")
+    except Exception as e:
+        logger.error(f"Failed to publish save_storage command: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to send save command")
+
+    # Update user.data.browser_userdata metadata
+    user_data = dict(current_user.data) if isinstance(current_user.data, dict) else {}
+    user_data["browser_userdata"] = {
+        "s3_path": f"users/{current_user.id}/browser-userdata",
+        "storage_backend": "minio",
+        "last_synced_at": datetime.utcnow().isoformat(),
+    }
+    current_user.data = user_data
+    attributes.flag_modified(current_user, "data")
+    await db.commit()
+    await db.refresh(current_user)
+
+    logger.info(f"Updated browser_userdata metadata for user {current_user.id}")
+    return {"status": "ok", "message": "Storage save initiated"}
+
+
+@app.get("/internal/browser-sessions/{token}",
+         summary="Resolve browser session token to container info (internal)")
+async def resolve_browser_session_token(token: str):
+    """Internal endpoint for api-gateway to resolve a browser session token to container info."""
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    session_data = await redis_client.get(f"browser_session:{token}")
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Browser session not found or expired")
+
+    try:
+        data = json.loads(session_data)
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(status_code=500, detail="Invalid session data")
+
+    return {
+        "container_name": data.get("container_name"),
+        "meeting_id": data.get("meeting_id"),
+        "user_id": data.get("user_id"),
+    }
+
+@app.post("/internal/browser-sessions/{token}/save",
+         summary="Save browser session storage (internal, called by api-gateway)")
+async def internal_save_browser_session_storage(token: str, db: AsyncSession = Depends(get_db)):
+    """Internal endpoint for api-gateway to trigger storage save via session token."""
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    session_data = await redis_client.get(f"browser_session:{token}")
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Browser session not found or expired")
+
+    data = json.loads(session_data)
+    meeting_id = data.get("meeting_id")
+    user_id = data.get("user_id")
+    container_name = data.get("container_name")
+
+    if not container_name:
+        raise HTTPException(status_code=400, detail="No container associated with session")
+
+    # Publish save command to Redis
+    channel = f"browser_session:{container_name}"
+    try:
+        await redis_client.publish(channel, "save_storage")
+        logger.info(f"Published save_storage command to {channel} for meeting {meeting_id}")
+    except Exception as e:
+        logger.error(f"Failed to publish save_storage command: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to send save command")
+
+    # Update user.data.browser_userdata metadata via direct SQL update
+    try:
+        from sqlalchemy import update, type_coerce
+        from sqlalchemy.dialects.postgresql import JSONB as JSONB_TYPE
+        browser_userdata = {
+            "s3_path": f"users/{user_id}/browser-userdata",
+            "storage_backend": "minio",
+            "last_synced_at": datetime.utcnow().isoformat(),
+        }
+        patch = {"browser_userdata": browser_userdata}
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(data=User.data.op('||')(type_coerce(patch, JSONB_TYPE)))
+            .execution_options(synchronize_session=False)
+        )
+        await db.execute(stmt)
+        await db.commit()
+        logger.info(f"Updated browser_userdata for user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to update user.data: {e}", exc_info=True)
+
+    return {"status": "ok", "message": "Storage save initiated"}
+
+
+@app.put("/auth/workspace-git",
+         summary="Configure git repo for workspace persistence",
+         dependencies=[Depends(get_user_and_token)])
+async def configure_workspace_git(
+    request: Request,
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set a private GitHub repo for workspace sync instead of MinIO."""
+    user_token, current_user = auth_data
+    body = await request.json()
+    repo = body.get("repo")  # e.g. "https://github.com/user/bot-workspace.git"
+    token = body.get("token")  # GitHub PAT
+    branch = body.get("branch", "main")
+
+    if not repo:
+        raise HTTPException(status_code=400, detail="repo is required")
+
+    from sqlalchemy import update, type_coerce
+    from sqlalchemy.dialects.postgresql import JSONB as JSONB_TYPE
+    workspace_git = {"repo": repo, "token": token, "branch": branch}
+    patch = {"workspace_git": workspace_git}
+    stmt = (
+        update(User)
+        .where(User.id == current_user.id)
+        .values(data=User.data.op('||')(type_coerce(patch, JSONB_TYPE)))
+        .execution_options(synchronize_session=False)
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    return {"status": "ok", "repo": repo, "branch": branch}
+
+
+@app.delete("/auth/workspace-git",
+            summary="Remove git workspace config, revert to MinIO",
+            dependencies=[Depends(get_user_and_token)])
+async def remove_workspace_git(
+    auth_data: tuple[str, User] = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove git workspace config. Workspace will sync to MinIO."""
+    user_token, current_user = auth_data
+    from sqlalchemy import update, text
+    stmt = (
+        update(User)
+        .where(User.id == current_user.id)
+        .values(data=text("data - 'workspace_git'"))
+        .execution_options(synchronize_session=False)
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    return {"status": "ok", "message": "Workspace git removed, using MinIO"}
+
+
+# --- END Browser Session Endpoints ---
 
 
 if __name__ == "__main__":

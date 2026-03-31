@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Tuple, Any
-from pydantic import BaseModel, Field, EmailStr, field_serializer, field_validator, ValidationInfo
+from pydantic import BaseModel, Field, EmailStr, field_serializer, field_validator, model_validator, ValidationInfo
 from datetime import datetime
 from enum import Enum, auto
 import re # Import re for native ID validation
@@ -22,7 +22,6 @@ ACCEPTED_LANGUAGE_CODES = {
 }
 
 # --- Allowed Tasks ---
-# These are the tasks supported by WhisperLive
 ALLOWED_TASKS = {"transcribe", "translate"}
 
 # --- Allowed Transcription Tiers ---
@@ -228,42 +227,54 @@ class Platform(str, Enum):
         return reverse_mapping.get(bot_platform_name)
 
     @classmethod
-    def construct_meeting_url(cls, platform_str: str, native_id: str, passcode: Optional[str] = None) -> Optional[str]:
+    def construct_meeting_url(
+        cls,
+        platform_str: str,
+        native_id: str,
+        passcode: Optional[str] = None,
+        base_host: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Constructs the full meeting URL from platform, native ID, and optional passcode.
-        Returns None if the platform is unknown or ID is invalid for the platform.
+        Returns None if the platform is unknown, ID is invalid, or the ID is a hex hash
+        (indicating the caller should use the raw meeting_url field instead).
+
+        Args:
+            base_host: Optional override for the Teams hostname
+                       (e.g. 'teams.microsoft.com' for enterprise short URLs).
+                       Defaults to 'teams.live.com'.
         """
         try:
             platform = Platform(platform_str)
             if platform == Platform.GOOGLE_MEET:
-                # Basic validation for Google Meet code format (xxx-xxxx-xxx)
-                if re.fullmatch(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", native_id):
-                     return f"https://meet.google.com/{native_id}"
-                else:
-                     return None # Invalid ID format
+                # Accept standard abc-defg-hij format and custom Workspace nicknames
+                if re.fullmatch(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", native_id) or \
+                   re.fullmatch(r"^[a-z0-9][a-z0-9-]{3,38}[a-z0-9]$", native_id):
+                    return f"https://meet.google.com/{native_id}"
+                return None
             elif platform == Platform.TEAMS:
-                # Teams meeting ID (numeric) and optional passcode
-                # Only accept numeric meeting IDs, not full URLs
+                # Hex hash = long legacy URL; caller must use raw meeting_url field
+                if re.fullmatch(r"^[0-9a-f]{16}$", native_id):
+                    return None
                 if re.fullmatch(r"^\d{10,15}$", native_id):
-                    url = f"https://teams.live.com/meet/{native_id}"
+                    host = base_host or "teams.live.com"
+                    url = f"https://{host}/meet/{native_id}"
                     if passcode:
                         url += f"?p={passcode}"
                     return url
-                else:
-                    return None # Invalid Teams ID format - must be numeric only
+                return None
             elif platform == Platform.ZOOM:
-                # Zoom meeting ID (numeric, 10-11 digits) and optional passcode
-                if re.fullmatch(r"^\d{10,11}$", native_id):
+                # Zoom meeting ID (numeric, 9-11 digits) and optional passcode
+                if re.fullmatch(r"^\d{9,11}$", native_id):
                     base_url = f"https://zoom.us/j/{native_id}"
                     if passcode:
                         return f"{base_url}?pwd={passcode}"
                     return base_url
-                else:
-                    return None # Invalid Zoom ID format - must be numeric
+                return None
             else:
-                return None # Unknown platform
+                return None
         except ValueError:
-            return None # Invalid platform string
+            return None
 
 # --- Schemas from Admin API --- 
 
@@ -339,8 +350,8 @@ class MeetingBase(BaseModel):
     # Removed get_bot_platform method, use Platform.get_bot_name(self.platform.value) if needed
 
 class MeetingCreate(BaseModel):
-    platform: Platform
-    native_meeting_id: str = Field(..., description="The platform-specific ID for the meeting (e.g., Google Meet code, Teams ID)")
+    platform: Optional[Platform] = Field(None, description="Meeting platform. Required unless agent_enabled=true with no meeting.")
+    native_meeting_id: Optional[str] = Field(None, description="The platform-specific ID for the meeting (e.g., Google Meet code, Teams ID). Required unless agent_enabled=true with no meeting.")
     bot_name: Optional[str] = Field(None, description="Optional name for the bot in the meeting")
     language: Optional[str] = Field(None, description="Optional language code for transcription (e.g., 'en', 'es')")
     task: Optional[str] = Field(None, description="Optional task for the transcription model (e.g., 'transcribe', 'translate')")
@@ -357,23 +368,57 @@ class MeetingCreate(BaseModel):
         description="Optional per-meeting override for transcription processing (true/false)."
     )
     passcode: Optional[str] = Field(None, description="Optional passcode for the meeting (Teams only)")
+    meeting_url: Optional[str] = Field(
+        None,
+        description="Raw meeting URL for Teams legacy /l/meetup-join/ links that cannot be reconstructed from parts. When provided, used directly as the bot's meetingUrl."
+    )
+    teams_base_host: Optional[str] = Field(
+        None,
+        description="Internal: Teams hostname for short enterprise URLs (e.g. 'teams.microsoft.com', 'gov.teams.microsoft.us'). Populated automatically by the MCP parser."
+    )
     zoom_obf_token: Optional[str] = Field(
         None,
         description="Optional one-time Zoom OBF token. If omitted for Zoom meetings, the backend will mint one from the user's stored Zoom OAuth connection."
     )
     voice_agent_enabled: Optional[bool] = Field(
         False,
-        description="Enable voice agent (TTS, chat, screen share) capabilities for this meeting"
+        description="DEPRECATED: Alias for tts_enabled=true. Does NOT enable camera. Use tts_enabled instead."
+    )
+    tts_enabled: Optional[bool] = Field(
+        False,
+        description="Enable TTS: PulseAudio gain=0 idle, gain=1 during /speak. No camera, no video."
+    )
+    video_receive_enabled: Optional[bool] = Field(
+        False,
+        description="Receive and decode video from participants. Default false (video blocked to save CPU)."
+    )
+    camera_enabled: Optional[bool] = Field(
+        False,
+        description="Enable outgoing virtual camera/avatar. Default false."
     )
     default_avatar_url: Optional[str] = Field(
         None,
-        description="Custom default avatar image URL for the bot's camera feed. Shown when no screen content is active. If omitted, the default Vexa logo is used."
+        description="Custom default avatar image URL for the bot's camera feed. Only used when camera_enabled=true."
+    )
+    agent_enabled: Optional[bool] = Field(
+        False,
+        description="Enable Claude agent in the bot container. Agent can control the browser, debug selectors, and modify code interactively."
+    )
+    mode: Optional[str] = Field(
+        None,
+        description="Bot mode: 'browser_session' for remote browser access, or None for default meeting mode."
+    )
+    authenticated: Optional[bool] = Field(
+        False,
+        description="Use stored browser userdata for authenticated join. Requires prior browser_session setup."
     )
 
     @field_validator('platform')
     @classmethod
     def platform_must_be_valid(cls, v):
         """Validate that the platform is one of the supported platforms"""
+        if v is None:
+            return v  # Allowed when agent_enabled=True with no meeting
         try:
             Platform(v)
             return v
@@ -390,9 +435,9 @@ class MeetingCreate(BaseModel):
             if platform == Platform.GOOGLE_MEET:
                 raise ValueError("Passcode is not supported for Google Meet meetings")
             elif platform == Platform.TEAMS:
-                # Teams passcode validation (alphanumeric, reasonable length)
-                if not re.match(r'^[A-Za-z0-9]{8,20}$', v):
-                    raise ValueError("Teams passcode must be 8-20 alphanumeric characters")
+                # Teams passcode validation (alphanumeric, 4-20 chars to support short personal passcodes)
+                if not re.match(r'^[A-Za-z0-9]{4,20}$', v):
+                    raise ValueError("Teams passcode must be 4-20 alphanumeric characters")
         return v
 
     @field_validator('zoom_obf_token')
@@ -438,9 +483,11 @@ class MeetingCreate(BaseModel):
     @classmethod
     def validate_native_meeting_id(cls, v, info: ValidationInfo):
         """Validate that the native meeting ID matches the expected format for the platform."""
-        if not v or not v.strip():
+        if v is None:
+            return v  # Allowed when agent_enabled=True with no meeting
+        if not v.strip():
             raise ValueError("native_meeting_id cannot be empty")
-        
+
         platform = info.data.get('platform') if info.data else None
         if not platform:
             return v  # Let platform validator handle this case
@@ -449,25 +496,47 @@ class MeetingCreate(BaseModel):
         native_id = v.strip()
         
         if platform == Platform.GOOGLE_MEET:
-            # Google Meet format: abc-defg-hij
-            if not re.fullmatch(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", native_id):
-                raise ValueError("Google Meet ID must be in format 'abc-defg-hij' (lowercase letters only)")
-        
+            # Google Meet format: standard abc-defg-hij OR custom Workspace nickname (5-40 alphanumeric/hyphen)
+            if not re.fullmatch(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", native_id) and \
+               not re.fullmatch(r"^[a-z0-9][a-z0-9-]{3,38}[a-z0-9]$", native_id):
+                raise ValueError("Google Meet ID must be in format 'abc-defg-hij' or a custom nickname (5-40 lowercase alphanumeric/hyphen chars)")
+
         elif platform == Platform.TEAMS:
-            # Teams format: numeric ID only (10-15 digits)
-            if not re.fullmatch(r"^\d{10,15}$", native_id):
-                raise ValueError("Teams meeting ID must be 10-15 digits only (not a full URL)")
-            
-            # Explicitly reject full URLs
-            if native_id.startswith(('http://', 'https://', 'teams.microsoft.com', 'teams.live.com')):
-                raise ValueError("Teams meeting ID must be the numeric ID only (e.g., '9399697580372'), not a full URL")
+            # Reject full URLs up front
+            if native_id.startswith(('http://', 'https://', 'teams.')):
+                raise ValueError("Teams meeting ID must be the numeric ID or hash, not a full URL")
+            # Accept numeric ID (10-15 digits) or 16-char hex hash (for legacy /l/meetup-join/ URLs)
+            if not re.fullmatch(r"^\d{10,15}$", native_id) and \
+               not re.fullmatch(r"^[0-9a-f]{16}$", native_id):
+                raise ValueError(
+                    "Teams native_meeting_id must be a 10-15 digit numeric ID "
+                    "or a 16-character hex hash (for legacy /l/meetup-join/ URLs)"
+                )
         
         return v
+
+    @field_validator('mode')
+    @classmethod
+    def validate_mode(cls, v):
+        """Validate that mode is a supported value."""
+        if v is not None and v not in ('browser_session',):
+            raise ValueError(f"Invalid mode '{v}'. Must be one of: 'browser_session'")
+        return v
+
+    @model_validator(mode='after')
+    def validate_meeting_or_agent(self):
+        """Ensure at least one of meeting info, agent_enabled, or browser_session mode is provided."""
+        has_meeting = self.platform is not None and self.native_meeting_id is not None
+        has_agent = bool(self.agent_enabled)
+        has_browser_session = self.mode == "browser_session"
+        if not has_meeting and not has_agent and not has_browser_session:
+            raise ValueError("Either provide platform + native_meeting_id for a meeting, set agent_enabled=true, or set mode='browser_session'")
+        return self
 
 class MeetingResponse(BaseModel): # Not inheriting from MeetingBase anymore to avoid duplicate fields if DB model is used directly
     id: int = Field(..., description="Internal database ID for the meeting")
     user_id: int
-    platform: Platform # Use the enum type
+    platform: Optional[str] = None  # str to allow "agent" for agent-only containers
     native_meeting_id: Optional[str] = Field(None, description="The native meeting identifier provided during creation") # Renamed from platform_specific_id for clarity
     constructed_meeting_url: Optional[str] = Field(None, description="The meeting URL constructed internally, if possible") # Added for info
     status: MeetingStatus = Field(..., description="Current meeting status")
@@ -576,7 +645,7 @@ class TranscriptionSegment(BaseModel):
     language: Optional[str]
     created_at: Optional[datetime] = Field(default=None)
     speaker: Optional[str] = None
-    # WhisperLive marks segments as completed/partial. This is important for real-time UI updates
+    # Segments are marked completed/partial. This is important for real-time UI updates
     # (e.g., to show when a partial segment becomes "confirmed" via SAME_OUTPUT_THRESHOLD).
     completed: Optional[bool] = None
     absolute_start_time: Optional[datetime] = Field(None, description="Absolute start timestamp of the segment (UTC)")
@@ -593,28 +662,6 @@ class TranscriptionSegment(BaseModel):
     class Config:
         from_attributes = True
         populate_by_name = True # Allow using both alias and field name
-
-# --- WebSocket Schema (NEW - Represents data from WhisperLive) ---
-
-class WhisperLiveData(BaseModel):
-    """Schema for the data message sent by WhisperLive to the collector."""
-    uid: str # Unique identifier from the original client connection
-    platform: Platform
-    meeting_url: Optional[str] = None
-    token: str # User API token
-    meeting_id: str # Native Meeting ID (string, e.g., 'abc-xyz-pqr')
-    segments: List[TranscriptionSegment]
-
-    @field_validator('platform', mode='before')
-    @classmethod
-    def validate_whisperlive_platform_str(cls, v):
-        """Validate that the platform string is one of the supported platforms"""
-        try:
-            Platform(v)
-            return v
-        except ValueError:
-            supported = ', '.join([p.value for p in Platform])
-            raise ValueError(f"Invalid platform '{v}'. Must be one of: {supported}")
 
 # --- Other Schemas ---
 class TranscriptionResponse(BaseModel): # Doesn't inherit MeetingResponse to avoid redundancy if joining data

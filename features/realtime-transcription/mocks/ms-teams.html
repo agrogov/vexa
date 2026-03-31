@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Microsoft Teams Mock Meeting</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+      background: #1b1a19;
+      color: #f3f2f1;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Phase 1: Pre-join screen ── */
+    #prejoin-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 20px;
+      background: #292828;
+    }
+    #prejoin-screen h1 {
+      font-size: 24px;
+      font-weight: 600;
+      color: #f3f2f1;
+    }
+    #prejoin-screen .preview-box {
+      width: 480px;
+      height: 270px;
+      background: #3b3a39;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    #prejoin-screen .preview-box .avatar {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: #605e5c;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      color: #f3f2f1;
+    }
+
+    /* Continue button (Step 2 in join.ts) */
+    .continue-btn {
+      padding: 8px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      border: 1px solid #6264a7;
+      border-radius: 4px;
+      cursor: pointer;
+      background: transparent;
+      color: #6264a7;
+      transition: background 0.15s;
+    }
+    .continue-btn:hover { background: rgba(98,100,167,0.1); }
+
+    /* Pre-join controls row */
+    .prejoin-controls {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+    .toggle-btn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: 1px solid #605e5c;
+      cursor: pointer;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #3b3a39;
+      color: #f3f2f1;
+      transition: background 0.15s;
+    }
+    .toggle-btn:hover { background: #484644; }
+    .toggle-btn.off { background: #a4262c; color: white; border-color: #a4262c; }
+
+    /* Name input (matches teamsNameInputSelectors) */
+    .name-input {
+      padding: 8px 12px;
+      font-size: 14px;
+      border: 1px solid #605e5c;
+      border-radius: 4px;
+      background: #292828;
+      color: #f3f2f1;
+      width: 280px;
+      outline: none;
+      font-family: inherit;
+    }
+    .name-input:focus { border-color: #6264a7; }
+
+    /* Audio radio buttons (matches teamsComputerAudioRadioSelectors) */
+    .audio-options {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+      font-size: 14px;
+    }
+    .audio-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .audio-option .radio-circle {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      border: 2px solid #605e5c;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.15s;
+    }
+    .audio-option .radio-circle.checked {
+      border-color: #6264a7;
+    }
+    .audio-option .radio-circle.checked::after {
+      content: '';
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #6264a7;
+    }
+
+    /* Join now button (matches teamsJoinButtonSelectors) */
+    .join-now-btn {
+      padding: 10px 28px;
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background: #6264a7;
+      color: white;
+      transition: background 0.15s;
+    }
+    .join-now-btn:hover { background: #4f52b2; }
+
+    /* ── Phase 2: In-meeting screen ── */
+    #meeting-screen {
+      display: none;
+      flex-direction: column;
+      height: 100vh;
+    }
+    .meeting-header {
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #292828;
+      border-bottom: 1px solid #3b3a39;
+    }
+    .meeting-header .meeting-title {
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .meeting-header .meeting-info {
+      font-size: 12px;
+      color: #a19f9d;
+    }
+
+    /* Video grid with participant tiles */
+    .video-grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 4px;
+      padding: 4px;
+      background: #1b1a19;
+    }
+
+    /* Participant tile (matches teamsParticipantSelectors) */
+    .participant-tile {
+      background: #292828;
+      border-radius: 4px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 200px;
+      overflow: hidden;
+    }
+    .participant-tile .avatar-circle {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+      font-weight: 600;
+      color: white;
+    }
+    .participant-tile .name-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 6px 12px;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .participant-tile .name-bar .display-name {
+      font-size: 13px;
+      color: #f3f2f1;
+    }
+    .participant-tile .name-bar .mic-status {
+      font-size: 14px;
+    }
+
+    /* Voice level stream outline — the bot's PRIMARY speaking signal.
+       The bot queries [data-tid="voice-level-stream-outline"] inside participant tiles.
+       When this element (or an ancestor) has the class 'vdi-frame-occlusion',
+       the participant is speaking. Without the class, they are silent. */
+    .voice-level-outline {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      border: 3px solid transparent;
+      border-radius: 4px;
+      pointer-events: none;
+      transition: border-color 0.2s;
+    }
+    .voice-level-outline.vdi-frame-occlusion {
+      border-color: #6264a7;
+    }
+
+    /* ── Meeting toolbar ── */
+    .meeting-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 0 12px 0;
+      gap: 8px;
+      background: #292828;
+      border-top: 1px solid #3b3a39;
+    }
+    .meeting-toolbar [role="toolbar"] {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .meeting-toolbar button {
+      width: 40px;
+      height: 40px;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #3b3a39;
+      color: #f3f2f1;
+      transition: background 0.15s;
+    }
+    .meeting-toolbar button:hover { background: #484644; }
+    .meeting-toolbar .hangup-btn {
+      background: #a4262c;
+      color: white;
+      width: 48px;
+      border-radius: 20px;
+    }
+    .meeting-toolbar .hangup-btn:hover { background: #8b2025; }
+
+    /* Status bar */
+    #mock-status {
+      position: fixed;
+      top: 0;
+      right: 0;
+      background: rgba(0,0,0,0.85);
+      color: #6264a7;
+      font-family: 'Cascadia Code', 'Consolas', monospace;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 0 0 0 6px;
+      z-index: 9999;
+      max-width: 450px;
+      white-space: pre-line;
+    }
+
+    /* Hidden audio container */
+    #audio-container {
+      position: absolute;
+      width: 0;
+      height: 0;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ════════ PHASE 1: Pre-join ════════ -->
+  <div id="prejoin-screen">
+    <h1>Microsoft Teams meeting</h1>
+
+    <!-- Step 2 in join.ts: "Continue on this browser" button -->
+    <!-- Matches teamsContinueButtonSelectors: 'button:has-text("Continue")' -->
+    <button class="continue-btn" id="continue-btn" onclick="clickContinue()">Continue on this browser</button>
+
+    <!-- Pre-join controls (hidden until Continue is clicked) -->
+    <div id="prejoin-controls" style="display:none; flex-direction:column; align-items:center; gap:16px;">
+      <div class="preview-box">
+        <div class="avatar" id="preview-avatar">?</div>
+      </div>
+
+      <!-- Camera / mic toggles -->
+      <div class="prejoin-controls">
+        <!-- Camera button: matches teamsCameraButtonSelectors -->
+        <button class="toggle-btn off" aria-label="Turn on camera" id="cam-toggle" onclick="toggleCam()">cam</button>
+        <!-- Mic button -->
+        <button class="toggle-btn off" aria-label="Turn on microphone" id="mic-toggle" onclick="toggleMic()">mic</button>
+      </div>
+
+      <!-- Name input: matches teamsNameInputSelectors: 'input[placeholder*="name"]', 'input[type="text"]' -->
+      <input type="text" class="name-input" id="name-input" placeholder="Type your name" oninput="updateAvatar()">
+
+      <!-- Audio options: matches teamsComputerAudioRadioSelectors / teamsDontUseAudioRadioSelectors -->
+      <div class="audio-options">
+        <div class="audio-option" onclick="selectAudioOption('computer')" role="radio" aria-label="Computer audio" aria-checked="true" id="radio-computer-audio">
+          <div class="radio-circle checked" id="radio-computer-dot"></div>
+          <span>Computer audio</span>
+        </div>
+        <div class="audio-option" onclick="selectAudioOption('none')" role="radio" aria-label="Don't use audio" aria-checked="false" id="radio-no-audio">
+          <div class="radio-circle" id="radio-none-dot"></div>
+          <span>Don't use audio</span>
+        </div>
+      </div>
+
+      <!-- Join now button: matches teamsJoinButtonSelectors -->
+      <button class="join-now-btn" id="join-now-btn" onclick="joinNow()">Join now</button>
+    </div>
+  </div>
+
+  <!-- ════════ PHASE 2: In-meeting ════════ -->
+  <div id="meeting-screen" role="main" data-tid="meeting-controls">
+    <div class="meeting-header">
+      <span class="meeting-title">Mock Teams Meeting <span style="font-size:12px;color:#a19f9d;font-weight:400;" id="scenario-label"></span></span>
+      <span class="meeting-info" id="meeting-timer">00:00</span>
+    </div>
+
+    <div class="video-grid" id="video-grid">
+      <!-- Participant tiles injected by JS -->
+    </div>
+
+    <div class="meeting-toolbar">
+      <div role="toolbar">
+        <button aria-label="Turn off microphone" id="toolbar-mic">mic</button>
+        <button aria-label="Turn off camera" id="toolbar-cam">cam</button>
+        <button aria-label="Share" data-tid="share-btn">scr</button>
+        <button aria-label="People" data-tid="participants-panel">ppl</button>
+        <button aria-label="Chat" data-tid="chat-btn">cht</button>
+        <button aria-label="Leave" class="hangup-btn" id="hangup-button" data-tid="hangup-main-btn" onclick="leaveMeeting()">end</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden container for audio elements -->
+  <div id="audio-container"></div>
+
+  <div id="mock-status">MOCK TEAMS: Pre-join</div>
+
+  <script>
+    // ──────────────────────────────────────────────────
+    //  Configuration
+    // ──────────────────────────────────────────────────
+    const PARTICIPANTS = [
+      { id: 'participant-alice-001', name: 'Alice Johnson', color: '#6264a7', speakerKey: 'Alice' },
+      { id: 'participant-bob-002',   name: 'Bob Smith',     color: '#a4262c', speakerKey: 'Bob' },
+      { id: 'participant-carol-003', name: 'Carol Williams', color: '#107c10', speakerKey: 'Carol' },
+    ];
+
+    // ──────────────────────────────────────────────────
+    //  Scenario definitions (speaking schedules + loop durations)
+    //  Each entry: [startSec, durationSec, participantIndex]
+    //  participantIndex: 0=Alice, 1=Bob, 2=Carol
+    // ──────────────────────────────────────────────────
+    const SCENARIO_SCHEDULES = {
+      'full-messy': {
+        schedule: [
+          [0, 8, 0],      // Alice: "Good morning everyone..."
+          [3, 1, 1],      // Bob: "yeah" (interjection / overlap)
+          [9, 6, 1],      // Bob: "The infrastructure cost report..."
+          [26, 5, 0],     // Alice: "Moving on to the customer feedback..."
+          [33, 5, 2],     // Carol: Russian utterance
+          [40, 2, 0],     // Alice: "Great point Carol..."
+          [42.5, 3, 1],   // Bob: "No blockers..."
+        ],
+        loopSec: 48,
+      },
+      'rapid-overlap': {
+        schedule: [
+          [0, 3, 0],       // Alice: "The deployment pipeline failed..."
+          [2, 2, 1],       // Bob interrupts: "Wait which pipeline..." (overlaps Alice)
+          [3.5, 0.5, 2],   // Carol: "yes exactly" (overlaps Bob)
+          [4.2, 2, 0],     // Alice: "No the production one..."
+          [6.5, 1, 1],     // Bob: "Did you check the logs"
+          [7.8, 1, 0],     // Alice: "Yes memory spike"
+          [9.1, 1, 1],     // Bob: "How much memory"
+          [10.4, 1.5, 0],  // Alice: "Eight gigs on a four gig container"
+          [12, 2, 1],      // Bob: "We need to fix the memory limits..."
+          [12.5, 2, 0],    // Alice: "I already opened a ticket..." (overlaps Bob)
+        ],
+        loopSec: 16,
+      },
+    };
+
+    // Select scenario from URL param: ?scenario=rapid-overlap (default: full-messy)
+    const urlParams = new URLSearchParams(window.location.search);
+    const SCENARIO = urlParams.get('scenario') || 'full-messy';
+    const WAV_BASE = `cache/${SCENARIO}`;
+
+    const scenarioConfig = SCENARIO_SCHEDULES[SCENARIO] || SCENARIO_SCHEDULES['full-messy'];
+    const SPEAKING_SCHEDULE = scenarioConfig.schedule;
+    const SCHEDULE_LOOP_SEC = scenarioConfig.loopSec;
+
+    let botName = '';
+    let meetingStartTime = null;
+    let audioCtx = null;
+    let speakingInterval = null;
+    let timerInterval = null;
+
+    // Per-participant audio: { element, gainNode, dest }
+    let participantAudio = [];
+
+    // ──────────────────────────────────────────────────
+    //  Phase 1: Pre-join interactions
+    // ──────────────────────────────────────────────────
+    function clickContinue() {
+      document.getElementById('continue-btn').style.display = 'none';
+      const controls = document.getElementById('prejoin-controls');
+      controls.style.display = 'flex';
+      setStatus('MOCK TEAMS: Pre-join controls visible');
+    }
+
+    function updateAvatar() {
+      const name = document.getElementById('name-input').value.trim();
+      const avatar = document.getElementById('preview-avatar');
+      avatar.textContent = name ? name.charAt(0).toUpperCase() : '?';
+    }
+
+    function toggleMic() {
+      const btn = document.getElementById('mic-toggle');
+      if (btn.classList.contains('off')) {
+        btn.classList.remove('off');
+        btn.setAttribute('aria-label', 'Turn off microphone');
+      } else {
+        btn.classList.add('off');
+        btn.setAttribute('aria-label', 'Turn on microphone');
+      }
+    }
+
+    function toggleCam() {
+      const btn = document.getElementById('cam-toggle');
+      if (btn.classList.contains('off')) {
+        btn.classList.remove('off');
+        btn.setAttribute('aria-label', 'Turn off camera');
+      } else {
+        btn.classList.add('off');
+        btn.setAttribute('aria-label', 'Turn on camera');
+      }
+    }
+
+    function selectAudioOption(mode) {
+      const compDot = document.getElementById('radio-computer-dot');
+      const noneDot = document.getElementById('radio-none-dot');
+      const compRadio = document.getElementById('radio-computer-audio');
+      const noneRadio = document.getElementById('radio-no-audio');
+
+      if (mode === 'computer') {
+        compDot.classList.add('checked');
+        noneDot.classList.remove('checked');
+        compRadio.setAttribute('aria-checked', 'true');
+        noneRadio.setAttribute('aria-checked', 'false');
+      } else {
+        compDot.classList.remove('checked');
+        noneDot.classList.add('checked');
+        compRadio.setAttribute('aria-checked', 'false');
+        noneRadio.setAttribute('aria-checked', 'true');
+      }
+    }
+
+    function joinNow() {
+      botName = document.getElementById('name-input').value.trim() || 'Vexa Bot';
+      setStatus('MOCK TEAMS: Joining as "' + botName + '"...');
+      document.getElementById('prejoin-screen').style.display = 'none';
+
+      // Brief delay to simulate admission check (bot polls for admission indicators)
+      setTimeout(() => {
+        enterMeeting();
+      }, 500);
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Phase 2: Enter the meeting
+    // ──────────────────────────────────────────────────
+    function enterMeeting() {
+      meetingStartTime = Date.now();
+      document.getElementById('meeting-screen').style.display = 'flex';
+
+      // Create AudioContext for WAV playback
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+      const grid = document.getElementById('video-grid');
+      const audioContainer = document.getElementById('audio-container');
+
+      // Add bot tile (no audio)
+      grid.appendChild(createParticipantTile('participant-bot-self', botName, '#605e5c', true));
+
+      // Create hidden participants panel with [role="menuitem"] + img children.
+      // The bot's collectAriaParticipants() counts [role="menuitem"] elements that
+      // contain an <img> or [role="img"]. Without this, the bot thinks it's alone
+      // and leaves after 120s.
+      const rosterPanel = document.createElement('div');
+      rosterPanel.setAttribute('data-tid', 'participants-panel-roster');
+      rosterPanel.style.display = 'none';
+      PARTICIPANTS.forEach(p => {
+        const item = document.createElement('div');
+        item.setAttribute('role', 'menuitem');
+        item.setAttribute('aria-label', p.name);
+        const img = document.createElement('img');
+        img.setAttribute('role', 'img');
+        img.setAttribute('alt', p.name);
+        img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+        item.appendChild(img);
+        rosterPanel.appendChild(item);
+      });
+      document.body.appendChild(rosterPanel);
+
+      // --- Teams audio architecture: single mixed stream ---
+      // Teams delivers ONE mixed audio stream to a single <audio> element.
+      // The bot hooks RTCPeerConnection to capture it, creating hidden <audio>
+      // elements with data-vexa-injected="true".
+      //
+      // For the mock we:
+      // 1. Create per-speaker MediaStreamDestinations (for gain control)
+      // 2. Mix them all into ONE combined destination
+      // 3. Attach that single mixed stream to one <audio> element
+      // 4. Also set window.__vexaInjectedAudioElements and
+      //    __vexaCapturedRemoteAudioStreams (Option B from task description)
+
+      const mixedDest = audioCtx.createMediaStreamDestination();
+
+      PARTICIPANTS.forEach((p, idx) => {
+        // Create participant tile with voice-level-stream-outline
+        grid.appendChild(createParticipantTile(p.id, p.name, p.color, false));
+
+        // Per-speaker gain -> mixed destination
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+        gainNode.connect(mixedDest);
+
+        participantAudio.push({ participant: p, gainNode, index: idx });
+
+        // Load WAV and start looped playback into gain node
+        loadWavBuffer(p.speakerKey).then(buffer => {
+          if (buffer) {
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.loop = true;
+            source.connect(gainNode);
+            source.start(0);
+            console.log(`[MockTeams] WAV playback started: ${p.speakerKey} (${buffer.duration.toFixed(1)}s)`);
+          }
+        });
+      });
+
+      // Create the single mixed <audio> element (like Teams' real audio element)
+      const mixedAudioEl = document.createElement('audio');
+      mixedAudioEl.id = 'teams-mixed-audio';
+      mixedAudioEl.srcObject = mixedDest.stream;
+      mixedAudioEl.autoplay = true;
+      mixedAudioEl.muted = false;
+      mixedAudioEl.volume = 1.0;
+      mixedAudioEl.dataset.vexaInjected = 'true';
+      mixedAudioEl.style.cssText = 'position:absolute;left:-9999px;width:1px;height:1px;';
+      document.body.appendChild(mixedAudioEl);
+      mixedAudioEl.play().catch(e => console.warn('[MockTeams] Autoplay blocked:', e));
+
+      // Option B: pre-inject the globals the bot's RTCPeerConnection hook would set
+      window.__vexaInjectedAudioElements = window.__vexaInjectedAudioElements || [];
+      window.__vexaInjectedAudioElements.push(mixedAudioEl);
+      window.__vexaCapturedRemoteAudioStreams = window.__vexaCapturedRemoteAudioStreams || [];
+      window.__vexaCapturedRemoteAudioStreams.push(mixedDest.stream);
+
+      // NOTE: Don't clone the audio element into the container — cloneNode(false)
+      // copies the element but NOT the srcObject property, and querySelector('audio')
+      // would find the empty clone first, breaking per-speaker audio routing.
+
+      // Start speaking simulation (toggles vdi-frame-occlusion on voice-level-stream-outline)
+      startSpeakingSimulation();
+
+      // Start meeting timer
+      startMeetingTimer();
+
+      document.getElementById('scenario-label').textContent = '(' + SCENARIO + ')';
+      setStatus('MOCK TEAMS: In meeting | ' + (PARTICIPANTS.length + 1) + ' participants | Scenario: ' + SCENARIO);
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Participant tile creation
+    // ──────────────────────────────────────────────────
+    function createParticipantTile(id, name, color, isSelf) {
+      // Outer tile: matches teamsParticipantSelectors
+      // [data-tid*="video-tile"], [data-tid*="participant"]
+      const tile = document.createElement('div');
+      tile.className = 'participant-tile';
+      tile.setAttribute('data-tid', 'video-tile-' + id);
+      tile.setAttribute('data-participant-id', id);
+      tile.setAttribute('data-acc-element-id', id);
+      if (isSelf) {
+        tile.setAttribute('data-self-name', name);
+      }
+
+      // Avatar
+      const avatar = document.createElement('div');
+      avatar.className = 'avatar-circle';
+      avatar.style.background = color;
+      avatar.textContent = name.charAt(0).toUpperCase();
+      tile.appendChild(avatar);
+
+      // Name bar with display-name element
+      // Matches teamsNameSelectors: '[data-tid*="display-name"]', '.display-name', 'span[title]'
+      const nameBar = document.createElement('div');
+      nameBar.className = 'name-bar';
+
+      const displayName = document.createElement('span');
+      displayName.className = 'display-name';
+      displayName.setAttribute('data-tid', 'display-name-' + id);
+      displayName.setAttribute('title', name);
+      displayName.textContent = name;
+      nameBar.appendChild(displayName);
+
+      const micStatus = document.createElement('span');
+      micStatus.className = 'mic-status';
+      micStatus.textContent = 'mic';
+      nameBar.appendChild(micStatus);
+
+      tile.appendChild(nameBar);
+
+      // Voice level stream outline — THE critical element for speaker detection
+      // Matches teamsSpeakingIndicators: '[data-tid="voice-level-stream-outline"]'
+      // The vdi-frame-occlusion class toggles on THIS element to indicate speaking
+      if (!isSelf) {
+        const voiceOutline = document.createElement('div');
+        voiceOutline.className = 'voice-level-outline';
+        voiceOutline.setAttribute('data-tid', 'voice-level-stream-outline');
+        tile.appendChild(voiceOutline);
+      }
+
+      return tile;
+    }
+
+    // ──────────────────────────────────────────────────
+    //  WAV loading
+    // ──────────────────────────────────────────────────
+    async function loadWavBuffer(speakerKey) {
+      const url = `${WAV_BASE}/${speakerKey.toLowerCase()}.wav`;
+      console.log(`[MockTeams] Loading WAV: ${url}`);
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          console.warn(`[MockTeams] Failed to load ${url}: ${response.status}`);
+          return null;
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        console.log(`[MockTeams] Loaded ${speakerKey}: ${audioBuffer.duration.toFixed(1)}s, ${audioBuffer.sampleRate}Hz`);
+        return audioBuffer;
+      } catch (e) {
+        console.warn(`[MockTeams] Error loading ${url}:`, e);
+        return null;
+      }
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Speaking simulation
+    // ──────────────────────────────────────────────────
+    function startSpeakingSimulation() {
+      speakingInterval = setInterval(() => {
+        if (!meetingStartTime) return;
+
+        const elapsed = (Date.now() - meetingStartTime) / 1000;
+        const loopTime = elapsed % SCHEDULE_LOOP_SEC;
+
+        // Determine who should be speaking
+        const currentlySpeaking = new Set();
+        SPEAKING_SCHEDULE.forEach(([start, duration, pIdx]) => {
+          if (loopTime >= start && loopTime < start + duration) {
+            currentlySpeaking.add(pIdx);
+          }
+        });
+
+        // Update each participant
+        PARTICIPANTS.forEach((p, idx) => {
+          const tile = document.querySelector('[data-participant-id="' + p.id + '"]');
+          const voiceOutline = tile ? tile.querySelector('[data-tid="voice-level-stream-outline"]') : null;
+          const audio = participantAudio[idx];
+          if (!tile || !voiceOutline || !audio) return;
+
+          if (currentlySpeaking.has(idx)) {
+            // Speaking: add vdi-frame-occlusion to voice-level-stream-outline
+            // This is THE signal the bot's TeamsSpeakingDetector checks
+            if (!voiceOutline.classList.contains('vdi-frame-occlusion')) {
+              voiceOutline.classList.add('vdi-frame-occlusion');
+            }
+            // Unmute audio gain
+            audio.gainNode.gain.setTargetAtTime(1.0, audioCtx.currentTime, 0.05);
+          } else {
+            // Silent: remove vdi-frame-occlusion
+            if (voiceOutline.classList.contains('vdi-frame-occlusion')) {
+              voiceOutline.classList.remove('vdi-frame-occlusion');
+            }
+            // Mute audio gain
+            audio.gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.05);
+          }
+        });
+      }, 200); // 200ms matches bot's MIN_STATE_CHANGE_MS debounce
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Meeting timer
+    // ──────────────────────────────────────────────────
+    function startMeetingTimer() {
+      timerInterval = setInterval(() => {
+        if (!meetingStartTime) return;
+        const elapsed = Math.floor((Date.now() - meetingStartTime) / 1000);
+        const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const secs = String(elapsed % 60).padStart(2, '0');
+        document.getElementById('meeting-timer').textContent = mins + ':' + secs;
+      }, 1000);
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Leave meeting
+    // ──────────────────────────────────────────────────
+    function leaveMeeting() {
+      if (speakingInterval) clearInterval(speakingInterval);
+      if (timerInterval) clearInterval(timerInterval);
+
+      if (audioCtx) {
+        audioCtx.close().catch(() => {});
+      }
+
+      document.getElementById('meeting-screen').style.display = 'none';
+
+      const ended = document.createElement('div');
+      ended.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px;';
+      ended.innerHTML = '<h1 style="font-weight:600;color:#f3f2f1;">You left the meeting</h1>' +
+                         '<p style="color:#a19f9d;">The mock Teams meeting has ended.</p>';
+      document.body.appendChild(ended);
+      setStatus('MOCK TEAMS: Meeting ended');
+    }
+
+    // ──────────────────────────────────────────────────
+    //  Utility
+    // ──────────────────────────────────────────────────
+    function setStatus(msg) {
+      document.getElementById('mock-status').textContent = msg;
+      console.log('[MockTeams]', msg);
+    }
+
+    // Resume AudioContext on user interaction (needed for headless browsers)
+    document.addEventListener('click', () => {
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().then(() => {
+          setStatus('MOCK TEAMS: AudioContext resumed');
+        });
+      }
+    });
+  </script>
+</body>
+</html>

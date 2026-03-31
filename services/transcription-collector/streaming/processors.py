@@ -11,11 +11,10 @@ import redis # For redis.exceptions
 import redis.asyncio as aioredis # For type hinting redis_client
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-# from pydantic import ValidationError # Not explicitly used in the snippets for these functions, but could be for WhisperLiveData
 
 from shared_models.database import async_session_local # For DB sessions
 from shared_models.models import User, Meeting, MeetingSession, APIToken
-from shared_models.schemas import Platform # WhisperLiveData not directly used by these functions from snippet
+from shared_models.schemas import Platform
 from config import REDIS_SEGMENT_TTL, REDIS_SPEAKER_EVENT_KEY_PREFIX, REDIS_SPEAKER_EVENT_TTL # Added new configs (NEW)
 # MODIFIED: Import the new utility function and only necessary statuses/base mapper if still needed elsewhere
 from mapping.speaker_mapper import get_speaker_mapping_for_segment, STATUS_UNKNOWN, STATUS_ERROR # Removed direct map_speaker_to_segment and other statuses if not directly used by this file
@@ -217,41 +216,6 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
             segments_to_store = {}
             changed_segments = []  # Track which segments actually changed
             session_uid_from_payload = stream_data.get('uid')
-            # Resolve session start time for absolute UTC timestamp computation
-            session_start_utc = None
-            try:
-                if session_uid_from_payload:
-                    # Try Redis cache first for fast lookup
-                    session_start_cache_key = f"meeting_session:{session_uid_from_payload}:start"
-                    cached_start = await redis_c.get(session_start_cache_key)
-                    if cached_start:
-                        try:
-                            cached_str = cached_start if isinstance(cached_start, str) else cached_start.decode('utf-8')
-                            if cached_str.endswith('Z'):
-                                cached_str = cached_str[:-1]
-                            session_start_utc = datetime.fromisoformat(cached_str).replace(tzinfo=timezone.utc)
-                            logger.debug(f"[Msg {message_id}/Meet {internal_meeting_id}] Loaded session start from Redis cache for UID {session_uid_from_payload}")
-                        except Exception as cache_parse_err:
-                            logger.warning(f"[Msg {message_id}/Meet {internal_meeting_id}] Failed to parse cached session start: {cache_parse_err}")
-                    
-                    # Fallback to DB if not in cache
-                    if not session_start_utc:
-                        stmt_session_time = select(MeetingSession).where(
-                            MeetingSession.meeting_id == internal_meeting_id,
-                            MeetingSession.session_uid == session_uid_from_payload
-                        )
-                        result_session_time = await db.execute(stmt_session_time)
-                        session_row = result_session_time.scalars().first()
-                        if session_row and getattr(session_row, 'session_start_time', None):
-                            session_start_utc = session_row.session_start_time
-                            # Cache it for next time
-                            try:
-                                await redis_c.set(session_start_cache_key, session_start_utc.isoformat(), ex=7200)
-                                logger.debug(f"[Msg {message_id}/Meet {internal_meeting_id}] Loaded session start from DB and cached for UID {session_uid_from_payload}")
-                            except Exception:
-                                pass
-            except Exception as _sess_err:
-                logger.warning(f"[Msg {message_id}/Meet {internal_meeting_id}] Unable to resolve session start time for UID {session_uid_from_payload}: {_sess_err}")
 
             if not session_uid_from_payload:
                 logger.warning(f"[Msg {message_id}/Meet {internal_meeting_id}] Message missing 'uid' for transcription segments. Cannot map speakers. Segments in this message will not have speaker info.")
@@ -265,7 +229,7 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
                      end_time_float = float(segment['end'])
                      text_content = segment.get('text') or ""
                      language_content = segment.get('language')
-                     # WhisperLive provides this; we must propagate it so the UI can observe
+                     # Propagate completed flag so the UI can observe
                      # partial -> completed transitions (e.g., SAME_OUTPUT_THRESHOLD confirmation).
                      completed_content = bool(segment.get('completed', False))
                  except (ValueError, TypeError) as time_err:
@@ -282,12 +246,25 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
                      logger.debug(f"[Msg {message_id}/Meet {internal_meeting_id}] Skipping ~zero-length segment: {segment}")
                      continue
                             
-                 start_time_key = f"{start_time_float:.3f}"
-                 
-                 mapping_status: str = STATUS_UNKNOWN
+                 # Use segment_id as Redis Hash key (stable identity)
+                 segment_id = segment.get('segment_id')
+                 if not segment_id:
+                     logger.error(f"[Msg {message_id}/Meet {internal_meeting_id}] Segment {i} missing segment_id. Skipping.")
+                     continue
+                 start_time_key = segment_id
 
-                 if session_uid_from_payload:
-                    # MODIFIED: Call the new utility function
+                 mapping_status: str = STATUS_UNKNOWN
+                 mapped_speaker_name = None
+
+                 # Use speaker from segment payload if the producer already labeled it
+                 # (per-speaker bot pipeline sends pre-labeled segments)
+                 segment_speaker = segment.get('speaker')
+                 if segment_speaker:
+                    mapped_speaker_name = segment_speaker
+                    mapping_status = "PRODUCER_LABELED"
+                    logger.debug(f"[Msg {message_id}/Meet {internal_meeting_id}/Seg {start_time_key}] Using producer-labeled speaker: {segment_speaker}")
+                 elif session_uid_from_payload:
+                    # Fallback: map speaker from speaker events sorted set
                     context_log = f"[LiveMap Msg:{message_id}/Meet:{internal_meeting_id}/Seg:{start_time_key}]"
                     mapping_result = await get_speaker_mapping_for_segment(
                         redis_c=redis_c,
@@ -298,35 +275,28 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
                         context_log_msg=context_log
                     )
                     mapped_speaker_name = mapping_result.get("speaker_name")
-                    mapping_status = mapping_result.get("status", STATUS_ERROR) # Default to STATUS_ERROR if not present
+                    mapping_status = mapping_result.get("status", STATUS_ERROR)
                  else:
-                    # This case is now handled inside get_speaker_mapping_for_segment if session_uid is None,
-                    # but keeping explicit handling here is also fine for clarity if session_uid_from_payload is None from the start.
                     logger.warning(f"[Msg {message_id}/Meet {internal_meeting_id}/Seg {start_time_key}] No session_uid_from_payload. Cannot map speakers.")
                     mapping_status = STATUS_UNKNOWN
 
-                 # Compute absolute UTC timestamps if session start time is known
-                 abs_start_iso = None
-                 abs_end_iso = None
-                 if session_start_utc is not None:
-                     try:
-                         abs_start_dt = session_start_utc + timedelta(seconds=start_time_float)
-                         abs_end_dt = session_start_utc + timedelta(seconds=end_time_float)
-                         abs_start_iso = abs_start_dt.isoformat()
-                         abs_end_iso = abs_end_dt.isoformat()
-                     except Exception as _abs_err:
-                         logger.debug(f"[Msg {message_id}/Meet {internal_meeting_id}] Failed to compute absolute times: {_abs_err}")
+                 # Absolute timestamps come from the segment payload (bot publishes UTC directly)
+                 abs_start_iso = segment.get('absolute_start_time')
+                 abs_end_iso = segment.get('absolute_end_time')
                  
                  segment_redis_data = {
                      "text": text_content,
+                     "start_time": start_time_float,
                      "end_time": end_time_float,
                      "language": language_content,
                      "completed": completed_content,
-                     "updated_at": datetime.now(timezone.utc).isoformat(), 
+                     "updated_at": datetime.now(timezone.utc).isoformat(),
                      "session_uid": session_uid_from_payload,
                      "speaker": mapped_speaker_name,
                      "speaker_mapping_status": mapping_status
                  }
+                 if segment_id:
+                     segment_redis_data["segment_id"] = segment_id
                  if abs_start_iso:
                      segment_redis_data["absolute_start_time"] = abs_start_iso
                  if abs_end_iso:
@@ -373,7 +343,7 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
                  # Store and mark as changed
                  segments_to_store[start_time_key] = json.dumps(segment_redis_data)
                  segment_count += 1
-                 changed_segments.append({
+                 changed_seg = {
                      "start": start_time_float,
                      "text": text_content,
                      "end_time": end_time_float,
@@ -384,7 +354,10 @@ async def process_stream_message(message_id: str, message_data: Dict[str, Any], 
                      "speaker_mapping_status": mapping_status,
                      "absolute_start_time": abs_start_iso,
                      "absolute_end_time": abs_end_iso
-                 })
+                 }
+                 if segment_id:
+                     changed_seg["segment_id"] = segment_id
+                 changed_segments.append(changed_seg)
             
             if segment_count > 0:
                 try:

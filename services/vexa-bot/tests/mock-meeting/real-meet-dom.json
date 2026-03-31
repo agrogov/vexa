@@ -1,0 +1,104 @@
+{
+  "participants": [
+    {
+      "id": "spaces/1WRTcuGyP40B/devices/97",
+      "tag": "DIV",
+      "classes": "oZRSLe",
+      "children": "DIV.FKJK2b ZrmAYe",
+      "text": "visual_effectsBackgrounds and effectsCan't remove your tile in this layoutmore_v"
+    }
+  ],
+  "mediaElements": [
+    {
+      "tag": "AUDIO",
+      "id": "",
+      "src": "",
+      "hasSrcObject": true,
+      "srcObjectTracks": [
+        {
+          "kind": "audio",
+          "enabled": true,
+          "muted": false,
+          "id": "e5a5859b-6b11-4a08-9"
+        }
+      ],
+      "paused": true,
+      "readyState": 4,
+      "autoplay": false,
+      "muted": false
+    },
+    {
+      "tag": "AUDIO",
+      "id": "",
+      "src": "",
+      "hasSrcObject": true,
+      "srcObjectTracks": [
+        {
+          "kind": "audio",
+          "enabled": true,
+          "muted": false,
+          "id": "973d5bd9-a5f9-4554-8"
+        }
+      ],
+      "paused": true,
+      "readyState": 4,
+      "autoplay": false,
+      "muted": false
+    },
+    {
+      "tag": "AUDIO",
+      "id": "",
+      "src": "",
+      "hasSrcObject": true,
+      "srcObjectTracks": [
+        {
+          "kind": "audio",
+          "enabled": true,
+          "muted": false,
+          "id": "e7c35cd0-3772-4bca-9"
+        }
+      ],
+      "paused": true,
+      "readyState": 4,
+      "autoplay": false,
+      "muted": false
+    }
+  ],
+  "toolbar": [
+    { "ariaLabel": "Backgrounds and effects", "text": "visual_effects" },
+    { "ariaLabel": "Can't remove your tile in this layout", "text": "" },
+    { "ariaLabel": "More options for Dmitriy Grankin", "text": "more_vert" },
+    { "ariaLabel": "This call is open to anyone", "text": "meeting_room" },
+    { "ariaLabel": "Audio settings", "text": "keyboard_arrow_up" },
+    { "ariaLabel": "Turn off microphone", "text": "mic" },
+    { "ariaLabel": "Video settings", "text": "keyboard_arrow_up" },
+    { "ariaLabel": "Camera problem. Show more info", "text": "videocam" },
+    { "ariaLabel": "Share screen", "text": "computer_arrow_up" },
+    { "ariaLabel": "Send a reaction", "text": "mood" },
+    { "ariaLabel": "Turn on captions", "text": "closed_caption_off" },
+    { "ariaLabel": "Raise hand (Ctrl + alt + h)", "text": "back_handback_hand" },
+    { "ariaLabel": "More options", "text": "more_vert" },
+    { "ariaLabel": "Leave call", "text": "call_end" },
+    { "ariaLabel": "Meeting details", "text": "infoinfo" },
+    { "ariaLabel": "Chat with everyone", "text": "chatchat_bubble" },
+    { "ariaLabel": "Meeting tools", "text": "appsapps" },
+    { "ariaLabel": "Host controls", "text": "lock_personlock_person" },
+    { "ariaLabel": "Your call is ending soon", "text": "alarm" },
+    { "ariaLabel": "Close", "text": "close" },
+    { "ariaLabel": "Copy link", "text": "content_copy" },
+    { "ariaLabel": "Close", "text": "close" }
+  ],
+  "speakingClasses": {
+    "Oaajhc": 0,
+    "gjg47c": 2,
+    "HX2H7": 0,
+    "wEsLMd": 0,
+    "OgVli": 0
+  },
+  "names": [
+    { "tag": "SPAN", "class": "notranslate", "text": "Dmitriy Grankin", "parent": "" }
+  ],
+  "toolbars": [],
+  "meetingAttrs": [],
+  "firstTileHTML": "<div jsname=\"E2KThb\" tabindex=\"-1\" class=\"oZRSLe\" jscontroller=\"K3Z5Df\" jsmodel=\"QUjYIe;cZWlhe;OKIGt;Vbqmbc;A0Tiaf;vkKgo;\" data-participant-id=\"spaces/1WRTcuGyP40B/devices/97\" data-requested-participant-id=\"spaces/1WRTcuGyP40B/devices/97\" data-tile-media-id=\"spaces/1WRTcuGyP40B/devices/97\" jsaction=\"...\">"
+}

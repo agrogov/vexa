@@ -1,234 +1,101 @@
-# services/bot-manager/app/orchestrators/kubernetes.py
+"""Kubernetes orchestrator implementation.
 
-import asyncio
-import base64
-import hmac
-import json
+Spawns bots as Kubernetes Pods instead of Docker containers or child processes.
+Designed for Kubernetes-native deployments where bot-manager runs as a Pod
+and creates sibling bot Pods via the Kubernetes API.
+
+Activate with ORCHESTRATOR=kubernetes environment variable.
+
+Requires:
+- kubernetes Python client (pip install kubernetes)
+- ServiceAccount with pod create/delete/get/list/watch permissions
+  (created by the Helm chart's bot-manager-rbac.yaml)
+"""
+from __future__ import annotations
+
 import os
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+import json
+import logging
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional, Tuple, Dict, Any, List
 
 from kubernetes import client, config
-from kubernetes.client import ApiException
+from kubernetes.client.rest import ApiException
 
-def _b64url_encode(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+from app.orchestrators.common import enforce_user_concurrency_limit, count_user_active_bots
 
+logger = logging.getLogger("bot_manager.kubernetes_orchestrator")
 
-def _mint_meeting_token(
-    meeting_id: int,
-    user_id: int,
-    platform: str,
-    native_meeting_id: str,
-    ttl_seconds: int = 3600,
-) -> str:
-    secret = os.environ.get("ADMIN_TOKEN")
-    if not secret:
-        raise RuntimeError("ADMIN_TOKEN not configured; cannot mint MeetingToken")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-    now = int(datetime.utcnow().timestamp())
-    header = {"alg": "HS256", "typ": "JWT"}
-    payload = {
-        "meeting_id": meeting_id,
-        "user_id": user_id,
-        "platform": platform,
-        "native_meeting_id": native_meeting_id,
-        "scope": "transcribe:write",
-        "iss": "bot-manager",
-        "aud": "transcription-collector",
-        "iat": now,
-        "exp": now + ttl_seconds,
-        "jti": str(uuid.uuid4()),
-    }
+BOT_IMAGE_NAME = os.getenv("BOT_IMAGE_NAME", "vexa-bot:latest")
+BOT_NAMESPACE = os.getenv("BOT_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))
+BOT_SERVICE_ACCOUNT = os.getenv("BOT_SERVICE_ACCOUNT_NAME", "")
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+BOT_CALLBACK_BASE_URL = os.getenv("BOT_CALLBACK_BASE_URL", "http://bot-manager:8080")
 
-    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
-    signature = hmac.new(secret.encode("utf-8"), signing_input, digestmod="sha256").digest()
-    signature_b64 = _b64url_encode(signature)
-    return f"{header_b64}.{payload_b64}.{signature_b64}"
+# Resource limits for bot pods (set via Helm values)
+BOT_CPU_REQUEST = os.getenv("BOT_POD_CPU_REQUEST", "500m")
+BOT_MEMORY_REQUEST = os.getenv("BOT_POD_MEMORY_REQUEST", "512Mi")
+BOT_CPU_LIMIT = os.getenv("BOT_POD_CPU_LIMIT", "2000m")
+BOT_MEMORY_LIMIT = os.getenv("BOT_POD_MEMORY_LIMIT", "4Gi")
+
+# Image pull policy and secrets
+IMAGE_PULL_POLICY = os.getenv("IMAGE_PULL_POLICY", "IfNotPresent")
+IMAGE_PULL_SECRET = os.getenv("IMAGE_PULL_SECRET", "")
+
+# Node selector for bot pods (JSON string, e.g. '{"role": "bots"}')
+BOT_NODE_SELECTOR = json.loads(os.getenv("BOT_NODE_SELECTOR", "{}")) if os.getenv("BOT_NODE_SELECTOR") else {}
+
+# ---------------------------------------------------------------------------
+# Kubernetes Client
+# ---------------------------------------------------------------------------
+
+_k8s_api: Optional[client.CoreV1Api] = None
 
 
-_core_v1: Optional[client.CoreV1Api] = None
+def _get_k8s_api() -> client.CoreV1Api:
+    """Get or initialize the Kubernetes API client."""
+    global _k8s_api
+    if _k8s_api is None:
+        try:
+            config.load_incluster_config()
+            logger.info("Loaded in-cluster Kubernetes config")
+        except config.ConfigException:
+            try:
+                config.load_kube_config()
+                logger.info("Loaded kubeconfig from file")
+            except config.ConfigException:
+                logger.error("Could not load Kubernetes config (in-cluster or kubeconfig)")
+                raise
+        _k8s_api = client.CoreV1Api()
+    return _k8s_api
 
 
-def _get_core_v1() -> client.CoreV1Api:
-    global _core_v1
-    if _core_v1 is None:
-        config.load_incluster_config()
-        _core_v1 = client.CoreV1Api()
-    return _core_v1
+# ---------------------------------------------------------------------------
+# Compatibility Stubs
+# ---------------------------------------------------------------------------
+
+def get_socket_session(*_args, **_kwargs):
+    """Compatibility stub - no Docker socket in K8s orchestrator."""
+    return None
 
 
-def _namespace() -> str:
-    # Prefer explicit BOT_NAMESPACE; fall back to the Pod namespace; then default.
-    return (
-            os.environ.get("BOT_NAMESPACE")
-            or os.environ.get("POD_NAMESPACE")
-            or "default"
-    )
+def close_client():
+    """Compatibility stub."""
+    pass
 
 
-def _bot_image() -> str:
-    return os.environ.get("BOT_IMAGE_NAME", "vexa-bot:dev")
+close_docker_client = close_client
 
 
-def _bot_sa_name() -> Optional[str]:
-    # Optional: attach a ServiceAccount to bot pods (usually not required).
-    v = os.environ.get("BOT_SERVICE_ACCOUNT_NAME", "").strip()
-    return v or None
-
-
-def _bot_resources() -> Optional[client.V1ResourceRequirements]:
-    cpu_request = os.environ.get("BOT_POD_CPU_REQUEST", "500m").strip()
-    cpu_limit = os.environ.get("BOT_POD_CPU_LIMIT", "2000m").strip()
-    mem_request = os.environ.get("BOT_POD_MEMORY_REQUEST", "512Mi").strip()
-    mem_limit = os.environ.get("BOT_POD_MEMORY_LIMIT", "4Gi").strip()
-
-    return client.V1ResourceRequirements(
-        requests={"cpu": cpu_request, "memory": mem_request},
-        limits={"cpu": cpu_limit, "memory": mem_limit},
-    )
-
-
-def _bot_manager_callback_url() -> Optional[str]:
-    # Optional in BotConfig, but useful for lifecycle callbacks.
-    # In k8s: point to bot-manager service DNS.
-    return os.environ.get("BOT_MANAGER_CALLBACK_URL")  # e.g. http://vexa-bot-manager:8080/bots/internal/callback/exited
-
-
-def _default_automatic_leave() -> Dict[str, int]:
-    # Defaults documented for bot automatic leave timeouts (ms)
-    return {
-        "waitingRoomTimeout": int(os.environ.get("BOT_WAITING_ROOM_TIMEOUT_MS", "300000")),
-        "noOneJoinedTimeout": int(os.environ.get("BOT_NO_ONE_JOINED_TIMEOUT_MS", "120000")),
-        "everyoneLeftTimeout": int(os.environ.get("BOT_EVERYONE_LEFT_TIMEOUT_MS", "60000")),
-    }
-
-def _teams_speaker_tuning() -> Dict[str, int]:
-    return {
-        "signalLossGraceMs": int(os.environ.get("TEAMS_SIGNAL_LOSS_GRACE_MS", "2000")),
-        "speakingKeepaliveMs": int(os.environ.get("TEAMS_SPEAKING_KEEPALIVE_MS", "8000")),
-    }
-
-
-def _build_bot_pod(
-    user_id: int,
-    meeting_id: int,
-    meeting_url: str,
-    platform: str,
-    bot_name: Optional[str],
-    user_token: str,
-    native_meeting_id: str,
-    language: Optional[str],
-    task: Optional[str],
-    transcription_tier: Optional[str],
-    recording_enabled: Optional[bool],
-    transcribe_enabled: Optional[bool],
-    zoom_obf_token: Optional[str],
-    voice_agent_enabled: Optional[bool],
-    default_avatar_url: Optional[str],
-) -> Tuple[str, str]:
-    connection_id = str(uuid.uuid4())
-    pod_name = f"vexa-bot-{meeting_id}-{connection_id[:8]}"
-
-    redis_url = os.environ.get("REDIS_URL")
-    whisper_url = os.environ.get("WHISPER_LIVE_URL")
-    if not redis_url:
-        raise RuntimeError("REDIS_URL is required in bot-manager env")
-    if not whisper_url:
-        raise RuntimeError("WHISPER_LIVE_URL is required in bot-manager env")
-
-    meeting_token = _mint_meeting_token(
-        meeting_id=meeting_id,
-        user_id=user_id,
-        platform=platform,
-        native_meeting_id=native_meeting_id,
-    )
-
-    bot_config: Dict[str, Any] = {
-        "platform": platform,
-        "meetingUrl": meeting_url,
-        "botName": bot_name or f"VexaBot-{uuid.uuid4().hex[:6]}",
-        "token": meeting_token,
-        "connectionId": connection_id,
-        "nativeMeetingId": native_meeting_id,
-        "meeting_id": meeting_id,
-        "redisUrl": redis_url,
-        "language": language,
-        "task": task,
-        "transcriptionTier": transcription_tier or "realtime",
-        "transcribeEnabled": True if transcribe_enabled is None else bool(transcribe_enabled),
-        "obfToken": zoom_obf_token if platform == "zoom" else None,
-        "container_name": pod_name,
-        "automaticLeave": _default_automatic_leave(),
-        "teamsSpeaker": _teams_speaker_tuning(),
-    }
-    if recording_enabled is not None:
-        bot_config["recordingEnabled"] = bool(recording_enabled)
-    if voice_agent_enabled is not None:
-        bot_config["voiceAgentEnabled"] = bool(voice_agent_enabled)
-    if default_avatar_url:
-        bot_config["defaultAvatarUrl"] = default_avatar_url
-
-    cb = _bot_manager_callback_url()
-    if cb:
-        bot_config["botManagerCallbackUrl"] = cb
-
-    # Keep parity with other orchestrators: do not pass null-valued keys.
-    cleaned_config = {k: v for k, v in bot_config.items() if v is not None}
-
-    bot_env = [
-        client.V1EnvVar(name="BOT_CONFIG", value=json.dumps(cleaned_config)),
-        client.V1EnvVar(name="WHISPER_LIVE_URL", value=whisper_url),
-        client.V1EnvVar(name="LOG_LEVEL", value=os.environ.get("BOT_LOG_LEVEL", "INFO")),
-    ]
-
-    resources = _bot_resources()
-
-    container = client.V1Container(
-        name="bot",
-        image=_bot_image(),
-        image_pull_policy=os.environ.get("BOT_IMAGE_PULL_POLICY", "IfNotPresent"),
-        env=bot_env,
-        resources=resources,
-        volume_mounts=[client.V1VolumeMount(name="dshm", mount_path="/dev/shm")],
-    )
-
-    pod_spec = client.V1PodSpec(
-        restart_policy="Never",
-        termination_grace_period_seconds=10,
-        containers=[container],
-        volumes=[
-            client.V1Volume(
-                name="dshm",
-                empty_dir=client.V1EmptyDirVolumeSource(medium="Memory"),
-            )
-        ],
-    )
-
-    sa = _bot_sa_name()
-    if sa:
-        pod_spec.service_account_name = sa
-
-    pod = client.V1Pod(
-        api_version="v1",
-        kind="Pod",
-        metadata=client.V1ObjectMeta(
-            name=pod_name,
-            labels={
-                "app.kubernetes.io/name": "vexa",
-                "app.kubernetes.io/component": "vexa-bot",
-                "vexa.user_id": str(user_id),
-                "vexa.meeting_id": str(meeting_id),
-            },
-        ),
-        spec=pod_spec,
-    )
-
-    return pod, connection_id
-
+# ---------------------------------------------------------------------------
+# Core Public API
+# ---------------------------------------------------------------------------
 
 async def start_bot_container(
     user_id: int,
@@ -245,87 +112,323 @@ async def start_bot_container(
     transcribe_enabled: Optional[bool] = None,
     zoom_obf_token: Optional[str] = None,
     voice_agent_enabled: Optional[bool] = None,
+    tts_enabled: Optional[bool] = None,
     default_avatar_url: Optional[str] = None,
-) -> Tuple[str, str]:
-    core = _get_core_v1()
-    pod, connection_id = _build_bot_pod(
-        user_id,
-        meeting_id,
-        meeting_url,
-        platform,
-        bot_name,
-        user_token,
-        native_meeting_id,
-        language,
-        task,
-        transcription_tier,
-        recording_enabled,
-        transcribe_enabled,
-        zoom_obf_token,
-        voice_agent_enabled,
-        default_avatar_url,
+    video_receive_enabled: Optional[bool] = None,
+    camera_enabled: Optional[bool] = None,
+    agent_enabled: Optional[bool] = None,
+) -> Optional[Tuple[str, str]]:
+    """Start a bot as a Kubernetes Pod.
+
+    Returns:
+        Tuple of (pod_name, connection_id) on success, (None, None) on failure.
+    """
+    connection_id = str(uuid.uuid4())
+    pod_name = f"vexa-bot-{meeting_id}-{uuid.uuid4().hex[:8]}"
+
+    logger.info(
+        f"Starting bot pod {pod_name} for meeting {meeting_id} "
+        f"(platform={platform}, connection_id={connection_id})"
     )
-    await asyncio.to_thread(core.create_namespaced_pod, namespace=_namespace(), body=pod)
-    return pod.metadata.name, connection_id
+
+    # Mint MeetingToken
+    from app.main import mint_meeting_token
+    try:
+        meeting_token = mint_meeting_token(
+            meeting_id=meeting_id,
+            user_id=user_id,
+            platform=platform,
+            native_meeting_id=native_meeting_id,
+            ttl_seconds=7200,
+        )
+    except Exception as e:
+        logger.error(f"Failed to mint MeetingToken: {e}", exc_info=True)
+        return None, None
+
+    # Load user recording config from DB (same as Docker orchestrator)
+    user_recording_config = {}
+    try:
+        from app.database import async_session_local
+        from app.models import User
+        async with async_session_local() as db:
+            user = await db.get(User, user_id)
+            if user and user.data and isinstance(user.data, dict):
+                user_recording_config = user.data.get("recording_config", {})
+    except Exception as e:
+        logger.warning(f"Failed to load user recording config for user {user_id}: {e}")
+
+    # Build BOT_CONFIG JSON
+    bot_config = {
+        "meeting_id": meeting_id,
+        "platform": platform,
+        "meetingUrl": meeting_url,
+        "botName": bot_name or f"VexaBot-{uuid.uuid4().hex[:6]}",
+        "token": meeting_token,
+        "nativeMeetingId": native_meeting_id,
+        "connectionId": connection_id,
+        "language": language,
+        "task": task or "transcribe",
+        "transcribeEnabled": True if transcribe_enabled is None else bool(transcribe_enabled),
+        "transcriptionTier": transcription_tier or "realtime",
+        "recordingEnabled": user_recording_config.get("enabled", os.getenv("RECORDING_ENABLED", "true").lower() == "true"),
+        "captureModes": user_recording_config.get("capture_modes", os.getenv("CAPTURE_MODES", "audio").split(",")),
+        "obfToken": zoom_obf_token if platform == "zoom" else None,
+        "redisUrl": REDIS_URL,
+        "container_name": pod_name,
+        "automaticLeave": {
+            "waitingRoomTimeout": 300000,
+            "noOneJoinedTimeout": 120000,
+            "everyoneLeftTimeout": 60000,
+        },
+        "botManagerCallbackUrl": f"{BOT_CALLBACK_BASE_URL}/bots/internal/callback/exited",
+        "recordingUploadUrl": f"{BOT_CALLBACK_BASE_URL}/internal/recordings/upload",
+    }
+    if recording_enabled is not None:
+        bot_config["recordingEnabled"] = bool(recording_enabled)
+    if voice_agent_enabled is not None:
+        bot_config["voiceAgentEnabled"] = bool(voice_agent_enabled)
+    if tts_enabled is not None:
+        bot_config["ttsEnabled"] = bool(tts_enabled)
+    if video_receive_enabled is not None:
+        bot_config["videoReceiveEnabled"] = bool(video_receive_enabled)
+    if camera_enabled is not None:
+        bot_config["cameraEnabled"] = bool(camera_enabled)
+    if default_avatar_url:
+        bot_config["defaultAvatarUrl"] = default_avatar_url
+
+    # Transcription service URL — required for per-speaker pipeline
+    tx_url = os.getenv("TRANSCRIPTION_SERVICE_URL")
+    tx_token = os.getenv("TRANSCRIPTION_SERVICE_TOKEN")
+    if tx_url:
+        bot_config["transcriptionServiceUrl"] = tx_url
+    if tx_token:
+        bot_config["transcriptionServiceToken"] = tx_token
+
+    bot_config = {k: v for k, v in bot_config.items() if v is not None}
+
+    # Build environment variables for the bot container
+    env_vars = [
+        client.V1EnvVar(name="BOT_CONFIG", value=json.dumps(bot_config)),
+        client.V1EnvVar(name="LOG_LEVEL", value=os.getenv("LOG_LEVEL", "INFO")),
+        client.V1EnvVar(name="DISPLAY", value=":99"),
+    ]
+
+    # Zoom credentials
+    if platform == "zoom":
+        zoom_client_id = os.getenv("ZOOM_CLIENT_ID")
+        zoom_client_secret = os.getenv("ZOOM_CLIENT_SECRET")
+        if zoom_client_id and zoom_client_secret:
+            env_vars.extend([
+                client.V1EnvVar(name="ZOOM_CLIENT_ID", value=zoom_client_id),
+                client.V1EnvVar(name="ZOOM_CLIENT_SECRET", value=zoom_client_secret),
+            ])
+
+    # TTS for voice agent or TTS-only mode
+    if voice_agent_enabled or tts_enabled:
+        tts_url = os.getenv("TTS_SERVICE_URL", "")
+        if tts_url:
+            env_vars.append(client.V1EnvVar(name="TTS_SERVICE_URL", value=tts_url))
+
+    # Build the Pod spec
+    container = client.V1Container(
+        name="vexa-bot",
+        image=BOT_IMAGE_NAME,
+        image_pull_policy=IMAGE_PULL_POLICY,
+        env=env_vars,
+        resources=client.V1ResourceRequirements(
+            requests={"cpu": BOT_CPU_REQUEST, "memory": BOT_MEMORY_REQUEST},
+            limits={"cpu": BOT_CPU_LIMIT, "memory": BOT_MEMORY_LIMIT},
+        ),
+        volume_mounts=[
+            client.V1VolumeMount(name="dshm", mount_path="/dev/shm"),
+        ],
+    )
+
+    # /dev/shm as memory-backed volume (Chromium needs this)
+    shm_volume = client.V1Volume(
+        name="dshm",
+        empty_dir=client.V1EmptyDirVolumeSource(medium="Memory"),
+    )
+
+    image_pull_secrets = None
+    if IMAGE_PULL_SECRET:
+        image_pull_secrets = [client.V1LocalObjectReference(name=IMAGE_PULL_SECRET)]
+
+    pod = client.V1Pod(
+        metadata=client.V1ObjectMeta(
+            name=pod_name,
+            namespace=BOT_NAMESPACE,
+            labels={
+                "app.kubernetes.io/name": "vexa-bot",
+                "app.kubernetes.io/managed-by": "vexa-bot-manager",
+                "vexa.user-id": str(user_id),
+                "vexa.meeting-id": str(meeting_id),
+                "vexa.platform": platform,
+            },
+        ),
+        spec=client.V1PodSpec(
+            restart_policy="Never",
+            service_account_name=BOT_SERVICE_ACCOUNT or None,
+            image_pull_secrets=image_pull_secrets,
+            node_selector=BOT_NODE_SELECTOR or None,
+            containers=[container],
+            volumes=[shm_volume],
+        ),
+    )
+
+    try:
+        api = _get_k8s_api()
+        loop = asyncio.get_event_loop()
+        created = await loop.run_in_executor(
+            None,
+            lambda: api.create_namespaced_pod(namespace=BOT_NAMESPACE, body=pod),
+        )
+        logger.info(f"Created bot pod {created.metadata.name} in namespace {BOT_NAMESPACE}")
+        return pod_name, connection_id
+
+    except ApiException as e:
+        logger.error(f"K8s API error creating bot pod: {e.status} {e.reason}", exc_info=True)
+        return None, None
+    except Exception as e:
+        logger.error(f"Unexpected error creating bot pod: {e}", exc_info=True)
+        return None, None
 
 
 def stop_bot_container(container_id: str) -> bool:
-    core = _get_core_v1()
-    grace_seconds = int(os.environ.get("BOT_POD_DELETE_GRACE_SECONDS", "0"))
-    propagation_policy = os.environ.get("BOT_POD_DELETE_PROPAGATION", "Background")
-    body = client.V1DeleteOptions(
-        grace_period_seconds=grace_seconds,
-        propagation_policy=propagation_policy,
-    )
+    """Stop a bot by deleting its Kubernetes Pod.
+
+    Args:
+        container_id: The pod name.
+
+    Returns:
+        True if pod was deleted or not found, False on error.
+    """
+    logger.info(f"Stopping bot pod {container_id}")
+
     try:
-        core.delete_namespaced_pod(name=container_id, namespace=_namespace(), body=body)
+        api = _get_k8s_api()
+        api.delete_namespaced_pod(
+            name=container_id,
+            namespace=BOT_NAMESPACE,
+            grace_period_seconds=10,
+        )
+        logger.info(f"Deleted bot pod {container_id}")
         return True
-    except ApiException as exc:
-        if exc.status == 404:
+
+    except ApiException as e:
+        if e.status == 404:
+            logger.info(f"Pod {container_id} not found, already deleted")
             return True
-        raise
+        logger.error(f"K8s API error deleting pod {container_id}: {e.status} {e.reason}")
+        return False
+    except Exception as e:
+        logger.error(f"Error deleting pod {container_id}: {e}", exc_info=True)
+        return False
 
 
-# Import shared session recorder so main.py can create MeetingSession records.
+async def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:
+    """Get status of running bot pods for a user.
+
+    Returns:
+        List of bot status dicts matching the Docker orchestrator format.
+    """
+    try:
+        api = _get_k8s_api()
+        loop = asyncio.get_event_loop()
+        pod_list = await loop.run_in_executor(
+            None,
+            lambda: api.list_namespaced_pod(
+                namespace=BOT_NAMESPACE,
+                label_selector=f"app.kubernetes.io/name=vexa-bot,vexa.user-id={user_id}",
+            ),
+        )
+    except ApiException as e:
+        logger.error(f"K8s API error listing pods for user {user_id}: {e.status}")
+        return []
+    except Exception as e:
+        logger.error(f"Error listing pods for user {user_id}: {e}", exc_info=True)
+        return []
+
+    result = []
+    for pod in pod_list.items:
+        phase = pod.status.phase  # Pending, Running, Succeeded, Failed, Unknown
+        if phase in ("Succeeded", "Failed"):
+            continue
+
+        labels = pod.metadata.labels or {}
+        created_at = pod.metadata.creation_timestamp.isoformat() if pod.metadata.creation_timestamp else None
+
+        # Map K8s phase to normalized status
+        normalized = "Up" if phase == "Running" else "Starting" if phase == "Pending" else phase
+
+        # Extract meeting_id from label or pod name
+        meeting_id_str = labels.get("vexa.meeting-id", "unknown")
+
+        result.append({
+            "container_id": pod.metadata.name,
+            "container_name": pod.metadata.name,
+            "platform": labels.get("vexa.platform"),
+            "native_meeting_id": None,
+            "status": phase,
+            "normalized_status": normalized,
+            "created_at": created_at,
+            "labels": {f"vexa.user_id": str(user_id)},
+            "meeting_id_from_name": meeting_id_str,
+        })
+
+    logger.info(f"Found {len(result)} active bot pods for user {user_id}")
+    return result
+
+
+async def verify_container_running(container_id: str) -> bool:
+    """Verify if a bot pod is still running.
+
+    Args:
+        container_id: The pod name.
+
+    Returns:
+        True if pod exists and is Running or Pending.
+    """
+    try:
+        api = _get_k8s_api()
+        loop = asyncio.get_event_loop()
+        pod = await loop.run_in_executor(
+            None,
+            lambda: api.read_namespaced_pod(name=container_id, namespace=BOT_NAMESPACE),
+        )
+        phase = pod.status.phase
+        is_running = phase in ("Running", "Pending")
+        logger.debug(f"Pod {container_id} phase={phase}, running={is_running}")
+        return is_running
+
+    except ApiException as e:
+        if e.status == 404:
+            logger.debug(f"Pod {container_id} not found")
+            return False
+        logger.error(f"K8s API error checking pod {container_id}: {e.status}")
+        return False
+    except Exception as e:
+        logger.error(f"Error checking pod {container_id}: {e}", exc_info=True)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Session Recording (shared with other orchestrators)
+# ---------------------------------------------------------------------------
+
 from app.orchestrator_utils import _record_session_start  # noqa: E402
 
 
-def verify_container_running(container_id: str) -> bool:
-    core = _get_core_v1()
-    try:
-        pod = core.read_namespaced_pod(name=container_id, namespace=_namespace())
-    except ApiException as exc:
-        if exc.status == 404:
-            return False
-        raise
-    phase = pod.status.phase or ""
-    return phase in ("Pending", "Running")
+# ---------------------------------------------------------------------------
+# Module Exports
+# ---------------------------------------------------------------------------
 
-
-def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:
-    core = _get_core_v1()
-    label_selector = f"vexa.user_id={user_id},app.kubernetes.io/component=vexa-bot"
-    pods = core.list_namespaced_pod(namespace=_namespace(), label_selector=label_selector)
-    out: List[Dict[str, Any]] = []
-    for pod in pods.items:
-        out.append(
-            {
-                "container_id": pod.metadata.name,
-                "status": pod.status.phase,
-                "start_time": pod.status.start_time,
-                "labels": pod.metadata.labels or {},
-            }
-        )
-    return out
-
-
-# Optional no-op compatibility hooks (docker orchestrator has these)
-def get_socket_session():
-    return None
-
-
-def close_docker_client():
-    return None
-
-
-# Session recording hook (shared with other orchestrators)
+__all__ = [
+    "get_socket_session",
+    "close_docker_client",
+    "start_bot_container",
+    "stop_bot_container",
+    "_record_session_start",
+    "get_running_bots_status",
+    "verify_container_running",
+]

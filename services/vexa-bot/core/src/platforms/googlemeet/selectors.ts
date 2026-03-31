@@ -30,15 +30,13 @@ export const googleWaitingRoomIndicators: string[] = [
   '[aria-label*="waiting room"]',
   '[aria-label*="Asking to be let in"]',
   '[aria-label*="waiting for admission"]',
-  
-  // Progress/loading indicators in waiting room
-  '[role="progressbar"]',
-  '[aria-label*="loading"]',
-  '.loading-spinner',
-  
-  // Legacy patterns (keep for compatibility)
-  'text="Ask to join"',
-  'text="Join now"',
+
+  // NOTE: Removed generic '[role="progressbar"]', '[aria-label*="loading"]', '.loading-spinner'
+  // These cause false positives once the bot is in the meeting (Google Meet renders
+  // progressbars for various in-meeting UI elements, not just the waiting room).
+
+  // Legacy patterns (keep for compatibility, but NOT generic UI like "Ask to join" which
+  // appears on the pre-join page before clicking)
   'text="Can\'t join the meeting"',
   'text="Meeting not found"'
 ];
@@ -238,13 +236,9 @@ export const googleRemovalIndicators: string[] = [
   'text="Reconnecting"',
   'text*="Reconnecting"',
   
-  // Removal-specific patterns (avoid generic [role="alert"] / [role="alertdialog"]
-  // which false-positive on screen share dialogs and other transient notifications)
-  'text="You were removed from the meeting"',
-  'text*="You were removed"',
-  'text="You have been removed"',
-  'text*="been removed"',
-  'text="The meeting organizer removed you"',
+  // Generic error patterns
+  '[role="alert"]',
+  '[role="alertdialog"]',
   '.error-message',
   '.connection-error',
   '.meeting-error'

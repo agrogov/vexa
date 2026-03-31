@@ -1,26 +1,53 @@
 import logging
-import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from shared_models.models import Meeting, User
 from shared_models.webhook_url import validate_webhook_url
+from shared_models.webhook_delivery import deliver
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
 
-def _build_webhook_headers(user_data: Optional[dict]) -> dict:
-    """Build headers for webhook request, including Authorization if webhook_secret is set."""
-    headers = {'Content-Type': 'application/json'}
-    if user_data and isinstance(user_data, dict):
-        secret = user_data.get('webhook_secret')
-        if secret and isinstance(secret, str) and secret.strip():
-            headers['Authorization'] = f'Bearer {secret.strip()}'
-    return headers
+# Map meeting status to webhook event type
+STATUS_TO_EVENT: Dict[str, str] = {
+    "completed": "meeting.completed",
+    "active": "meeting.started",
+    "failed": "bot.failed",
+}
+
+
+def _resolve_event_type(meeting_status: str) -> str:
+    """Map a meeting status to the corresponding webhook event type."""
+    return STATUS_TO_EVENT.get(meeting_status, "meeting.status_change")
+
+
+def _is_event_enabled(user_data: Optional[Dict], event_type: str) -> bool:
+    """Check if the user has enabled this event type in their webhook config.
+
+    Defaults:
+      - meeting.completed and transcript.ready are ON by default.
+      - Everything else is OFF unless explicitly enabled.
+    """
+    default_enabled = {"meeting.completed"}
+
+    events_config = (user_data or {}).get("webhook_events")
+    if not events_config or not isinstance(events_config, dict):
+        # No explicit config — fall back to defaults
+        return event_type in default_enabled
+
+    # Explicit config exists — respect it
+    enabled = events_config.get(event_type)
+    if enabled is not None:
+        return bool(enabled)
+
+    # Event not mentioned in config — use defaults
+    return event_type in default_enabled
 
 
 async def run(meeting: Meeting, db: AsyncSession, status_change_info: Optional[Dict[str, Any]] = None):
     """
-    Sends a webhook for ANY meeting status change, not just completion.
+    Sends a webhook for meeting status changes, filtered by user's event preferences.
+    Uses exponential backoff retry and HMAC signing when webhook_secret is set.
 
     Args:
         meeting: Meeting object with current status
@@ -34,29 +61,38 @@ async def run(meeting: Meeting, db: AsyncSession, status_change_info: Optional[D
     logger.info(f"Executing send_status_webhook task for meeting {meeting.id} with status {meeting.status}")
 
     try:
-        # The user should be loaded on the meeting object already by the task runner
         user = meeting.user
         if not user:
             logger.error(f"Could not find user on meeting object {meeting.id}")
             return
 
-        # Check if user has a webhook URL configured
         webhook_url = user.data.get('webhook_url') if user.data and isinstance(user.data, dict) else None
-
         if not webhook_url:
             logger.info(f"No webhook URL configured for user {user.email} (meeting {meeting.id})")
             return
 
-        # SSRF defense: validate URL before sending (catches pre-patch or admin-set URLs)
+        # Check if user has enabled this event type
+        event_type = _resolve_event_type(meeting.status)
+        if not _is_event_enabled(user.data, event_type):
+            logger.info(
+                f"Webhook event '{event_type}' not enabled for user {user.email} "
+                f"(meeting {meeting.id}, status {meeting.status}). Skipping."
+            )
+            return
+
+        # SSRF defense: validate URL before sending
         try:
             validate_webhook_url(webhook_url)
         except ValueError as e:
             logger.warning(f"Webhook URL validation failed for meeting {meeting.id}: {e}. Skipping.")
             return
 
-        # Prepare the webhook payload with status change information
+        webhook_secret = None
+        if user.data and isinstance(user.data, dict):
+            webhook_secret = user.data.get('webhook_secret')
+
         payload = {
-            'event_type': 'meeting.status_change',
+            'event_type': event_type,
             'meeting': {
                 'id': meeting.id,
                 'user_id': meeting.user_id,
@@ -73,7 +109,6 @@ async def run(meeting: Meeting, db: AsyncSession, status_change_info: Optional[D
             }
         }
 
-        # Add status change information if provided
         if status_change_info:
             payload['status_change'] = {
                 'from': status_change_info.get('old_status'),
@@ -83,25 +118,13 @@ async def run(meeting: Meeting, db: AsyncSession, status_change_info: Optional[D
                 'transition_source': status_change_info.get('transition_source')
             }
 
-        headers = _build_webhook_headers(user.data)
+        await deliver(
+            url=webhook_url,
+            payload=payload,
+            webhook_secret=webhook_secret,
+            timeout=30.0,
+            label=f"status-webhook meeting={meeting.id} status={meeting.status}",
+        )
 
-        # Send the webhook (follow_redirects=True for backward compatibility with
-        # receivers that use redirects; URL validated at storage and send time)
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            logger.info(f"Sending status webhook to {webhook_url} for meeting {meeting.id} (status: {meeting.status})")
-            response = await client.post(
-                webhook_url,
-                json=payload,
-                timeout=30.0,
-                headers=headers
-            )
-            
-            if response.status_code >= 200 and response.status_code < 300:
-                logger.info(f"Successfully sent status webhook for meeting {meeting.id} to {webhook_url}")
-            else:
-                logger.warning(f"Status webhook for meeting {meeting.id} returned status {response.status_code}: {response.text}")
-
-    except httpx.RequestError as e:
-        logger.error(f"Failed to send status webhook for meeting {meeting.id}: {e}")
     except Exception as e:
         logger.error(f"Unexpected error sending status webhook for meeting {meeting.id}: {e}", exc_info=True)

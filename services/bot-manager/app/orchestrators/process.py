@@ -41,9 +41,6 @@ BOT_SCRIPT_PATH = os.getenv("BOT_SCRIPT_PATH", "/app/vexa-bot/dist/docker.js")
 # Working directory for the bot process
 BOT_WORKING_DIR = os.getenv("BOT_WORKING_DIR", "/app/vexa-bot")
 
-# WhisperLive URL (direct connection, no Traefik in Lite mode)
-WHISPER_LIVE_URL = os.getenv("WHISPER_LIVE_URL", "ws://localhost:9090")
-
 # Redis URL from environment
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -172,7 +169,11 @@ async def start_bot_container(
     transcribe_enabled: Optional[bool] = None,
     zoom_obf_token: Optional[str] = None,
     voice_agent_enabled: Optional[bool] = None,
-    default_avatar_url: Optional[str] = None
+    tts_enabled: Optional[bool] = None,
+    default_avatar_url: Optional[str] = None,
+    video_receive_enabled: Optional[bool] = None,
+    camera_enabled: Optional[bool] = None,
+    agent_enabled: Optional[bool] = None
 ) -> Optional[Tuple[str, str]]:
     """Start a bot as a Node.js child process.
 
@@ -237,12 +238,21 @@ async def start_bot_container(
             "noOneJoinedTimeout": 120000,   # 2 minutes
             "everyoneLeftTimeout": 60000    # 1 minute
         },
-        "botManagerCallbackUrl": f"{BOT_CALLBACK_BASE_URL}/bots/internal/callback/exited"
+        "botManagerCallbackUrl": f"{BOT_CALLBACK_BASE_URL}/bots/internal/callback/exited",
+        "recordingUploadUrl": f"{BOT_CALLBACK_BASE_URL}/internal/recordings/upload",
+        "transcriptionServiceUrl": os.getenv("TRANSCRIBER_URL", ""),
+        "transcriptionServiceToken": os.getenv("TRANSCRIBER_API_KEY", ""),
     }
     if recording_enabled is not None:
         bot_config["recordingEnabled"] = bool(recording_enabled)
     if voice_agent_enabled is not None:
         bot_config["voiceAgentEnabled"] = bool(voice_agent_enabled)
+    if tts_enabled is not None:
+        bot_config["ttsEnabled"] = bool(tts_enabled)
+    if video_receive_enabled is not None:
+        bot_config["videoReceiveEnabled"] = bool(video_receive_enabled)
+    if camera_enabled is not None:
+        bot_config["cameraEnabled"] = bool(camera_enabled)
     if default_avatar_url:
         bot_config["defaultAvatarUrl"] = default_avatar_url
 
@@ -254,7 +264,6 @@ async def start_bot_container(
     # Prepare environment for the bot process
     env = os.environ.copy()
     env["BOT_CONFIG"] = json.dumps(bot_config)
-    env["WHISPER_LIVE_URL"] = WHISPER_LIVE_URL
     env["DISPLAY"] = DISPLAY
     env["LOG_LEVEL"] = os.getenv("LOG_LEVEL", "INFO")
     # Ensure Node.js can find modules

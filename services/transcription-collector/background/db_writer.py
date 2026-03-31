@@ -77,7 +77,14 @@ async def process_redis_to_postgres(redis_c: aioredis.Redis, local_transcription
                             logger.debug(f"Removed empty meeting {meeting_id} from active meetings set and cleared its filter cache.")
                             continue
 
-                        sorted_segment_items = sorted(redis_segments_dict.items(), key=lambda item: float(item[0]))
+                        # Sort by start_time from segment JSON data (hash keys are segment_id strings)
+                        def _sort_key(item):
+                            try:
+                                data = json.loads(item[1])
+                                return float(data.get("start_time", 0))
+                            except Exception:
+                                return 0.0
+                        sorted_segment_items = sorted(redis_segments_dict.items(), key=_sort_key)
                             
                         logger.debug(f"Processing {len(sorted_segment_items)} segments from Redis Hash for meeting {meeting_id} (sorted)")
                         immutability_time = datetime.now(timezone.utc) - timedelta(seconds=IMMUTABILITY_THRESHOLD)
@@ -110,7 +117,7 @@ async def process_redis_to_postgres(redis_c: aioredis.Redis, local_transcription
 
                                     if needs_remap and segment_session_uid:
                                         try:
-                                            segment_start_ms = float(start_time_str) * 1000.0
+                                            segment_start_ms = float(segment_data.get("start_time", 0)) * 1000.0
                                             segment_end_ms = float(segment_data["end_time"]) * 1000.0
                                             
                                             context_log = f"[FinalMap Meet:{meeting_id}/Seg:{start_time_str}]"
@@ -146,7 +153,7 @@ async def process_redis_to_postgres(redis_c: aioredis.Redis, local_transcription
                                         )
 
                                     # Filter the segment (deduplication, etc.)
-                                    segment_start_time_float = float(start_time_str)
+                                    segment_start_time_float = float(segment_data.get("start_time", 0))
                                     segment_end_time_float = segment_data['end_time']
                                     
                                     # Fix inverted timestamps before filtering
@@ -155,11 +162,12 @@ async def process_redis_to_postgres(redis_c: aioredis.Redis, local_transcription
                                         logger.warning(f"[FinalMap] Corrected inverted segment times for meet {meeting_id}, start={segment_start_time_float}, end={segment_end_time_float}")
                                     
                                     if local_transcription_filter.filter_segment(
-                                        segment_data['text'], 
-                                        start_time=segment_start_time_float, 
-                                        end_time=segment_end_time_float, 
+                                        segment_data['text'],
+                                        start_time=segment_start_time_float,
+                                        end_time=segment_end_time_float,
                                         meeting_id=meeting_id,
-                                        language=segment_data.get('language')
+                                        language=segment_data.get('language'),
+                                        speaker=mapped_speaker_name
                                     ):
                                         new_transcription = create_transcription_object(
                                             meeting_id=meeting_id,

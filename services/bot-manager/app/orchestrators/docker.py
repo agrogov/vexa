@@ -17,6 +17,7 @@ from app.orchestrator_utils import (  # noqa: F401
     _record_session_start,
     get_running_bots_status,
     verify_container_running,
+    start_browser_session_container,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "_record_session_start",
     "get_running_bots_status",
     "verify_container_running",
+    "start_browser_session_container",
 ] 

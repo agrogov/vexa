@@ -5,10 +5,20 @@ A **bot** is a short-lived worker that joins **one meeting** and streams audio f
 
 ## What You Get
 
-Depending on your flags:
+Bot capabilities are independent flags. Each does one thing:
 
-- `transcribe_enabled=true` → transcript `segments[]` (live via WebSocket and/or post-meeting via REST)
-- `recording_enabled=true` → post-meeting `recordings[]` with playable/downloadable media
+| Capability | Flag | Default | Description |
+|-----------|------|---------|-------------|
+| Transcribe | `transcribe_enabled` | `true` | Audio capture, per-speaker pipeline, save to DB |
+| Record audio | `recording_enabled` | `true` | MediaRecorder, save audio file |
+| Speaker metadata | (always on) | ALWAYS | Speaker events, timestamps -- needed for post-meeting pipeline |
+| TTS (speak) | `tts_enabled` | `false` | PulseAudio gain=0 idle, gain=1 during /speak only |
+| Incoming video | `video_receive_enabled` | `false` | Receive+decode video from participants |
+| Camera | `camera_enabled` | `false` | Outgoing virtual camera/avatar |
+
+Default bot = transcribe + record + speaker metadata. Everything else OFF.
+
+`voice_agent_enabled` is **deprecated** -- treat as alias for `tts_enabled: true`. No camera.
 
 Recording persistence is separate from capture (Vexa must capture audio to transcribe).
 

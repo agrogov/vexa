@@ -21,38 +21,43 @@ const baseBrowserArgs = [
 ];
 
 /**
- * Get browser launch arguments based on voice agent state.
+ * Get browser launch arguments based on capability flags.
  *
- * When voiceAgentEnabled is false (default):
- *   --use-file-for-fake-audio-capture=/dev/null  → silence as mic input
+ * PulseAudio (real audio device) is needed when:
+ *   - ttsEnabled: bot speaks via TTS
+ *   - voiceAgentEnabled (deprecated): alias for ttsEnabled
+ *   - cameraEnabled: virtual camera may need audio sync
  *
- * When voiceAgentEnabled is true:
- *   Omit the fake-audio-capture flag so Chromium reads from PulseAudio default
- *   source (virtual_mic remap of tts_sink.monitor), allowing TTS audio into meeting.
+ * Otherwise: --use-file-for-fake-audio-capture=/dev/null → silence as mic input
+ *
+ * Video capture is always /dev/null from base args. Camera init script handles
+ * virtual camera separately when cameraEnabled is true.
  */
-export function getBrowserArgs(voiceAgentEnabled: boolean = false): string[] {
+export function getBrowserArgs(needsAudio: boolean = false): string[] {
   let args = [...baseBrowserArgs];
-
-  if (voiceAgentEnabled) {
-    // Audio: Omit --use-file-for-fake-audio-capture so Chromium reads from
-    // PulseAudio default source (virtual_mic → tts_sink.monitor).
-    // This allows TTS audio played to tts_sink to enter the meeting as mic input.
-    //
-    // Video: Keep --use-file-for-fake-video-capture=/dev/null (from base args).
-    // Our getUserMedia patch in the init script intercepts video requests and
-    // returns a canvas stream. The replaceTrack in enableCamera() swaps the
-    // WebRTC sender track for our canvas track.
-    //
-    // NOTE: Do NOT use --use-fake-device-for-media-stream here — it creates
-    // Chromium-internal fake devices that bypass PulseAudio entirely,
-    // preventing TTS audio from reaching the meeting.
-  } else {
-    // Silence mic input when voice agent is not active
+  if (!needsAudio) {
+    // Pure listener — /dev/null, truly silent, no PulseAudio
     args.push("--use-file-for-fake-audio-capture=/dev/null");
   }
-
+  // If needsAudio: PulseAudio with muted tts_sink (entrypoint.sh)
   return args;
 }
 
 // Default browser args for backward compatibility (voice agent disabled)
 export const browserArgs = getBrowserArgs(false);
+
+/**
+ * Browser args for interactive browser session mode (VNC + CDP).
+ * No incognito, no fake media — human interacts via VNC, agent via CDP.
+ */
+export function getBrowserSessionArgs(): string[] {
+  return [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-blink-features=AutomationControlled',
+    '--start-maximized',
+    '--remote-debugging-port=9222',
+    '--remote-debugging-address=0.0.0.0',
+    '--remote-allow-origins=*',
+  ];
+}

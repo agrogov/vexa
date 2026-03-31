@@ -87,8 +87,8 @@ celerybeat-schedule
 # Environments
 .env
 .venv
-.claude
 env/
+!deploy/env/
 venv/
 ENV/
 env.bak/
@@ -148,3 +148,7 @@ test_data/
 *.txt
 !**/requirements.txt
 manifest.csv
+docker-compose.override.yml
+.env.test
+hub
+test.log

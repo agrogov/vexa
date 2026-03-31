@@ -1,0 +1,95 @@
+---
+title: "Recording Without Transcription"
+---
+You can launch a Vexa bot that **only records** audio without running live transcription. This captures the full meeting audio for later use — including [deferred transcription](deferred-transcription) when you are ready.
+
+## Use Cases
+
+- **Capture now, transcribe later**: Record meetings during the day, batch-transcribe overnight to reduce real-time compute costs.
+- **Compliance recording**: Persist audio for audit purposes without needing transcripts.
+- **Selective transcription**: Record everything, then only transcribe the meetings that matter.
+
+## API Parameters
+
+When creating a bot via `POST /bots`, set:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `recording_enabled` | `true` | Persist the audio recording to storage |
+| `transcribe_enabled` | `false` | Skip live transcription |
+
+```bash
+curl -X POST "$API_BASE/bots" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{
+    "platform": "google_meet",
+    "native_meeting_id": "abc-defg-hij",
+    "recording_enabled": true,
+    "transcribe_enabled": false
+  }'
+```
+
+<Note>
+Both parameters default to `true` if omitted. To record without transcribing, you must explicitly set `transcribe_enabled: false`.
+</Note>
+
+## What Happens During the Meeting
+
+The bot still joins the meeting and captures audio as normal:
+
+- Audio streams are captured per-speaker (Google Meet) or as a mixed stream (Teams).
+- **Speaker events** are still recorded (join, start speaking, stop speaking, leave) — these are used later for speaker attribution during deferred transcription.
+- Audio files are uploaded to storage (MinIO/S3/local) when the meeting ends.
+- No segments are sent to the transcription service, so no transcript appears in the API.
+
+## After the Meeting
+
+Once the meeting status is `completed`, you have two options:
+
+### Option 1: Trigger Deferred Transcription
+
+Use the [deferred transcription](deferred-transcription) endpoint to transcribe the recording:
+
+```bash
+curl -X POST "$API_BASE/meetings/42/transcribe" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"language": "en"}'
+```
+
+The stored speaker events are used to attribute speakers to the generated transcript segments.
+
+### Option 2: Download the Recording
+
+Retrieve the raw audio file for external processing:
+
+```bash
+# Get recording metadata
+curl "$API_BASE/transcripts/google_meet/abc-defg-hij" \
+  -H "X-API-Key: $API_KEY"
+
+# Download audio
+curl "$API_BASE/recordings/{recording_id}/media/{media_file_id}/raw" \
+  -H "X-API-Key: $API_KEY" \
+  -o meeting-audio.wav
+```
+
+See [Recordings API](api/recordings) for details on listing and downloading recordings.
+
+## All Flag Combinations
+
+| `recording_enabled` | `transcribe_enabled` | Behavior |
+|---------------------|---------------------|----------|
+| `true` (default) | `true` (default) | Full mode — live transcription + recording persisted |
+| `true` | `false` | **Recording only** — audio saved, no transcript |
+| `false` | `true` | Transcription only — live transcript, no audio file persisted |
+| `false` | `false` | Capture only — bot joins and captures audio for real-time WebSocket streaming, but nothing is persisted |
+
+## Related
+
+- [Deferred Transcription](deferred-transcription) — transcribe a recording after the meeting
+- [Bots API](api/bots) — full bot creation reference
+- [Recordings API](api/recordings) — listing and downloading recordings
+- [Recording Storage](recording-storage) — configuring where recordings are stored
+- [Core Concepts](concepts) — recording vs. capture explained

@@ -1,9 +1,8 @@
 import { Page } from "playwright";
 import { log } from "../../utils";
 import { BotConfig } from "../../types";
-import { WhisperLiveService } from "../../services/whisperlive";
 import { RecordingService } from "../../services/recording";
-import { setActiveRecordingService } from "../../index";
+import { setActiveRecordingService, getSegmentPublisher } from "../../index";
 import { ensureBrowserUtils } from "../../utils/injection";
 import {
   teamsParticipantSelectors,
@@ -22,20 +21,15 @@ import {
 
 // Modified to use new services - Teams recording functionality
 export async function startTeamsRecording(page: Page, botConfig: BotConfig): Promise<void> {
-  const transcriptionEnabled = botConfig.transcribeEnabled !== false;
-  let whisperLiveService: WhisperLiveService | null = null;
-  let whisperLiveUrl: string | null = null;
-  if (transcriptionEnabled) {
-    whisperLiveService = new WhisperLiveService({
-      whisperLiveUrl: process.env.WHISPER_LIVE_URL
-    });
-    // Initialize WhisperLive connection with STUBBORN reconnection - NEVER GIVES UP!
-    whisperLiveUrl = await whisperLiveService.initializeWithStubbornReconnection("Teams");
-    log(`[Node.js] Using WhisperLive URL for Teams: ${whisperLiveUrl}`);
-  } else {
-    log("[Teams Recording] Transcription disabled by config; running recording-only mode.");
+  log("Starting Teams recording");
+
+  // Reset segment publisher session start to align with recording start.
+  // SegmentPublisher was created pre-admission; recording starts post-admission.
+  const publisher = getSegmentPublisher();
+  if (publisher) {
+    publisher.resetSessionStart();
+    log(`[Teams Recording] Session start reset to ${new Date(publisher.sessionStartMs).toISOString()}`);
   }
-  log("Starting Teams recording with WebSocket connection");
 
   const wantsAudioCapture =
     !!botConfig.recordingEnabled &&
@@ -84,7 +78,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
   await page.evaluate(
     async (pageArgs: {
       botConfigData: BotConfig;
-      whisperUrlForBrowser: string | null;
       selectors: {
         participantSelectors: string[];
         speakingClasses: string[];
@@ -100,27 +93,12 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
         meetingContainerSelectors: string[];
       };
     }) => {
-      const { botConfigData, whisperUrlForBrowser, selectors } = pageArgs;
-      const transcriptionEnabled = (botConfigData as any)?.transcribeEnabled !== false;
+      const { botConfigData, selectors } = pageArgs;
       const selectorsTyped = selectors as any;
 
       // Use browser utility classes from the global bundle
-      const { BrowserAudioService, BrowserWhisperLiveService } = (window as any).VexaBrowserUtils;
+      const { BrowserAudioService } = (window as any).VexaBrowserUtils;
 
-      // --- Early reconfigure wiring (event listener only) ---
-      (window as any).__vexaPendingReconfigure = null;
-      try {
-        document.addEventListener('vexa:reconfigure', (ev: Event) => {
-          try {
-            const detail = (ev as CustomEvent).detail || {};
-            const { lang, task } = detail;
-            const fn = (window as any).triggerWebSocketReconfigure;
-            if (typeof fn === 'function') fn(lang, task);
-          } catch {}
-        });
-      } catch {}
-      // ---------------------------------------------
-      
       const audioService = new BrowserAudioService({
         targetSampleRate: 16000,
         bufferSize: 4096,
@@ -128,15 +106,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
         outputChannels: 1
       });
 
-      // Use BrowserWhisperLiveService with stubborn mode for Teams
-      const whisperLiveService = transcriptionEnabled
-        ? new BrowserWhisperLiveService({
-            whisperLiveUrl: whisperUrlForBrowser as string
-          }, true) // Enable stubborn mode for Teams
-        : null;
-
-      // Expose references for reconfiguration
-      (window as any).__vexaWhisperLiveService = whisperLiveService;
       (window as any).__vexaAudioService = audioService;
       (window as any).__vexaBotConfig = botConfigData;
       (window as any).__vexaMediaRecorder = null;
@@ -245,72 +214,12 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
       (window as any).__vexaFlushRecordingBlob = flushBrowserRecordingBlob;
 
-      // Replace with real reconfigure implementation and apply any queued update
-      (window as any).triggerWebSocketReconfigure = async (lang: string | null, task: string | null) => {
-        try {
-          const svc = (window as any).__vexaWhisperLiveService;
-          const cfg = (window as any).__vexaBotConfig || {};
-          if (!transcriptionEnabled) {
-            (window as any).logBot?.('[Reconfigure] Ignored because transcription is disabled.');
-            return;
-          }
-          if (!svc) {
-            // Service not ready yet, queue the update
-            (window as any).__vexaPendingReconfigure = { lang, task };
-            (window as any).logBot?.('[Reconfigure] WhisperLive service not ready; queued for later.');
-            return;
-          }
-          cfg.language = lang;
-          cfg.task = task || 'transcribe';
-          (window as any).__vexaBotConfig = cfg;
-          
-          // Close existing connection to establish new session from scratch
-          (window as any).logBot?.(`[Reconfigure] Closing existing connection to establish new session...`);
-          try { 
-            // Use closeForReconfigure to prevent auto-reconnect during manual reconfigure
-            if (svc?.closeForReconfigure) {
-              svc.closeForReconfigure();
-            } else {
-              svc.close();
-            }
-            // Reset audio service session start time so speaker events use new session timestamps
-            const audioSvc = (window as any).__vexaAudioService;
-            if (audioSvc?.resetSessionStartTime) {
-              audioSvc.resetSessionStartTime();
-            }
-            // Wait a brief moment to ensure socket is fully closed
-            await new Promise(resolve => setTimeout(resolve, 100));
-          } catch (closeErr: any) {
-            (window as any).logBot?.(`[Reconfigure] Error closing connection: ${closeErr?.message || closeErr}`);
-          }
-          
-          // Reconnect with new config - this will generate a new session_uid
-          (window as any).logBot?.(`[Reconfigure] Reconnecting with new config: language=${cfg.language}, task=${cfg.task}`);
-          await svc.connectToWhisperLive(
-            cfg,
-            (window as any).__vexaOnMessage,
-            (window as any).__vexaOnError,
-            (window as any).__vexaOnClose
-          );
-          (window as any).logBot?.(`[Reconfigure] Successfully reconnected with new session. Language=${cfg.language}, Task=${cfg.task}`);
-        } catch (e: any) {
-          (window as any).logBot?.(`[Reconfigure] Error applying new config: ${e?.message || e}`);
-        }
-      };
-      try {
-        const pending = (window as any).__vexaPendingReconfigure;
-        if (pending && typeof (window as any).triggerWebSocketReconfigure === 'function') {
-          (window as any).triggerWebSocketReconfigure(pending.lang, pending.task);
-          (window as any).__vexaPendingReconfigure = null;
-        }
-      } catch {}
-
       await new Promise<void>((resolve, reject) => {
         try {
           (window as any).logBot("Starting Teams recording process with new services.");
           
           // Find and create combined audio stream
-          audioService.findMediaElements().then(async (mediaElements: HTMLMediaElement[]) => {
+          audioService.findMediaElements(10, 3000).then(async (mediaElements: HTMLMediaElement[]) => {
             if (mediaElements.length === 0) {
               reject(
                 new Error(
@@ -360,84 +269,19 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
             // Initialize audio processor
             return await audioService.initializeAudioProcessor(combinedStream);
           }).then(async (processor: any) => {
-            // Setup audio data processing
-            audioService.setupAudioDataProcessor(async (audioData: Float32Array, sessionStartTime: number | null) => {
-              if (!transcriptionEnabled || !whisperLiveService) {
-                return;
-              }
-              // Only send after server ready
-              if (!whisperLiveService.isReady()) {
-                return;
-              }
-              // Compute simple RMS and peak for diagnostics
-              let sumSquares = 0;
-              let peak = 0;
-              for (let i = 0; i < audioData.length; i++) {
-                const v = audioData[i];
-                sumSquares += v * v;
-                const a = Math.abs(v);
-                if (a > peak) peak = a;
-              }
-              const rms = Math.sqrt(sumSquares / Math.max(1, audioData.length));
-              // Diagnostic: send metadata first
-              whisperLiveService.sendAudioChunkMetadata(audioData.length, 16000);
-              // Send audio data to WhisperLive
-              const success = whisperLiveService.sendAudioData(audioData);
-              if (!success) {
-                (window as any).logBot("Failed to send Teams audio data to WhisperLive");
-              }
+            // Audio data processor — no-op now; per-speaker pipeline handles transcription
+            audioService.setupAudioDataProcessor(async (_audioData: Float32Array, _sessionStartTime: number | null) => {
+              // Per-speaker pipeline (speaker-streams.ts) handles transcription.
+              // This processor is kept for MediaRecorder / recording only.
             });
 
-            // Initialize WhisperLive WebSocket connection with reusable callbacks
-            const onMessage = (data: any) => {
-              if (data["status"] === "ERROR") {
-                (window as any).logBot(`Teams WebSocket Server Error: ${data["message"]}`);
-              } else if (data["status"] === "WAIT") {
-                (window as any).logBot(`Teams Server busy: ${data["message"]}`);
-              } else if (!whisperLiveService.isReady() && data["status"] === "SERVER_READY") {
-                whisperLiveService.setServerReady(true);
-                (window as any).logBot("Teams Server is ready.");
-                if ((window as any).__vexaEmitCurrentSpeakers) {
-                  (window as any).__vexaEmitCurrentSpeakers();
-                }
-              } else if (data["language"]) {
-                (window as any).logBot(`Teams Language detected: ${data["language"]}`);
-              } else if (data["message"] === "DISCONNECT") {
-                (window as any).logBot("Teams Server requested disconnect.");
-                if (whisperLiveService) {
-                  whisperLiveService.close();
-                }
-              }
-            };
-            const onError = (event: Event) => {
-              (window as any).logBot(`[Teams Failover] WebSocket error. This will trigger retry logic.`);
-            };
-            const onClose = async (event: CloseEvent) => {
-              (window as any).logBot(`[Teams Failover] WebSocket connection closed. Code: ${event.code}, Reason: ${event.reason}.`);
-            };
-
-            // Save callbacks globally for reuse
-            (window as any).__vexaOnMessage = onMessage;
-            (window as any).__vexaOnError = onError;
-            (window as any).__vexaOnClose = onClose;
-
-            if (transcriptionEnabled && whisperLiveService) {
-              return await whisperLiveService.connectToWhisperLive(
-                (window as any).__vexaBotConfig,
-                onMessage,
-                onError,
-                onClose
-              );
-            }
             return null;
           }).then(() => {
             // Initialize Teams-specific speaker detection (browser context)
-            if (transcriptionEnabled && whisperLiveService) {
-              (window as any).logBot("Initializing Teams speaker detection...");
-            }
-            
+            (window as any).logBot("Initializing Teams speaker detection...");
+
             // Unified Teams speaker detection - NO FALLBACKS (signal-only approach)
-            const initializeTeamsSpeakerDetection = (whisperLiveService: any, audioService: any, botConfigData: any) => {
+            const initializeTeamsSpeakerDetection = (audioService: any, botConfigData: any) => {
               (window as any).logBot("Setting up ROBUST Teams speaker detection (NO FALLBACKS - signal-only)...");
               
               // Teams-specific configuration for speaker detection
@@ -478,20 +322,19 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                   return this.cache.get(element)!;
                 }
 
+                getNameById(id: string): string | null {
+                  const element = this.idToElement.get(id);
+                  if (!element) return null;
+                  const identity = this.cache.get(element);
+                  return identity?.name || null;
+                }
+
                 invalidate(element: HTMLElement) {
                   const identity = this.cache.get(element);
                   if (identity) {
                     this.idToElement.delete(identity.id);
                     this.cache.delete(element);
                   }
-                }
-
-                getIdentityById(id: string): ParticipantIdentity | null {
-                  const element = this.idToElement.get(id);
-                  if (!element) {
-                    return null;
-                  }
-                  return this.getIdentity(element);
                 }
 
                 private extractId(element: HTMLElement): string {
@@ -561,7 +404,20 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                     }
                   }
                 }
-                
+
+                  // Teams (consumer) stores the display name only in the profile picture URL:
+                  // img[src*="profilepicturev2?displayname=Name&..."]
+                  // This is the most reliable fallback for current Teams consumer UI.
+                  const avatarImg = element.querySelector('img[src*="displayname="]') as HTMLImageElement | null;
+                  if (avatarImg) {
+                    const src = avatarImg.getAttribute('src') || '';
+                    const dnMatch = src.match(/[?&]displayname=([^&]+)/);
+                    if (dnMatch) {
+                      const name = decodeURIComponent(dnMatch[1]).trim();
+                      if (name.length > 1 && name.length < 100) return name;
+                    }
+                  }
+
                   const id = this.extractId(element);
                   return `Teams Participant (${id})`;
                 }
@@ -579,7 +435,7 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
               class SpeakerStateMachine {
                 private state = new Map<string, ParticipantState>();
-                private readonly MIN_STATE_CHANGE_MS = 200;
+                private readonly MIN_STATE_CHANGE_MS = 1500; // 200ms was too short — ambient mic noise fires rapid flicker cycles every ~200ms, creating tiny unchunks. 1500ms filters noise while still capturing real speech transitions.
 
                 updateState(participantId: string, detectionResult: { isSpeaking: boolean; hasSignal: boolean }): boolean {
                   const current = this.state.get(participantId);
@@ -725,183 +581,33 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               const registry = new ParticipantRegistry();
               const stateMachine = new SpeakerStateMachine();
               const detector = new TeamsSpeakingDetector();
-              const debouncer = new EventDebouncer(300);
+              const debouncer = new EventDebouncer(1500); // Increased from 300ms — matches MIN_STATE_CHANGE_MS to filter ambient noise flicker
               const observers = new Map<HTMLElement, MutationObserver[]>();
               const rafHandles = new Map<string, number>();
-              const signalLossTimers = new Map<string, number>();
-              const speakingKeepaliveTimers = new Map<string, number>();
-
-              const cfgSignalLossGrace = Number((botConfigData as any)?.teamsSpeaker?.signalLossGraceMs);
-              const cfgSpeakingKeepalive = Number((botConfigData as any)?.teamsSpeaker?.speakingKeepaliveMs);
-              const SIGNAL_LOSS_GRACE_MS = Number.isFinite(cfgSignalLossGrace) && cfgSignalLossGrace >= 500
-                ? cfgSignalLossGrace
-                : 2000;
-              const SPEAKING_KEEPALIVE_MS = Number.isFinite(cfgSpeakingKeepalive) && cfgSpeakingKeepalive >= 2000
-                ? cfgSpeakingKeepalive
-                : 8000;
-              const ALLOW_KEEPALIVE = SPEAKING_KEEPALIVE_MS >= 5000; // disable keepalive when set very low
-              
-              // Identity stabilization
-              const nameByNormalized = new Map<string, string>(); // normalized name -> canonical name
-              const idByNormalized = new Map<string, string>();   // normalized name -> canonical id
-              const idToCanonicalName = new Map<string, string>(); // participant id -> canonical name
-
-              const normalizeName = (name: string | undefined | null): string | null => {
-                if (!name) return null;
-                const trimmed = name.trim();
-                if (!trimmed) return null;
-                return trimmed
-                  .normalize('NFD')
-                  .replace(/[\u0300-\u036f]/g, '')
-                  .replace(/\s+/g, ' ')
-                  .toLowerCase();
-              };
-
-              function canonicalizeIdentity(identity: ParticipantIdentity): ParticipantIdentity {
-                const norm = normalizeName(identity.name);
-                if (norm) {
-                  if (!nameByNormalized.has(norm)) nameByNormalized.set(norm, identity.name);
-                  if (!idByNormalized.has(norm)) idByNormalized.set(norm, identity.id);
-                  identity = {
-                    ...identity,
-                    name: nameByNormalized.get(norm) || identity.name,
-                    id: idByNormalized.get(norm) || identity.id,
-                  };
-                }
-
-                const canonicalNameForId = idToCanonicalName.get(identity.id);
-                if (canonicalNameForId) {
-                  identity = { ...identity, name: canonicalNameForId };
-                } else if (identity.name) {
-                  idToCanonicalName.set(identity.id, identity.name);
-                }
-
-                return identity;
-              }
               
               // State for tracking speaking status (for cleanup)
               const speakingStates = new Map<string, SpeakingState>();
-
-              function cancelSignalLossTimer(participantId: string) {
-                const timer = signalLossTimers.get(participantId);
-                if (timer) {
-                  clearTimeout(timer);
-                  signalLossTimers.delete(participantId);
-                }
-              }
-
-              const countSpeaking = () =>
-                Array.from(speakingStates.values()).filter((state) => state === 'speaking').length;
-
-              function stopSpeakingKeepalive(participantId: string) {
-                const timer = speakingKeepaliveTimers.get(participantId);
-                if (timer) {
-                  clearInterval(timer);
-                  speakingKeepaliveTimers.delete(participantId);
-                }
-              }
-
-              function startSpeakingKeepalive(identity: ParticipantIdentity) {
-                if (!ALLOW_KEEPALIVE) return;
-                if (countSpeaking() > 1) return; // avoid inflating overlap when multiple speakers are active
-                stopSpeakingKeepalive(identity.id);
-
-                const timer = setInterval(() => {
-                  try {
-                    if (!identity.element.isConnected) {
-                      stopSpeakingKeepalive(identity.id);
-                      return;
-                    }
-
-                    if (countSpeaking() > 1) {
-                      stopSpeakingKeepalive(identity.id);
-                      return;
-                    }
-
-                    const state = speakingStates.get(identity.id);
-                    if (state !== 'speaking') {
-                      stopSpeakingKeepalive(identity.id);
-                      return;
-                    }
-
-                    // Keep active speaker continuity alive across intermittent detector gaps.
-                    sendTeamsSpeakerEvent('SPEAKER_START', identity);
-                    (window as any).logBot(`🔁 [Unified] SPEAKER_START keepalive: ${identity.name} (ID: ${identity.id})`);
-                  } catch (_error: any) {
-                    stopSpeakingKeepalive(identity.id);
-                  }
-                }, SPEAKING_KEEPALIVE_MS) as unknown as number;
-
-                speakingKeepaliveTimers.set(identity.id, timer);
-              }
-
-              function scheduleSignalLossGrace(identity: ParticipantIdentity) {
-                if (signalLossTimers.has(identity.id)) {
-                  return;
-                }
-
-                const timer = setTimeout(() => {
-                  signalLossTimers.delete(identity.id);
-
-                  if (!identity.element.isConnected) {
-                    handleParticipantRemoved(identity);
-                    return;
-                  }
-
-                  if (!detector.hasRequiredSignal(identity.element)) {
-                    (window as any).logBot(
-                      `⚠️ [Unified] Voice-level signal still missing after ${SIGNAL_LOSS_GRACE_MS}ms for ${identity.name} - removing participant`
-                    );
-                    handleParticipantRemoved(identity);
-                  }
-                }, SIGNAL_LOSS_GRACE_MS) as unknown as number;
-
-                signalLossTimers.set(identity.id, timer);
-              }
               
               // Event emission helper
-              function sendTeamsSpeakerEvent(eventType: string, rawIdentity: ParticipantIdentity) {
-                const identity = canonicalizeIdentity(rawIdentity);
+              function sendTeamsSpeakerEvent(eventType: string, identity: ParticipantIdentity) {
                 const eventAbsoluteTimeMs = Date.now();
                 const sessionStartTime = audioService.getSessionAudioStartTime();
-                
+
                 if (sessionStartTime === null) {
                   return;
                 }
-                
-                const relativeTimestampMs = eventAbsoluteTimeMs - sessionStartTime;
-                
-                try {
-                  whisperLiveService.sendSpeakerEvent(
-                    eventType,
-                    identity.name,
-                    identity.id,
-                    relativeTimestampMs,
-                    botConfigData
-                  );
-                } catch (error: any) {
-                  // Handle errors silently
-                }
-              }
 
-              (window as any).__vexaEmitCurrentSpeakers = () => {
-                try {
-                  const activeIds = Array.from(speakingStates.entries())
-                    .filter(([_, state]) => state === 'speaking')
-                    .map(([id]) => id);
-                  if (activeIds.length === 0) {
-                    return;
-                  }
-                  activeIds.forEach((id) => {
-                    const identity = registry.getIdentityById(id);
-                    if (identity) {
-                      sendTeamsSpeakerEvent('SPEAKER_START', identity);
-                    }
-                  });
-                } catch (error: any) {
-                  // Best-effort; avoid breaking speaker detection.
-                }
-              };
+                const relativeTimestampMs = eventAbsoluteTimeMs - sessionStartTime;
+
+                // Accumulate for persistence (direct bot accumulation)
+                (window as any).__vexaSpeakerEvents = (window as any).__vexaSpeakerEvents || [];
+                (window as any).__vexaSpeakerEvents.push({
+                  event_type: eventType,
+                  participant_name: identity.name,
+                  participant_id: identity.id,
+                  relative_timestamp_ms: relativeTimestampMs,
+                });
+              }
               // Unified Observer System
               function observeParticipant(element: HTMLElement) {
                 if ((element as any).dataset.vexaObserverAttached) {
@@ -939,11 +645,10 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                 // Observer on container (detect signal loss)
                 const containerObserver = new MutationObserver(() => {
                   if (!detector.hasRequiredSignal(element)) {
-                    (window as any).logBot(`⚠️ [Unified] Voice-level signal lost for ${identity.name} - waiting ${SIGNAL_LOSS_GRACE_MS}ms before removal`);
-                    scheduleSignalLossGrace(identity);
+                    (window as any).logBot(`⚠️ [Unified] Voice-level signal lost for ${identity.name} - stopping observation`);
+                    handleParticipantRemoved(identity);
                     return;
                   }
-                  cancelSignalLossTimer(identity.id);
                   checkAndEmit(identity);
                 });
                 containerObserver.observe(element, {
@@ -969,12 +674,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
                 const detectionResult = detector.detectSpeakingState(identity.element);
 
-                if (detectionResult.hasSignal) {
-                  cancelSignalLossTimer(identity.id);
-                } else {
-                  scheduleSignalLossGrace(identity);
-                }
-
                 if (stateMachine.updateState(identity.id, detectionResult)) {
                   if (detectionResult.hasSignal) {
                     const newState: SpeakingState = detectionResult.isSpeaking ? 'speaking' : 'silent';
@@ -982,11 +681,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                     debouncer.debounce(identity.id, () => {
                       emitEvent(newState, identity);
                     });
-                  } else {
-                    // Keep previous state during transient signal loss; grace timer decides cleanup.
-                    if (!speakingStates.has(identity.id)) {
-                      speakingStates.set(identity.id, 'unknown');
-                    }
                   }
                 }
               }
@@ -1010,8 +704,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
               function handleParticipantRemoved(identity: ParticipantIdentity) {
                 debouncer.cancel(identity.id);
-                cancelSignalLossTimer(identity.id);
-                stopSpeakingKeepalive(identity.id);
 
                 if (stateMachine.getState(identity.id) === 'speaking') {
                   emitEvent('silent', identity);
@@ -1047,12 +739,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
 
                 (window as any).logBot(`${emoji} [Unified] ${eventType}: ${identity.name} (ID: ${identity.id}) [signal-based]`);
                 sendTeamsSpeakerEvent(eventType, identity);
-
-                if (state === 'speaking') {
-                  startSpeakingKeepalive(identity);
-                } else {
-                  stopSpeakingKeepalive(identity.id);
-                }
               }
 
               function scanAndObserveAll() {
@@ -1155,6 +841,69 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               // Do initial count immediately, then poll every 5 seconds
               countParticipants();
               setInterval(countParticipants, 5000);
+
+              // ─── Per-speaker audio routing ──────────────────────────────
+              // Teams has ONE mixed audio stream. We route audio chunks to
+              // speaker buffers based on who the DOM says is currently speaking.
+              // The speakingStates map (populated by the observer above) tells
+              // us who's active. Registry maps IDs to names.
+              const setupPerSpeakerAudioRouting = () => {
+                const audioEl = document.querySelector('audio') as HTMLAudioElement | null;
+                if (!audioEl || !(audioEl.srcObject instanceof MediaStream)) {
+                  (window as any).logBot?.('[Teams PerSpeaker] No audio element found, skipping per-speaker routing');
+                  return;
+                }
+
+                const stream = audioEl.srcObject as MediaStream;
+                if (stream.getAudioTracks().length === 0) {
+                  (window as any).logBot?.('[Teams PerSpeaker] Audio stream has no tracks');
+                  return;
+                }
+
+                const ctx = new AudioContext({ sampleRate: 16000 });
+                const source = ctx.createMediaStreamSource(stream);
+                const processor = ctx.createScriptProcessor(4096, 1, 1);
+
+                processor.onaudioprocess = (e: AudioProcessingEvent) => {
+                  const data = e.inputBuffer.getChannelData(0);
+                  // Skip silence
+                  let maxVal = 0;
+                  for (let j = 0; j < data.length; j++) {
+                    const abs = data[j] < 0 ? -data[j] : data[j];
+                    if (abs > maxVal) maxVal = abs;
+                  }
+                  if (maxVal <= 0.005) return;
+
+                  // Find active speakers from DOM state (exclude bot itself)
+                  const botNameLower = ((botConfigData as any)?.botName || (botConfigData as any)?.name || 'vexa').toLowerCase();
+                  const activeSpeakerNames: string[] = [];
+                  for (const [id, state] of speakingStates) {
+                    if (state === 'speaking') {
+                      const name = registry.getNameById(id);
+                      if (name && !name.toLowerCase().includes(botNameLower)) {
+                        activeSpeakerNames.push(name);
+                      }
+                    }
+                  }
+
+                  if (activeSpeakerNames.length === 0) return;
+
+                  // Route audio to each active speaker
+                  const audioArray = Array.from(data);
+                  for (const name of activeSpeakerNames) {
+                    if (typeof (window as any).__vexaTeamsAudioData === 'function') {
+                      (window as any).__vexaTeamsAudioData(name, audioArray);
+                    }
+                  }
+                };
+
+                source.connect(processor);
+                processor.connect(ctx.destination);
+                (window as any).logBot?.(`[Teams PerSpeaker] Audio routing active on stream ${stream.id}`);
+              };
+
+              // Delay slightly to ensure audio element is ready
+              setTimeout(setupPerSpeakerAudioRouting, 2000);
               
               // Expose participant count for meeting monitoring
               // Accessible-roles based participant collection (robust and simple)
@@ -1201,12 +950,17 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
             };
 
             // Setup Teams meeting monitoring (browser context)
-            const setupTeamsMeetingMonitoring = (botConfigData: any, audioService: any, whisperLiveService: any, resolve: any) => {
+            const setupTeamsMeetingMonitoring = (botConfigData: any, audioService: any, resolve: any) => {
               (window as any).logBot("Setting up Teams meeting monitoring...");
               
               const leaveCfg = (botConfigData && (botConfigData as any).automaticLeave) || {};
-              const startupAloneTimeoutSeconds = Number(leaveCfg.startupAloneTimeoutSeconds ?? 10);
-              const everyoneLeftTimeoutSeconds = Number(leaveCfg.everyoneLeftTimeoutSeconds ?? 10);
+              // Config values are in milliseconds, convert to seconds
+              const startupAloneTimeoutSeconds = leaveCfg.noOneJoinedTimeout
+                ? Math.floor(Number(leaveCfg.noOneJoinedTimeout) / 1000)
+                : Number(leaveCfg.startupAloneTimeoutSeconds ?? (20 * 60));
+              const everyoneLeftTimeoutSeconds = leaveCfg.everyoneLeftTimeout
+                ? Math.floor(Number(leaveCfg.everyoneLeftTimeout) / 1000)
+                : Number(leaveCfg.everyoneLeftTimeoutSeconds ?? 60);
               
               let aloneTime = 0;
               let lastParticipantCount = 0;
@@ -1231,7 +985,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                   );
                 }
                 audioService.disconnect();
-                whisperLiveService.close();
                 finish();
               };
 
@@ -1356,12 +1109,10 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
             };
 
             // Initialize Teams-specific speaker detection
-            if (transcriptionEnabled && whisperLiveService) {
-              initializeTeamsSpeakerDetection(whisperLiveService, audioService, botConfigData);
-            }
+            initializeTeamsSpeakerDetection(audioService, botConfigData);
             
             // Setup Teams meeting monitoring
-            setupTeamsMeetingMonitoring(botConfigData, audioService, whisperLiveService, resolve);
+            setupTeamsMeetingMonitoring(botConfigData, audioService, resolve);
           }).catch((err: any) => {
             reject(err);
           });
@@ -1379,9 +1130,8 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
         }
       } catch {}
     },
-    { 
-      botConfigData: botConfig, 
-      whisperUrlForBrowser: whisperLiveUrl,
+    {
+      botConfigData: botConfig,
       selectors: {
         participantSelectors: teamsParticipantSelectors,
         speakingClasses: teamsSpeakingClassNames,
@@ -1398,9 +1148,4 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
       } as any
     }
   );
-  
-  // After page.evaluate finishes, cleanup services
-  if (whisperLiveService) {
-    await whisperLiveService.cleanup();
-  }
 }

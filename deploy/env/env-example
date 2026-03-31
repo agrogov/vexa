@@ -1,0 +1,59 @@
+# --- Vexa Environment ---
+# Everything works as-is EXCEPT transcription — set TRANSCRIPTION_SERVICE_URL below.
+
+# Admin (default works for local dev)
+ADMIN_API_TOKEN=changeme
+
+# Transcription service (REQUIRED — the only thing you MUST change)
+# Get a transcription API key at vexa.ai OR self-host services/transcription-service/
+TRANSCRIPTION_SERVICE_URL=https://your-transcription-url/v1/audio/transcriptions
+TRANSCRIPTION_SERVICE_TOKEN=your-token
+
+# To run transcription locally with GPU, uncomment:
+# LOCAL_TRANSCRIPTION=true
+
+# Dashboard (absolute path to vexa-dashboard checkout)
+# git clone https://github.com/Vexa-ai/vexa-dashboard
+DASHBOARD_PATH=/path/to/vexa-dashboard
+
+# Bot
+BOT_IMAGE_NAME=vexa-bot:dev
+
+# Ports
+API_GATEWAY_HOST_PORT=8056
+ADMIN_API_HOST_PORT=8057
+TRANSCRIPTION_COLLECTOR_HOST_PORT=8123
+
+# Database (embedded by default, or set REMOTE_DB=true for external)
+# REMOTE_DB=true
+# DB_HOST=your-postgres-host
+# DB_PORT=5432
+# DB_NAME=vexa
+# DB_USER=postgres
+# DB_PASSWORD=your-password
+
+# Storage (minio by default — recordings)
+STORAGE_BACKEND=minio
+MINIO_ENDPOINT=minio:9000
+MINIO_ACCESS_KEY=vexa-access-key
+MINIO_SECRET_KEY=vexa-secret-key
+MINIO_BUCKET=vexa-recordings
+MINIO_SECURE=false
+
+# Local storage options (used when STORAGE_BACKEND=local)
+# LOCAL_STORAGE_DIR=/data/recordings
+# LOCAL_STORAGE_FSYNC=true
+
+# Cloud S3 options (used when STORAGE_BACKEND=s3)
+# AWS_REGION=us-east-1
+# AWS_ACCESS_KEY_ID=
+# AWS_SECRET_ACCESS_KEY=
+# S3_BUCKET=vexa-recordings
+# S3_ENDPOINT=
+# S3_SECURE=true
+
+# Voice agent / TTS (optional)
+# OPENAI_API_KEY=your-key
+
+# Billing hooks (optional — for hosted service)
+# POST_MEETING_HOOKS=https://your-billing-webhook

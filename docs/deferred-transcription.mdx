@@ -1,0 +1,112 @@
+---
+title: "Deferred Transcription"
+---
+Deferred transcription lets you transcribe a meeting **after** it ends, using the stored recording. Instead of live streaming audio to the transcription engine during the meeting, you record first and transcribe later.
+
+## When to Use It
+
+- **Recording-only mode**: You launched a bot with `transcribe_enabled: false` and `recording_enabled: true` to capture audio without live transcription costs. Now you want the transcript.
+- **Re-transcription**: The live transcript had issues (wrong language, poor quality) and you want to re-run transcription with different settings.
+- **Cost control**: Batch transcription during off-peak hours instead of real-time processing.
+
+## API Endpoint
+
+```
+POST /meetings/{meeting_id}/transcribe
+```
+
+### Request
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `language` | string | No | ISO 639 language code (e.g., `en`, `es`). Omit for auto-detect. |
+
+```bash
+curl -X POST "$API_BASE/meetings/42/transcribe" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{"language": "en"}'
+```
+
+### Response
+
+```json
+{
+  "status": "completed",
+  "segment_count": 47,
+  "language": "en"
+}
+```
+
+If no speech is detected in the recording:
+
+```json
+{
+  "status": "completed",
+  "segment_count": 0,
+  "language": "en",
+  "message": "No speech detected in recording"
+}
+```
+
+### Error Responses
+
+| Status | Detail | Meaning |
+|--------|--------|---------|
+| 400 | `Meeting is not completed yet` | The meeting must be in `completed` status before deferred transcription |
+| 400 | `No recording available for this meeting` | No audio file was persisted — the bot was launched without `recording_enabled: true` |
+| 403 | `Forbidden` | The meeting belongs to a different user |
+| 404 | `Meeting not found` | No meeting with that ID exists |
+| 409 | `Meeting already has transcription` | Transcription segments already exist for this meeting |
+
+## How It Works
+
+1. The endpoint fetches the stored audio recording from object storage (MinIO/S3/local).
+2. The audio is sent to the transcription gateway (Whisper v3 turbo) for batch processing.
+3. Speaker events captured during the live meeting are used to map speakers to transcript segments — the same speaker attribution you would get from live transcription.
+4. Segments are written to the `transcriptions` table and become available via `GET /transcripts/{platform}/{native_meeting_id}`.
+
+<Note>
+Deferred transcription uses speaker events stored in `meeting.data.speaker_events` during the live session. If the bot captured speaker events (participant join/leave, speaking start/stop), speaker attribution works even though transcription happened after the meeting.
+</Note>
+
+## Typical Workflow
+
+1. Launch a bot in recording-only mode (see [Recording Without Transcription](recording-only)):
+
+```bash
+curl -X POST "$API_BASE/bots" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{
+    "platform": "google_meet",
+    "native_meeting_id": "abc-defg-hij",
+    "recording_enabled": true,
+    "transcribe_enabled": false
+  }'
+```
+
+2. Wait for the meeting to complete (status becomes `completed`).
+
+3. Trigger deferred transcription:
+
+```bash
+curl -X POST "$API_BASE/meetings/42/transcribe" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $API_KEY" \
+  -d '{}'
+```
+
+4. Retrieve the transcript:
+
+```bash
+curl "$API_BASE/transcripts/google_meet/abc-defg-hij" \
+  -H "X-API-Key: $API_KEY"
+```
+
+## Related
+
+- [Recording Without Transcription](recording-only) — how to launch a recording-only bot
+- [Bots API](api/bots) — full bot creation reference
+- [Transcripts API](api/transcripts) — retrieving transcripts
+- [Core Concepts](concepts) — recording vs. capture, transcription tiers

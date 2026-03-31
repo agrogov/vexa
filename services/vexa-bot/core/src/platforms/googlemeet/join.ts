@@ -1,10 +1,9 @@
 import { Page } from "playwright";
 import { log, randomDelay, callJoiningCallback } from "../../utils";
 import { BotConfig } from "../../types";
-import { 
+import {
   googleNameInputSelectors,
   googleJoinButtonSelectors,
-  googleMicrophoneButtonSelectors,
   googleCameraButtonSelectors
 } from "./selectors";
 
@@ -49,16 +48,7 @@ export async function joinGoogleMeeting(
   await page.waitForTimeout(randomDelay(1000));
   await page.fill(nameFieldSelector, botName);
 
-  // Mute mic and camera if available
-  try {
-    await page.waitForTimeout(randomDelay(500));
-    const micSelector = googleMicrophoneButtonSelectors[0];
-    await page.click(micSelector, { timeout: 200 });
-    await page.waitForTimeout(200);
-  } catch (e) {
-    log("Microphone already muted or not found.");
-  }
-  
+  // Turn camera off if available (mic mute removed — bot uses /dev/null or PulseAudio gain=0)
   try {
     await page.waitForTimeout(randomDelay(500));
     const cameraSelector = googleCameraButtonSelectors[0];

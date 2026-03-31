@@ -1,8 +1,31 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import { Readable } from 'stream';
 import { log } from '../utils';
 import https from 'https';
 import http from 'http';
+
+/** Unmute/mute the PulseAudio tts_sink AND virtual_mic source so audio is only audible during playback.
+ *  Muting the sink alone is not enough — the remap source (virtual_mic) still passes a low-level
+ *  signal to WebRTC, which Teams' VAD interprets as speech and lights the speaker indicator.
+ *  Muting the source cuts the signal at the capture device level, giving true silence. */
+function setTtsSinkMute(mute: boolean): void {
+  try {
+    if (mute) {
+      // Wait 300ms before muting to let final audio packets reach other participants.
+      execSync('sleep 0.3', { timeout: 2000 });
+      execSync('pactl set-sink-mute tts_sink 1', { timeout: 2000, stdio: 'ignore' });
+      execSync('pactl set-source-mute virtual_mic 1', { timeout: 2000, stdio: 'ignore' });
+    } else {
+      execSync('pactl set-sink-mute tts_sink 0', { timeout: 2000, stdio: 'ignore' });
+      execSync('pactl set-source-mute virtual_mic 0', { timeout: 2000, stdio: 'ignore' });
+      // Wait 500ms after unmute for meeting platform to register speaker.
+      // Teams needs ~400-500ms for mic to go hot. First words clipped without this.
+      execSync('sleep 0.5', { timeout: 2000 });
+    }
+  } catch {
+    // PulseAudio may not be available (e.g. in tests)
+  }
+}
 
 /**
  * TTSPlaybackService
@@ -35,6 +58,7 @@ export class TTSPlaybackService {
     format: string = 's16le'
   ): Promise<void> {
     this._isPlaying = true;
+    setTtsSinkMute(false);
     return new Promise((resolve, reject) => {
       const proc = spawn('paplay', [
         '--raw',
@@ -53,6 +77,7 @@ export class TTSPlaybackService {
       proc.on('exit', (code) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         if (code === 0 || code === null) {
           resolve();
         } else {
@@ -63,6 +88,7 @@ export class TTSPlaybackService {
       proc.on('error', (err) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         reject(err);
       });
 
@@ -83,6 +109,7 @@ export class TTSPlaybackService {
     format: string = 's16le'
   ): { write: (chunk: Buffer) => boolean; end: () => void; onDone: Promise<void> } {
     this._isPlaying = true;
+    setTtsSinkMute(false);
 
     const proc = spawn('paplay', [
       '--raw',
@@ -102,12 +129,14 @@ export class TTSPlaybackService {
       proc.on('exit', (code) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         if (code === 0 || code === null) resolve();
         else reject(new Error(`paplay stream exited with code ${code}`));
       });
       proc.on('error', (err) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         reject(err);
       });
     });
@@ -134,6 +163,7 @@ export class TTSPlaybackService {
    */
   async playFile(filePath: string): Promise<void> {
     this._isPlaying = true;
+    setTtsSinkMute(false);
     return new Promise((resolve, reject) => {
       // Use ffmpeg to convert any audio format to raw PCM, pipe to paplay
       const ffmpeg = spawn('ffmpeg', [
@@ -170,6 +200,7 @@ export class TTSPlaybackService {
       paplay.on('exit', (code) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         if (code === 0 || code === null) resolve();
         else reject(new Error(`paplay exited with code ${code}`));
       });
@@ -177,12 +208,14 @@ export class TTSPlaybackService {
       paplay.on('error', (err) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         ffmpeg.kill('SIGTERM');
         reject(err);
       });
 
       ffmpeg.on('error', (err) => {
         this._isPlaying = false;
+        setTtsSinkMute(true);
         paplay.kill('SIGTERM');
         reject(err);
       });
@@ -194,6 +227,7 @@ export class TTSPlaybackService {
    */
   async playFromUrl(url: string): Promise<void> {
     this._isPlaying = true;
+    setTtsSinkMute(false);
     return new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', [
         '-i', url,
@@ -226,6 +260,7 @@ export class TTSPlaybackService {
       paplay.on('exit', (code) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         if (code === 0 || code === null) resolve();
         else reject(new Error(`paplay exited with code ${code}`));
       });
@@ -233,12 +268,14 @@ export class TTSPlaybackService {
       paplay.on('error', (err) => {
         this._isPlaying = false;
         this.paplayProcess = null;
+        setTtsSinkMute(true);
         ffmpeg.kill('SIGTERM');
         reject(err);
       });
 
       ffmpeg.on('error', (err) => {
         this._isPlaying = false;
+        setTtsSinkMute(true);
         paplay.kill('SIGTERM');
         reject(err);
       });
@@ -296,6 +333,7 @@ export class TTSPlaybackService {
     }
 
     this._isPlaying = true;
+    setTtsSinkMute(false);
 
     const postData = JSON.stringify({
       model: 'tts-1',
@@ -326,6 +364,7 @@ export class TTSPlaybackService {
           res.on('data', (chunk) => body += chunk);
           res.on('end', () => {
             this._isPlaying = false;
+            setTtsSinkMute(true);
             reject(new Error(`TTS service error ${res.statusCode}: ${body}`));
           });
           return;
@@ -350,6 +389,7 @@ export class TTSPlaybackService {
           this._isPlaying = false;
           this.paplayProcess = null;
           this._currentText = null;
+          setTtsSinkMute(true);
           if (code === 0 || code === null) resolve();
           else reject(new Error(`paplay exited with code ${code}`));
         });
@@ -357,6 +397,7 @@ export class TTSPlaybackService {
         paplay.on('error', (err) => {
           this._isPlaying = false;
           this.paplayProcess = null;
+          setTtsSinkMute(true);
           reject(err);
         });
 
@@ -366,6 +407,7 @@ export class TTSPlaybackService {
 
       req.on('error', (err) => {
         this._isPlaying = false;
+        setTtsSinkMute(true);
         reject(err);
       });
 
@@ -388,6 +430,7 @@ export class TTSPlaybackService {
     }
     this._isPlaying = false;
     this._currentText = null;
+    setTtsSinkMute(true);
   }
 
   /**
@@ -404,6 +447,7 @@ export class TTSPlaybackService {
     }
     this._isPlaying = false;
     this._currentText = null;
+    setTtsSinkMute(true);
   }
 
   /**

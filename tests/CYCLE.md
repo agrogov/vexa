@@ -1,0 +1,550 @@
+# Test Cycle: Bottom-Up Sequential Validation
+
+The most thorough, human-gated test approach. Not the only way -- `make test-unit` and `make test-all` exist for quick runs. Use the cycle for pre-release, after major changes, or when you need confidence.
+
+**How it works:**
+1. Agent presents the step -- WHY, WHAT, HOW
+2. Agent runs it
+3. Agent presents results AND tells human what to look at -- gaps, risks, findings
+4. Human validates -- approves, asks questions, or says fix it
+5. Next step
+
+## Principles
+
+1. **Isolate, then chain.** Test each service completely alone first (unit, start, verify). Start from services with no dependencies (transcription-service -- standalone GPU inference). Only then test things that depend on it. If the chain fails, you already know the foundation works -- the problem is in the dependent or the connection.
+
+2. **Bottom-up by dependency.** Start at the foundation, work up. Never test something whose foundation is unverified.
+
+3. **Every service has THREE gates:**
+   - **Unit tests pass** -- code logic is sound
+   - **README exists with WHY/WHAT/HOW** -- documented for humans
+   - **Hot test passes** -- the service actually runs and does its job
+
+   If any gate fails, the step fails. Fix it before moving on.
+
+4. **Chain tests follow isolation tests.** After service A passes and service B passes, test A->B as a chain. The chain test verifies the connection, not the individual services.
+
+5. **Test objectives per service:** throughput, quality, dev experience, clean code, robustness/stability, security, compatibility, recovery, configuration validation, observability.
+
+6. **Results go to TWO places:** the service's `tests/results/` (local) AND repo's `tests/*/results/` (central). Baselines in `tests/load/results/README.md` must be updated.
+
+7. **Findings feed back into docs.** Every finding -- security gaps, code issues, missing docs -- gets documented. If it changes how we test, update CYCLE.md. If it changes a service, update its README.
+
+8. **Code without docs is untested code.** Missing README blocks the gate.
+
+9. **Docs must be validated.** Documented commands that don't work are bugs. Follow the README -- if a step fails, it's a finding.
+
+## Service dependency graph
+
+```
+shared-models              <- library, no deps
+     |
+transcription-service      <- standalone, GPU inference behind API
+     |
+Bot (per-speaker pipeline) <- depends on transcription-service + Redis
+     |
+admin-api                  <- depends on Postgres + shared-models
+transcription-collector    <- depends on Redis + Postgres
+     |
+bot-manager                <- depends on Redis + Postgres + admin-api
+     |
+api-gateway                <- depends on admin-api + bot-manager + Redis
+     |
+dashboard                  <- depends on api-gateway + admin-api
+```
+
+---
+
+## Phase 1: Code quality (no Docker)
+
+Test code logic in isolation. Bottom of dependency graph first.
+
+### 1.1 shared-models
+**WHY:** Foundation -- every service imports it.
+**Gates:** 39 unit tests + library (no README gate).
+```bash
+cd libs/shared-models && python -m pytest shared_models/test_*.py -v
+```
+
+### 1.2 transcription-service
+
+**1.2a Unit tests**
+**WHY:** Transcription logic -- hallucination detection, silence filtering, config parsing.
+**Gates:** 30 unit tests + README with WHY/WHAT/HOW.
+```bash
+cd services/transcription-service && pytest tests/ -v
+```
+
+**1.2b Hot isolation test**
+**WHY:** Unit tests prove logic. Now prove it actually transcribes.
+```bash
+bash tests/test_hot.sh --full    # start -> verify -> basic load -> stop
+```
+**Look at:** Transcript quality (coherent, not garbage), latency vs baseline, README port matches actual.
+
+**1.2c Stress test**
+**WHY:** Find real capacity limits -- concurrency curve, audio sizes, GPU utilization.
+```bash
+bash tests/test_stress.sh
+```
+**Look at:** At what concurrency does quality degrade? Per-worker VRAM (not total machine). Memory growth.
+**Baselines:** Single: ~0.17s GPU. 40 concurrent (2 workers): 100% success. Queue limit: ~20/worker.
+
+**1.2d Agent-driven deep test**
+**WHY:** Security, compatibility, recovery, observability -- things scripts can't judge.
+```bash
+# Agent reads tests/AGENT_TEST.md and executes all 6 tests
+```
+**Look at:** Auth enforcement, OpenAI API compatibility, worker crash recovery, log quality.
+
+### 1.3 Bot (per-speaker pipeline)
+
+**1.3a Unit tests**
+**WHY:** Per-speaker buffer management — confirmation logic, fuzzy matching, hard cap flush.
+**Gates:** Unit tests + README with WHY/WHAT/HOW.
+```bash
+cd services/vexa-bot/core && npx tsx src/services/__tests__/speaker-streams.test.ts
+```
+
+**1.3b Mock meeting test**
+**WHY:** Test the full per-speaker pipeline without a real meeting.
+**Prerequisite:** transcription-service + Redis running.
+```bash
+# Start backend
+docker compose up -d redis
+cd services/transcription-service && docker compose up -d
+
+# Serve mock meeting (3 speakers: Alice, Bob, Carol -- Edge TTS audio)
+cd services/vexa-bot/tests/mock-meeting && bash serve.sh
+
+# Run bot against mock meeting
+cd services/vexa-bot/core
+MEETING_URL=http://localhost:8080 npm run dev
+
+# Verify segments in stream (payload format with JWT)
+redis-cli XRANGE transcription_segments - + | head -20
+
+# Verify speaker events in stream (flat fields)
+redis-cli XRANGE speaker_events_relative - + | head -20
+
+# Verify collector stored segments in hash
+redis-cli HGETALL meeting:<meeting_id>:segments
+```
+**Look at:**
+- 3 separate streams discovered (not mixed)
+- Each speaker's segments have correct speaker label in payload (`segments[].speaker`)
+- Segments have `completed: false` (drafts) and `completed: true` (confirmed)
+- No cross-contamination (Alice's words don't appear in Bob's segments)
+- Speaker events have correct event_type (SPEAKER_START/SPEAKER_END) and relative timestamps
+- Bot's own name is NOT in the speaker list (filtered by speaker-identity.ts)
+
+**1.3c Dashboard end-to-end test**
+**WHY:** Verify the full pipeline from dashboard bot launch to live transcript display.
+**Prerequisite:** All services running (`docker compose up -d`), dashboard on :3001.
+```bash
+# Launch bot from dashboard UI to a real meeting
+# Verify in collector logs:
+docker logs vexa_dev-transcription-collector-1 --tail 20 | grep -E "producer|Stored|Published|mutable"
+
+# Verify via API:
+curl -s http://localhost:8056/transcripts/google_meet/<native_id> -H "X-API-Key: <key>" | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d[\"segments\"])} segments'); [print(f'  {s[\"speaker\"]} | {s[\"text\"][:80]}') for s in d['segments'][-5:]]"
+```
+**Look at:**
+- Segments appear in dashboard within ~3s of speech (draft latency)
+- Speaker names are real participant names, not "Presentation" for everything
+- `PRODUCER_LABELED` in collector logs (not `MULTIPLE_CONCURRENT_SPEAKERS`)
+- Confirmed segments replace drafts (same start_time key, completed=true)
+
+### 1.5 admin-api
+**WHY:** User/token store. JSONB merge bug guard.
+**Gates:** 43 unit tests + README.
+```bash
+cd services/admin-api && pytest tests/ -v
+```
+
+### 1.6 transcription-collector
+**WHY:** Segment persistence. Filter quality.
+**Gates:** 46 unit tests + README.
+```bash
+cd services/transcription-collector && pytest tests/ -v
+```
+
+### 1.7 api-gateway
+**WHY:** External API entry point. Route and auth enforcement.
+**Gates:** 35 unit tests + README.
+```bash
+cd services/api-gateway && pytest tests/ -v
+```
+
+### 1.8 Remaining services
+**tts-service:** 16 unit tests + README.
+**mcp:** 53 unit tests + README.
+**dashboard:** README check (no unit tests -- UI service).
+
+### 1.9 README validation
+**WHY:** Docs must be accurate post-architecture change.
+**Check each service README for:**
+- Bot README reflects per-speaker pipeline
+- Transcription-service README mentions repetition_penalty
+- Collector README reflects bot-published segments
+- redis.md reflects bot as stream producer
+
+### Phase 1 Gate
+**All unit tests pass. All READMEs have WHY/WHAT/HOW. Standalone services hot-tested.**
+
+---
+
+## Phase 2: Service isolation (Docker, one at a time)
+
+Start services in dependency order. Each must be healthy before its dependents start.
+
+### 2.1 Infrastructure
+```bash
+docker compose up -d postgres redis
+```
+**Verify:** `pg_isready`, `redis-cli ping`.
+
+### 2.2 admin-api
+```bash
+docker compose up -d admin-api
+```
+**Verify:** health check, CRUD operations, auth enforcement.
+
+### 2.3 transcription-service
+```bash
+docker compose up -d transcription-service
+```
+**Verify:** health check, send audio, get transcript back.
+
+### 2.4 transcription-collector
+```bash
+docker compose up -d transcription-collector
+```
+**Verify:** consuming Redis stream, persisting to Postgres.
+
+### 2.5 bot-manager
+```bash
+docker compose up -d bot-manager
+```
+**Verify:** health check, bot launch capability.
+
+### 2.6 api-gateway
+```bash
+docker compose up -d api-gateway
+```
+**Verify:** routing, auth enforcement, WebSocket proxy.
+
+### 2.7 dashboard
+```bash
+docker compose up -d dashboard
+```
+**Verify:** pages load, no console errors.
+
+### Phase 2 Gate
+**All services healthy. Basic operations verified.**
+
+---
+
+## Phase 3: Functionality chains
+
+Verify the data flows that make the product work.
+
+### 3.1 Transcription chain (THE HOT PATH)
+```
+audio -> bot (per-speaker) -> HTTP POST -> transcription-service -> text
+  -> XADD {payload} -> Redis stream -> collector -> Redis hash -> PUBLISH tc:meeting:{id}:mutable
+  -> api-gateway (WebSocket) -> dashboard (live transcript)
+  -> collector background flush -> Postgres -> API (GET /transcripts)
+```
+**Test with dashboard bot launch to a real meeting.**
+**Verify:**
+```bash
+# Collector logs show producer-labeled speaker
+docker logs vexa_dev-transcription-collector-1 --tail 20 | grep -E "producer|Stored|Published"
+
+# API returns segments with correct speakers
+curl -s localhost:8056/transcripts/google_meet/<native_id> -H "X-API-Key: <key>" | python3 -m json.tool | head -30
+
+# Redis hash has segments (before Postgres flush)
+redis-cli HGETALL meeting:<id>:segments | head -20
+```
+**Look at:**
+- Drafts appear in dashboard within ~3s (completed=false via XADD → collector → pub/sub)
+- Confirmed segments replace drafts (completed=true, same start_time key)
+- Speaker names are producer-labeled (PRODUCER_LABELED, not MULTIPLE_CONCURRENT_SPEAKERS)
+- Collector persists to Postgres after 30s immutability threshold
+- API returns transcript with speaker attribution from both Redis (mutable) and Postgres (immutable)
+- Hallucination filter catches known junk phrases
+
+### 3.2 Webhook delivery
+```
+meeting event -> bot-manager -> webhook fired -> customer endpoint
+```
+**Verify:**
+- Status change (joining, active, completed) triggers webhook
+- Failed delivery goes to Redis retry queue
+- Retry worker re-delivers successfully
+- `redis-cli llen webhook_retry_queue` drains to 0
+
+### 3.3 API chain
+```
+authenticate -> create token -> list meetings -> get transcript with speakers
+```
+**Verify:**
+- Token creation via admin-api
+- Bot launch via api-gateway
+- Transcript retrieval with speaker labels
+- Meeting list includes correct metadata
+
+### 3.4 Real-time delivery
+```
+bot XADD {payload} -> collector -> PUBLISH tc:meeting:{id}:mutable -> api-gateway (subscribe) -> WebSocket -> dashboard
+```
+**Verify:**
+- WebSocket connection to api-gateway succeeds
+- Draft segments appear on WebSocket within ~3s of speech (completed=false)
+- Confirmed segments replace drafts (completed=true, same start_time)
+- Multiple concurrent WebSocket clients receive same segments
+- Connection survives brief network interruption
+
+### 3.5 Speaker identification
+```
+per-speaker audio tracks -> DOM name resolution (filtered: bot self + UI junk) -> VAD -> transcription -> labeled segments
+```
+**Verify:**
+- Each speaker gets distinct label in transcript (real participant names)
+- Bot's own name is NOT in speaker list (filtered by speaker-identity.ts)
+- No cross-contamination between speakers
+- Speaker events on `speaker_events_relative` stream have correct event_type and relative timestamps
+- Screen share tracks (extra audio elements beyond tile count) labeled "Presentation"
+- Collector uses producer-labeled speaker (`PRODUCER_LABELED` in logs)
+
+### Phase 3 Gate
+**All functionality chains work end-to-end.**
+
+---
+
+## Phase 4: User experience flows
+
+### 4.1 Self-hoster: README to first transcript
+```
+git clone -> follow README -> make all -> join meeting -> get transcript
+```
+**Verify:**
+- README instructions work without modification
+- All services start successfully
+- Bot can join a mock meeting
+- Transcript appears in API response
+
+### 4.2 API user: token to transcript
+```
+create API token -> launch bot via API -> poll for transcript -> get result with speakers
+```
+**Verify:**
+- Token creation flow works
+- Bot launch returns meeting ID
+- Polling endpoint shows transcript appearing
+- Final transcript has speaker labels
+
+### 4.3 Dashboard: login to live transcript
+```
+open dashboard -> log in -> see meetings -> click meeting -> see live transcript with speakers
+```
+**Verify:**
+- Dashboard loads without errors
+- Meeting list populates
+- Clicking a meeting shows transcript
+- Live segments appear via WebSocket during active meeting
+
+### Phase 4 Gate
+**All user experience flows complete successfully.**
+
+---
+
+## Phase 5: Stress and load
+
+### 5.1 transcription-service capacity
+```bash
+cd services/transcription-service && bash tests/test_stress.sh
+```
+**Baselines:** Single: ~0.17s GPU. 40 concurrent (2 workers): 100% success. Queue limit: ~20/worker.
+
+### 5.2 Bot scaling (K8s)
+
+**Unit of scale:** 1 bot pod = 250m CPU request, 600Mi RAM request (measured 2026-03-12).
+
+**Node: g6-standard-6 (Linode/Akamai LKE)**
+- Allocatable: 4 CPU, ~8GB RAM
+- Services overhead: ~1.6 CPU, ~3.5GB (gateway, admin-api, bot-manager, collector, mcp, dashboard, redis, caddy, tx-gateway, webapp)
+- Node 1 (with services): **7 bots** (RAM-limited)
+- Additional nodes (bots only): **13 bots each** (RAM-limited)
+
+**Scaling table:**
+
+| Nodes | Bot capacity | Cumulative provision time |
+|-------|-------------|--------------------------|
+| 1     | 7           | 0 (existing)             |
+| 2     | 20          | ~90s                     |
+| 3     | 33          | ~90s                     |
+| 5     | 59          | ~90s each                |
+| 8     | 98          | ~90s each                |
+| 9     | 111         | 100+ target              |
+
+**Cold start for new node:** ~2-3 min (90s provision + 60s image pull for 2GB bot image).
+
+**Burst scenario — 100 bots at once:**
+1. First 7 on existing node → instant
+2. Bots 8-100 go Pending → autoscaler requests ~7 nodes in parallel
+3. All nodes ready in ~90s, images pulled in ~60s
+4. All 100 bots running in **~2.5 minutes**
+
+**Bottleneck analysis at 100 concurrent bots:**
+
+| Component | Load | Limit | Breaks at |
+|-----------|------|-------|-----------|
+| **Transcription service (GPU)** | 100 concurrent POST | 2 workers × 20 queue = 40 | **~40 bots** |
+| Collector (stream consumer) | ~300 segments/s | Single-threaded | ~200 bots |
+| Redis XADD | ~300/s | 100K+/s | Never |
+| Postgres writes | ~3000/10s batch | Managed DB handles | ~500+ bots |
+| Network (audio to BBB) | 100 × 50KB/s = 5MB/s | 1Gbps | Never |
+| Caddy ingress (WS) | Dashboard connections | Thousands | Never |
+
+**Primary bottleneck: transcription-service at ~40 bots.** Fix: scale GPU workers (5 workers = 100 concurrent) or use Fireworks AI as overflow via TX gateway.
+
+**Mitigation for production scale:**
+1. **LKE autoscaler**: min=1, max=10 nodes
+2. **Image pre-pull**: DaemonSet to pre-pull vexa-bot image on every node
+3. **Buffer node**: overprovisioner pod (low-priority) keeps 1 empty node warm
+4. **Ramp limit**: bot-manager queues launches, max N concurrent provisions
+5. **GPU scaling**: 5 transcription workers for 100 bots, or Fireworks overflow
+
+### 5.3 Load test plan
+
+**Setup:**
+1. Create N test users with API keys via admin-api
+2. Create test Google Meet rooms (or mock meetings)
+3. Ramp: 5 → 10 → 25 → 50 → 100 bots
+
+**Measure at each step:**
+- Per-bot CPU/RAM (kubectl top)
+- Node count and autoscaler events
+- Transcription latency (bot log timestamps: audio → draft → confirmed)
+- Redis stream lag (XLEN, consumer group pending)
+- Collector processing rate (segments/s in logs)
+- DB write rate and latency
+- Dashboard WebSocket delivery latency
+- Transcription service queue depth and error rate
+
+**Pass criteria:**
+- No bot OOM kills
+- No transcription service 5xx > 1%
+- Draft latency < 5s at all levels
+- Autoscaler provisions nodes before Pending > 60s
+- No data loss (all segments reach Postgres)
+
+### Phase 5 Gate
+**No regression >20% from baselines. Bottlenecks identified and documented. Scaling plan for 100+ bots validated.**
+
+---
+
+## Phase 6: Builds and packages
+
+### 6.1 Docker images
+```bash
+# All service images build successfully
+docker compose build
+```
+**Verify:** No build failures, no warnings about missing files.
+
+### 6.2 Vexa-lite
+```bash
+cd services/vexa-lite && docker build -t vexa-lite .
+```
+**Verify:** Image builds, container starts, health check passes.
+
+### 6.3 Helm charts
+```bash
+cd charts && helm lint charts/vexa/ && helm lint charts/vexa-lite/
+```
+**Verify:** No lint errors. Template rendering with default values succeeds.
+
+### 6.4 Version consistency
+**Verify:** Docker image tags, Helm chart versions, and package.json versions are consistent.
+
+### Phase 6 Gate
+**All builds succeed. Helm lint passes.**
+
+---
+
+## Phase 7: Audit (code, not runtime)
+
+```bash
+make audit    # security + config + architecture + staleness
+```
+
+Plus agent-driven:
+- Docs validation (follow every README)
+- Security deep review
+- Dev experience assessment
+
+### 7.1 Security audit
+```bash
+python tests/audit/security_audit.py
+```
+**Look at:** New findings vs last run.
+
+### 7.2 Configuration audit
+```bash
+python tests/audit/config_audit.py
+```
+**Look at:** Undocumented env vars, dev defaults in production config.
+
+### 7.3 Architecture compliance
+```bash
+python tests/audit/architecture_audit.py
+```
+**Look at:** Stateless services, token scoping, durable delivery, self-hostable.
+
+### 7.4 Staleness audit
+```bash
+python tests/audit/staleness_audit.py
+```
+**Look at:** Dead code, orphaned files, stale docs.
+
+### Phase 7 Gate
+**0 errors. Warnings reviewed by human.**
+
+---
+
+## Phase 8: Report to Human
+
+```
+Phase 1: X/Y services pass (N total tests)
+Phase 2: X/Y services healthy
+Phase 3: X/Y functionality chains work
+Phase 4: X/Y UX flows complete
+Phase 5: baselines held / regressed
+Phase 6: X/Y builds succeed
+Phase 7: N new findings, M resolved
+```
+
+**Human decides: commit, fix more, or investigate.**
+
+---
+
+## Key learnings from previous cycles
+
+1. **Audio format matters.** Bot sends Float32Array, not Int16 PCM. Sending wrong format = hallucinated garbage, not an error. Silent corruption.
+2. **Test compose needs exact config.** DNS (`extra_hosts`), API keys matching between services, correct env vars. Budget 3-4 iterations for new test compose files.
+3. **Transcription service LIFO is not a bug.** Under load, it intentionally skips old audio to stay current. "Missing segments" at high concurrency = LIFO working as designed, not silent failure.
+4. **Per-worker queue limit (~20) is the transcription-service bottleneck.** Not GPU, not memory. Software limit.
+5. **GPU memory reported by nvidia-smi is machine-wide.** Filter to per-process: `nvidia-smi --query-compute-apps=pid,used_memory --format=csv`.
+6. **Missing README = failed gate.** Not optional. 4 services were missing READMEs and should have blocked Phase 1.
+7. **DOM is still needed for speaker names.** Audio tracks give you separation, DOM gives you labels. One-time lookup per participant, not continuous polling.
+8. **Edge TTS generates good test audio.** Three distinct neural voices (Jenny, Guy, Sonia), different content, transcribes perfectly. Use for mock meeting dev environment.
+9. **Bot posts directly to transcription-service via HTTP.** The per-speaker pipeline does not need any intermediary.
+10. **Zod schema strips unknown fields.** `docker.ts` uses `BotConfigSchema.parse()` — any field not in the schema is silently dropped from BOT_CONFIG. New config fields MUST be added to the Zod schema or they won't reach the bot code.
+11. **Bot name filtering is required.** `__vexaGetAllParticipantNames()` returns all DOM tiles including the bot itself and UI text ("Let participants send messages"). speaker-identity.ts must filter these before positional mapping to audio elements.
+12. **Draft/confirmed is the latency solution.** Publish drafts (`completed=false`) on every transcription result (~3s latency). Confirmed segments (`completed=true`) replace drafts after stabilization. Both flow through XADD → collector → pub/sub → dashboard. Same Redis hash key (start_time) so drafts update in place.
+13. **Transcription service URL is bot-manager config.** Passed via `BOT_CONFIG.transcriptionServiceUrl` (same pattern as `redisUrl`). Docker containers need `ExtraHosts: host.docker.internal:host-gateway` to reach host services. K8s uses cluster DNS — no ExtraHosts needed.
+14. **Collector must use producer-labeled speaker.** When segment payload includes `speaker` field, collector should use it directly (`PRODUCER_LABELED`) instead of running the overlap-based speaker mapper which picks wrong speaker when multiple are active simultaneously.

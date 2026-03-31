@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(git apply:*)",
+      "Bash(git checkout:*)",
+      "Bash(xxd:*)",
+      "Bash(sed -n '464,474p' diffs/diff-kubernetes-orchestrator.patch)",
+      "Read(//tmp/**)",
+      "Bash(git:*)",
+      "Bash(python3:*)",
+      "Bash(printf \\\\n:*)",
+      "Bash(kubectl logs:*)",
+      "Bash(kubectl get:*)",
+      "Bash(docker build:*)",
+      "Bash(docker push:*)",
+      "Bash(kubectl rollout:*)",
+      "Bash(git diff:*)"
+    ]
+  }
+}

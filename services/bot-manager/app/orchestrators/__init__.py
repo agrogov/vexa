@@ -7,7 +7,6 @@ Supported orchestrators:
 - docker (default): Uses Docker socket to spawn bot containers
 - nomad: Uses HashiCorp Nomad to dispatch parameterized jobs
 - process: Spawns bots as local Node.js processes (for Lite deployments)
-- kubernetes: Spawns bots as Pods via the Kubernetes API
 """
 import os
 import importlib
@@ -40,4 +39,5 @@ start_bot_container = mod.start_bot_container  # type: ignore
 stop_bot_container = getattr(mod, "stop_bot_container", lambda *args, **kwargs: None)
 _record_session_start = getattr(mod, "_record_session_start", lambda *args, **kwargs: None)
 get_running_bots_status = getattr(mod, "get_running_bots_status", lambda *args, **kwargs: {})
-verify_container_running = getattr(mod, "verify_container_running", lambda *args, **kwargs: False) 
+verify_container_running = getattr(mod, "verify_container_running", lambda *args, **kwargs: False)
+start_browser_session_container = getattr(mod, "start_browser_session_container", None)

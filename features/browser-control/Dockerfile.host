@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/playwright:v1.50.0-noble
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb fluxbox x11vnc websockify novnc socat curl \
+    pulseaudio pulseaudio-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+RUN npm init -y && npm install playwright@1.50.0
+
+# Copy WAV test audio files
+COPY features/realtime-transcription/mocks/cache/ /app/audio-cache/
+
+ENV DISPLAY=:99
+EXPOSE 6080 9222 9223
+
+COPY features/browser-control/start.sh /start.sh
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]

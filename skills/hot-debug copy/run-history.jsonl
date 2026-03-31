@@ -1,0 +1,12 @@
+{"ts":"2026-03-18T10:04:10.307Z","run":1,"pass":true,"totalMs":129880,"admitMs":120331,"admitCount":11,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:09:55.127Z","run":1,"pass":true,"totalMs":38359,"admitMs":25811,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:11:03.388Z","run":1,"pass":true,"totalMs":36657,"admitMs":25366,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:11:44.542Z","run":2,"pass":true,"totalMs":38153,"admitMs":25377,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:12:24.642Z","run":3,"pass":true,"totalMs":37100,"admitMs":25356,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:13:05.599Z","run":4,"pass":true,"totalMs":37955,"admitMs":25649,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:13:45.567Z","run":5,"pass":true,"totalMs":36968,"admitMs":25235,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:14:25.701Z","run":6,"pass":true,"totalMs":37132,"admitMs":24910,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:15:06.392Z","run":7,"pass":true,"totalMs":37691,"admitMs":24974,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:15:47.270Z","run":8,"pass":true,"totalMs":37877,"admitMs":25516,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:16:28.603Z","run":9,"pass":true,"totalMs":38332,"admitMs":25140,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}
+{"ts":"2026-03-18T10:17:10.205Z","run":10,"pass":true,"totalMs":38602,"admitMs":25252,"admitCount":2,"speakOk":true,"idleSilent":false,"speakingDetected":true,"silentAfter":false,"meetingId":"9349463533815"}

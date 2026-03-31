@@ -8,10 +8,6 @@ import time
 import logging
 import asyncio
 import json
-import ctypes
-import glob as _glob
-import subprocess
-import httpx
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
@@ -79,14 +75,16 @@ def _env_float(name: str, default: float) -> float:
         logger.warning(f"Invalid float env {name}={raw!r}, using default {default}")
         return default
 
-# WhisperLive-inspired defaults (can be overridden via env)
+# Transcription defaults (can be overridden via env)
 BEAM_SIZE = _env_int("BEAM_SIZE", 5)
 BEST_OF = _env_int("BEST_OF", 5)
-COMPRESSION_RATIO_THRESHOLD = _env_float("COMPRESSION_RATIO_THRESHOLD", 2.4)
+COMPRESSION_RATIO_THRESHOLD = _env_float("COMPRESSION_RATIO_THRESHOLD", 1.8)
 LOG_PROB_THRESHOLD = _env_float("LOG_PROB_THRESHOLD", -1.0)
 NO_SPEECH_THRESHOLD = _env_float("NO_SPEECH_THRESHOLD", 0.6)
-CONDITION_ON_PREVIOUS_TEXT = _env_bool("CONDITION_ON_PREVIOUS_TEXT", True)
-PROMPT_RESET_ON_TEMPERATURE = _env_float("PROMPT_RESET_ON_TEMPERATURE", 0.5)
+CONDITION_ON_PREVIOUS_TEXT = _env_bool("CONDITION_ON_PREVIOUS_TEXT", False)
+PROMPT_RESET_ON_TEMPERATURE = _env_float("PROMPT_RESET_ON_TEMPERATURE", 0.3)
+REPETITION_PENALTY = _env_float("REPETITION_PENALTY", 1.1)
+NO_REPEAT_NGRAM_SIZE = _env_int("NO_REPEAT_NGRAM_SIZE", 3)
 
 # VAD parameters
 VAD_FILTER = _env_bool("VAD_FILTER", True)
@@ -96,16 +94,6 @@ VAD_MIN_SILENCE_DURATION_MS = _env_int("VAD_MIN_SILENCE_DURATION_MS", 160)
 # Temperature fallback chain
 USE_TEMPERATURE_FALLBACK = _env_bool("USE_TEMPERATURE_FALLBACK", False)
 TEMPERATURE_FALLBACK_CHAIN = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
-AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-03-01-preview").strip()
-REMOTE_ONLY = os.getenv("REMOTE_TRANSCRIBER_ONLY", "").strip().lower() in ("1", "true", "yes", "y", "on")
-
-def _remote_enabled() -> bool:
-    if REMOTE_ONLY:
-        return True
-    return bool(AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY)
 
 def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
     """Heuristic: treat as silence if all segments look like no-speech."""
@@ -118,119 +106,6 @@ def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
         ):
             return False
     return True
-
-# Azure OpenAI: gpt-4o-transcribe deployments
-def _use_azure_transcribe(model_name: str) -> bool:
-    name = (model_name or "").strip().lower()
-    return name.startswith("gpt-4o-") and "transcribe" in name
-
-async def _transcribe_via_azure(
-    model_name: str,
-    audio_bytes: bytes,
-    filename: str,
-    content_type: str,
-    language: Optional[str],
-    prompt: Optional[str],
-    response_format: str,
-    temperature: str,
-    timestamp_granularities: str,
-    task: str,
-) -> Dict[str, Any]:
-    if not AZURE_OPENAI_ENDPOINT or not AZURE_OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="Azure OpenAI transcription requested but AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_API_KEY not configured",
-        )
-
-    url = (
-        f"{AZURE_OPENAI_ENDPOINT}/openai/deployments/{model_name}/audio/transcriptions"
-        f"?api-version={AZURE_OPENAI_API_VERSION}"
-    )
-
-    files: List[tuple[str, Tuple[Optional[str], Any, Optional[str]]]] = [
-        (
-            "file",
-            (
-                filename or "audio",
-                audio_bytes,
-                content_type or "application/octet-stream",
-            ),
-        ),
-        ("model", (None, model_name, None)),
-        ("response_format", (None, response_format, None)),
-        ("task", (None, task, None)),
-    ]
-    if language:
-        files.append(("language", (None, language, None)))
-    if prompt:
-        files.append(("prompt", (None, prompt, None)))
-    if temperature:
-        files.append(("temperature", (None, temperature, None)))
-    if timestamp_granularities and response_format == "verbose_json":
-        # Azure expects array-like keys for timestamp granularities.
-        files.append(("timestamp_granularities[]", (None, timestamp_granularities, None)))
-
-    headers = {"api-key": AZURE_OPENAI_API_KEY}
-
-    def _post_sync() -> httpx.Response:
-        with httpx.Client(timeout=60.0) as client:
-            return client.post(url, files=files, headers=headers)
-
-    resp = await asyncio.to_thread(_post_sync)
-    if resp.status_code != 200:
-        logger.error(
-            "Azure OpenAI transcription failed: status=%s body=%s",
-            resp.status_code,
-            resp.text,
-        )
-        raise HTTPException(
-            status_code=resp.status_code,
-            detail=f"Azure OpenAI transcription failed: {resp.text}",
-        )
-    result = resp.json()
-
-    # Azure "json" response does not include segments; synthesize a single segment so
-    # downstream consumers (WhisperLive/collector/UI) can display live text.
-    if (
-        isinstance(result, dict)
-        and "segments" not in result
-        and "text" in result
-        and str(result.get("text", "")).strip()
-    ):
-        duration = 0.0
-        try:
-            audio_array, sample_rate = sf.read(io.BytesIO(audio_bytes), dtype=np.float32)
-            duration = float(audio_array.shape[0]) / float(sample_rate or 1)
-        except Exception:
-            duration = 0.0
-        text = result.get("text", "")
-        language = result.get("language") or language
-        temperature_val = float(temperature) if temperature else 0.0
-        result = {
-            "text": text,
-            "language": language,
-            "duration": duration,
-            "segments": [
-                {
-                    "id": 0,
-                    "seek": 0,
-                    "start": 0.0,
-                    "end": duration,
-                    "text": text,
-                    "tokens": [],
-                    "temperature": temperature_val,
-                    "avg_logprob": 0.0,
-                    "compression_ratio": 0.0,
-                    "no_speech_prob": 0.0,
-                    "audio_start": 0.0,
-                    "audio_end": duration,
-                    "completed": True,
-                    "language": language,
-                }
-            ],
-        }
-
-    return result
 
 def _looks_like_hallucination(segments: List[Dict[str, Any]]) -> bool:
     """Heuristic: reject segments that look like hallucinations / low-confidence."""
@@ -292,7 +167,7 @@ MAX_QUEUE_SIZE = _env_int("MAX_QUEUE_SIZE", 10)  # Max requests waiting in queue
 
 # Backpressure strategy:
 # - If FAIL_FAST_WHEN_BUSY=true, we do NOT wait in a queue; we immediately return 503 so callers
-#   (e.g. WhisperLive) can keep buffering and submit a newer/larger window later.
+#   callers can keep buffering and submit a newer/larger window later.
 FAIL_FAST_WHEN_BUSY = _env_bool("FAIL_FAST_WHEN_BUSY", True)
 BUSY_RETRY_AFTER_S = _env_int("BUSY_RETRY_AFTER_S", 1)
 REALTIME_RESERVED_SLOTS = _env_int("REALTIME_RESERVED_SLOTS", 1)
@@ -325,131 +200,25 @@ def _deferred_capacity_available(active_rt: int, active_df: int) -> bool:
     return deferred_limit > 0 and active_df < deferred_limit and total_active < MAX_CONCURRENT_TRANSCRIPTIONS
 
 
-def _log_cuda_diagnostics():
-    """Log CUDA environment details to help diagnose GPU/library issues."""
-    logger.info("=== CUDA Diagnostics ===")
-
-    # Python & package versions
-    import sys
-    logger.info(f"Python: {sys.version}")
-    try:
-        import ctranslate2
-        logger.info(f"ctranslate2: {ctranslate2.__version__}, CUDA support: {ctranslate2.get_cuda_device_count() > 0}, devices: {ctranslate2.get_cuda_device_count()}")
-    except Exception as e:
-        logger.warning(f"ctranslate2 import failed: {e}")
-    try:
-        import faster_whisper
-        logger.info(f"faster_whisper: {faster_whisper.__version__}")
-    except Exception as e:
-        logger.warning(f"faster_whisper version unavailable: {e}")
-
-    # Environment
-    logger.info(f"LD_LIBRARY_PATH: {os.getenv('LD_LIBRARY_PATH', '(not set)')}")
-    logger.info(f"CUDA_VISIBLE_DEVICES: {os.getenv('CUDA_VISIBLE_DEVICES', '(not set)')}")
-
-    # nvidia-smi full output
-    try:
-        smi = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=5)
-        if smi.returncode == 0:
-            for line in smi.stdout.splitlines():
-                logger.info(f"nvidia-smi: {line}")
-        else:
-            logger.warning(f"nvidia-smi failed: {smi.stderr.strip()}")
-    except Exception as e:
-        logger.warning(f"nvidia-smi unavailable: {e}")
-
-    # CUDA runtime version from libcudart
-    try:
-        cudart = ctypes.CDLL("libcudart.so.12")
-        version = ctypes.c_int(0)
-        cudart.cudaRuntimeGetVersion(ctypes.byref(version))
-        v = version.value
-        logger.info(f"CUDA runtime version: {v // 1000}.{(v % 1000) // 10}")
-    except Exception as e:
-        logger.warning(f"libcudart.so.12 not loadable: {e}")
-
-    # ctranslate2 package dir
-    try:
-        import ctranslate2 as _ct2
-        ct2_dir = os.path.dirname(_ct2.__file__)
-        ct2_libs = _glob.glob(os.path.join(ct2_dir, "*.so*"))
-        logger.info(f"ctranslate2 package dir: {ct2_dir}")
-        logger.info(f"ctranslate2 bundled libs: {[os.path.basename(p) for p in ct2_libs]}")
-    except Exception as e:
-        logger.warning(f"Could not inspect ctranslate2 package dir: {e}")
-
-    # nvidia pip packages — use glob since __file__ is None for namespace packages
-    nvidia_lib_dirs = _glob.glob("/usr/local/lib/python*/site-packages/nvidia/*/lib")
-    if nvidia_lib_dirs:
-        for lib_dir in sorted(nvidia_lib_dirs):
-            libs = [os.path.basename(p) for p in _glob.glob(os.path.join(lib_dir, "*.so*"))]
-            logger.info(f"nvidia pip lib dir: {lib_dir} → {libs}")
-    else:
-        logger.warning("No nvidia pip lib dirs found (nvidia-cublas-cu12 / nvidia-cuda-runtime-cu12 not installed)")
-
-    # Check critical shared libraries
-    for lib in ["libcublas.so.12", "libcublasLt.so.12", "libcudart.so.12", "libcufft.so.11"]:
-        found = _glob.glob(f"/usr/lib/**/{lib}", recursive=True) + \
-                _glob.glob(f"/usr/local/cuda/**/{lib}", recursive=True) + \
-                _glob.glob(f"/usr/local/lib/**/{lib}", recursive=True)
-        if found:
-            logger.info(f"  {lib}: found at {found[0]}")
-        else:
-            # Try ctypes as a last resort (respects LD_LIBRARY_PATH)
-            try:
-                ctypes.CDLL(lib)
-                logger.info(f"  {lib}: loadable via LD_LIBRARY_PATH")
-            except Exception:
-                logger.warning(f"  {lib}: NOT FOUND")
-
-    logger.info("=== End CUDA Diagnostics ===")
-
-
-def _preload_cuda_libs():
-    """Preload CUDA shared libraries with RTLD_GLOBAL so ctranslate2's lazy dlopen finds them."""
-    # Order matters: cudart first, then cublas dependencies, then cublas
-    candidates = [
-        # nvidia pip package paths (nvidia-cuda-runtime-cu12, nvidia-cublas-cu12)
-        "/usr/local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12",
-        "/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib/libcublasLt.so.12",
-        "/usr/local/lib/python3.10/site-packages/nvidia/cublas/lib/libcublas.so.12",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
-                logger.info(f"Preloaded CUDA lib: {path}")
-            except Exception as e:
-                logger.warning(f"Failed to preload {path}: {e}")
-        else:
-            logger.warning(f"CUDA lib not found for preload: {path}")
-
-
 @app.on_event("startup")
 async def startup_event():
     """Initialize Whisper model on startup"""
     global model
     logger.info(f"Worker {WORKER_ID} starting up...")
-    _log_cuda_diagnostics()
-
-    if _remote_enabled():
-        logger.info("Remote transcriber enabled; skipping local model load.")
-        return
-
-    _preload_cuda_libs()
-
+    logger.info(f"Device: {DEVICE}, Model: {MODEL_SIZE}, Compute: {COMPUTE_TYPE}")
+    logger.info(
+        "Quality params - "
+        f"beam_size={BEAM_SIZE}, best_of={BEST_OF}, "
+        f"cond_prev_text={CONDITION_ON_PREVIOUS_TEXT}, "
+        f"compression_ratio_threshold={COMPRESSION_RATIO_THRESHOLD}, "
+        f"log_prob_threshold={LOG_PROB_THRESHOLD}, "
+        f"no_speech_threshold={NO_SPEECH_THRESHOLD}, "
+        f"vad_filter={VAD_FILTER}, "
+        f"repetition_penalty={REPETITION_PENALTY}, "
+        f"no_repeat_ngram_size={NO_REPEAT_NGRAM_SIZE}"
+    )
+    
     try:
-        logger.info(f"Device: {DEVICE}, Model: {MODEL_SIZE}, Compute: {COMPUTE_TYPE}")
-        logger.info(
-            "Quality params - "
-            f"beam_size={BEAM_SIZE}, best_of={BEST_OF}, "
-            f"cond_prev_text={CONDITION_ON_PREVIOUS_TEXT}, "
-            f"compression_ratio_threshold={COMPRESSION_RATIO_THRESHOLD}, "
-            f"log_prob_threshold={LOG_PROB_THRESHOLD}, "
-            f"no_speech_threshold={NO_SPEECH_THRESHOLD}, "
-            f"vad_filter={VAD_FILTER}"
-        )
-
         # Build model initialization parameters
         model_kwargs = {
             "model_size_or_path": MODEL_SIZE,
@@ -473,22 +242,20 @@ async def startup_event():
 @app.get("/health")
 async def health_check():
     """Health check endpoint for load balancer"""
-    remote_enabled = _remote_enabled()
     health_status = {
-        "status": "healthy" if (model is not None or remote_enabled) else "unhealthy",
+        "status": "healthy" if model is not None else "unhealthy",
         "worker_id": WORKER_ID,
         "timestamp": datetime.utcnow().isoformat(),
         "model": MODEL_SIZE,
         "device": DEVICE,
         "gpu_available": DEVICE == "cuda",
-        "remote_enabled": remote_enabled,
     }
     
     if DEVICE == "cuda":
         # CTranslate2 (via faster-whisper) handles GPU automatically
         health_status["compute_type"] = COMPUTE_TYPE
     
-    if model is None and not remote_enabled:
+    if model is None:
         return JSONResponse(content=health_status, status_code=503)
     
     return health_status
@@ -590,27 +357,6 @@ async def transcribe_audio(
         # Read audio file
         audio_bytes = await file.read()
         logger.info(f"Worker {WORKER_ID} read {len(audio_bytes)} bytes of audio data")
-
-        if _use_azure_transcribe(requested_model):
-            # Azure gpt-4o-*-transcribe does not support verbose_json; force json and drop timestamps.
-            azure_response_format = "json"
-            return await _transcribe_via_azure(
-                requested_model,
-                audio_bytes,
-                file.filename or "audio",
-                file.content_type or "application/octet-stream",
-                language,
-                prompt,
-                azure_response_format,
-                temperature,
-                "",
-                task,
-            )
-        if model is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Local model not available and requested model is not remote-capable.",
-            )
         
         # Convert to format suitable for faster-whisper
         # Use soundfile to properly decode audio formats (WAV, MP3, etc.)
@@ -659,6 +405,8 @@ async def transcribe_audio(
                     no_speech_threshold=NO_SPEECH_THRESHOLD,
                     condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
                     prompt_reset_on_temperature=PROMPT_RESET_ON_TEMPERATURE,
+                    repetition_penalty=REPETITION_PENALTY,
+                    no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
                     vad_filter=VAD_FILTER,
                     vad_parameters={
                         "threshold": VAD_FILTER_THRESHOLD,
@@ -693,7 +441,7 @@ async def transcribe_audio(
             last_segments = segments
 
             if _looks_like_silence(segments):
-                best = ("", info.language, 0.0, [])
+                best = ("", info.language, getattr(info, 'language_probability', 0.0), 0.0, [])
                 logger.info(f"Worker {WORKER_ID} detected silence (temp={t})")
                 break
 
@@ -702,7 +450,7 @@ async def transcribe_audio(
             if not is_hallucination:
                 full_text = " ".join([s["text"].strip() for s in segments]).strip()
                 duration = segments[-1]["end"] if segments else 0.0
-                best = (full_text, info.language, duration, segments)
+                best = (full_text, info.language, getattr(info, 'language_probability', 0.0), duration, segments)
                 logger.info(f"Worker {WORKER_ID} accepted transcription (temp={t})")
                 break
             else:
@@ -714,10 +462,11 @@ async def transcribe_audio(
             segments = last_segments
             full_text = " ".join([s["text"].strip() for s in segments]).strip()
             duration = segments[-1]["end"] if segments else 0.0
-            best = (full_text, info.language if info else language, duration, segments)
+            lang_prob = getattr(info, 'language_probability', 0.0) if info else 0.0
+            best = (full_text, info.language if info else (language or "unknown"), lang_prob, duration, segments)
 
-        full_text, detected_language, duration, segments = best
-        logger.info(f"Worker {WORKER_ID} transcription completed - language: {detected_language}")
+        full_text, detected_language, detected_language_probability, duration, segments = best
+        logger.info(f"Worker {WORKER_ID} transcription completed - language: {detected_language}, language_probability: {detected_language_probability}")
         
         processing_time = time.time() - start_time
         logger.info(
@@ -729,6 +478,7 @@ async def transcribe_audio(
         response = {
             "text": full_text,
             "language": detected_language,
+            "language_probability": detected_language_probability,
             "duration": duration,
             "segments": segments,
         }

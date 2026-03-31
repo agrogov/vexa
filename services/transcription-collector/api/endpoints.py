@@ -227,8 +227,20 @@ async def _get_full_transcript_segments(
             if 'end_time' in segment_data and 'text' in segment_data and session_uid_from_redis and session_start:
                 if session_start.tzinfo is None:
                     session_start = session_start.replace(tzinfo=timezone.utc)
-                relative_start_time = float(start_time_str)
-                absolute_start_time = session_start + timedelta(seconds=relative_start_time)
+                # Hash key is segment_id (string); get start_time from segment data
+                relative_start_time = float(segment_data.get("start_time", 0))
+                # Use absolute_start_time from segment data if available (bot publishes UTC directly)
+                abs_from_data = segment_data.get("absolute_start_time")
+                if abs_from_data:
+                    try:
+                        abs_str = abs_from_data if not abs_from_data.endswith('Z') else abs_from_data[:-1] + '+00:00'
+                        absolute_start_time = datetime.fromisoformat(abs_str)
+                        if absolute_start_time.tzinfo is None:
+                            absolute_start_time = absolute_start_time.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        absolute_start_time = session_start + timedelta(seconds=relative_start_time)
+                else:
+                    absolute_start_time = session_start + timedelta(seconds=relative_start_time)
                 absolute_end_time = session_start + timedelta(seconds=segment_data['end_time'])
                 # Parse created_at from updated_at if available, otherwise use None
                 # Pydantic v2 requires Optional fields to be explicitly set, even if None
@@ -494,6 +506,8 @@ async def get_transcript_by_native_id(
     response_data["recordings"] = (meeting.data or {}).get("recordings", []) if isinstance(meeting.data, dict) else []
     # Surface user-provided meeting notes (stored in meeting.data).
     response_data["notes"] = (meeting.data or {}).get("notes") if isinstance(meeting.data, dict) else None
+    # Surface raw speaker events for API consumers (deferred transcription, exports).
+    response_data["speaker_events"] = (meeting.data or {}).get("speaker_events", []) if isinstance(meeting.data, dict) else []
     response_data["segments"] = sorted_segments
     return TranscriptionResponse(**response_data)
 

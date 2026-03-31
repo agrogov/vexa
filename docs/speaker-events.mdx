@@ -1,0 +1,95 @@
+---
+title: "Speaker Events"
+---
+Speaker events track participant lifecycle in a meeting — when someone joins, starts speaking, stops speaking, and leaves. These events power speaker attribution in transcripts and are available in the API response.
+
+## Event Types
+
+| Event | Stream Value | Meaning |
+|-------|-------------|---------|
+| Joined / started speaking | `SPEAKER_START` | A participant began producing audio (or was first detected) |
+| Stopped speaking / left | `SPEAKER_END` | A participant stopped producing audio (or left the meeting) |
+
+The bot derives these events from **audio track activity** (VAD on real audio), not from polling CSS class changes. This gives more accurate timing than DOM-only approaches.
+
+## How They Appear in the API
+
+Speaker events are included in the transcript response under the `speaker_events` array:
+
+```bash
+curl "$API_BASE/transcripts/google_meet/abc-defg-hij" \
+  -H "X-API-Key: $API_KEY"
+```
+
+```json
+{
+  "platform": "google_meet",
+  "native_meeting_id": "abc-defg-hij",
+  "status": "completed",
+  "speaker_events": [
+    {
+      "uid": "session-uid-123",
+      "relative_timestamp_ms": 5000,
+      "event_type": "SPEAKER_START",
+      "participant_name": "Alice"
+    },
+    {
+      "uid": "session-uid-123",
+      "relative_timestamp_ms": 15000,
+      "event_type": "SPEAKER_END",
+      "participant_name": "Alice"
+    },
+    {
+      "uid": "session-uid-123",
+      "relative_timestamp_ms": 12000,
+      "event_type": "SPEAKER_START",
+      "participant_name": "Bob"
+    }
+  ],
+  "segments": [...]
+}
+```
+
+### Event Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `uid` | string | Session UID — links events to a specific bot session |
+| `relative_timestamp_ms` | number | Milliseconds since the bot's audio capture started |
+| `event_type` | string | `SPEAKER_START` or `SPEAKER_END` |
+| `participant_name` | string | The speaker's display name as resolved from the meeting DOM |
+
+## Redis Stream
+
+The bot publishes speaker events to the `speaker_events_relative` Redis stream with flat fields (not wrapped in a JSON payload like transcription segments):
+
+```
+XADD speaker_events_relative * uid <session_uid> relative_client_timestamp_ms 5000 event_type SPEAKER_START participant_name "Alice" meeting_id "42"
+```
+
+The transcription collector reads this stream and stores events in a **Redis Sorted Set** keyed by session UID (`speaker_events:<session_uid>`), with the timestamp as the score. This allows efficient range queries during speaker-to-segment mapping.
+
+## How Events Relate to Transcription
+
+Speaker events are used in two contexts:
+
+### 1. Live Transcription (Real-Time)
+
+During a live meeting, the transcription collector uses speaker events to map transcript segments to speakers. When a segment arrives without a pre-labeled speaker (e.g., from the Teams mixed-audio pipeline), the collector queries the speaker events sorted set to find which speaker was active during that segment's time range.
+
+For Google Meet, segments arrive **pre-labeled** with the speaker name from the per-speaker pipeline, so the collector uses the `PRODUCER_LABELED` path and does not need to consult speaker events.
+
+### 2. Deferred Transcription (Post-Meeting)
+
+When you trigger [deferred transcription](deferred-transcription), the stored speaker events from `meeting.data.speaker_events` are used to map speakers to the newly generated transcript segments. The mapping logic finds the speaker with the most temporal overlap for each segment.
+
+<Info>
+Speaker events are persisted in `meeting.data.speaker_events` when the meeting completes, so they remain available even after the Redis sorted set expires (2-hour TTL).
+</Info>
+
+## Related
+
+- [Per-Speaker Audio Architecture](per-speaker-audio) — how audio capture differs across platforms
+- [Deferred Transcription](deferred-transcription) — how speaker events are used for post-meeting transcription
+- [Core Concepts](concepts) — transcript segments and timing
+- [Transcripts API](api/transcripts) — retrieving transcripts with speaker events
