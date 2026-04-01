@@ -1,0 +1,103 @@
+{{- if .Values.decisionListener.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vexa.componentName" (list . "decision-listener") }}
+  labels:
+    {{- include "vexa.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.decisionListener.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vexa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: decision-listener
+  template:
+    metadata:
+      labels:
+        {{- include "vexa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: decision-listener
+      annotations:
+        {{- toYaml .Values.global.podAnnotations | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: decision-listener
+          securityContext:
+            {{- toYaml .Values.global.securityContext | nindent 12 }}
+          image: "{{ .Values.decisionListener.image.repository }}:{{ .Values.decisionListener.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.decisionListener.service.port }}
+          env:
+            - name: REDIS_HOST
+              value: {{ include "vexa.redisHost" . | quote }}
+            - name: REDIS_PORT
+              value: {{ include "vexa.redisPort" . | quote }}
+            - name: PUBSUB_CHANNEL_PATTERN
+              value: {{ .Values.decisionListener.config.pubsubChannelPattern | quote }}
+            - name: WINDOW_SEGMENTS
+              value: {{ .Values.decisionListener.config.windowSegments | quote }}
+            - name: OFFSET_SEGMENTS
+              value: {{ .Values.decisionListener.config.offsetSegments | quote }}
+            - name: DEBOUNCE_MS
+              value: {{ .Values.decisionListener.config.debounceMs | quote }}
+            - name: LLM_MODEL
+              value: {{ .Values.decisionListener.llm.model | quote }}
+            - name: LLM_BASE_URL
+              value: {{ .Values.decisionListener.llm.baseUrl | quote }}
+            - name: DECISIONS_TTL
+              value: {{ .Values.decisionListener.config.decisionsTtlSeconds | quote }}
+            {{- if .Values.decisionListener.llm.openaiApiKey }}
+            - name: OPENAI_API_KEY
+              value: {{ .Values.decisionListener.llm.openaiApiKey | quote }}
+            {{- else if and .Values.decisionListener.extraSecretName .Values.decisionListener.extraSecretEnv }}
+            {{- range $name, $key := .Values.decisionListener.extraSecretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.decisionListener.extraSecretName | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- else if .Values.secrets.existingSecretName }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecretName | quote }}
+                  key: OPENAI_API_KEY
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.decisionListener.logLevel | quote }}
+            {{- with .Values.decisionListener.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.decisionListener.resources | nindent 12 }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

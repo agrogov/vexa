@@ -91,6 +91,8 @@ spec:
             - name: REDIS_SPEAKER_EVENT_TTL
               value: {{ .Values.transcriptionCollector.config.redisSpeakerEventTtlSeconds | quote }}
 
+            - name: LOG_LEVEL
+              value: {{ .Values.transcriptionCollector.logLevel | quote }}
             {{- with .Values.transcriptionCollector.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

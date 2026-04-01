@@ -66,6 +66,7 @@ adminApi:
   service:
     type: ClusterIP
     port: 8001
+  logLevel: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
   resources:
     requests:
       cpu: 100m
@@ -84,6 +85,7 @@ botManager:
   service:
     type: ClusterIP
     port: 8080
+  logLevel: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 
   # Orchestrator mode:
   # - process: spawns bots as child Node.js processes (no Docker socket; designed for Lite/all-in-one images)
@@ -133,6 +135,113 @@ botManager:
         cpu: "1000m"       # 4x headroom for browser spikes
         memory: "1Gi"      # ~1.7x headroom
 
+  # ---------------------------------------------------------------------------
+  # Remote / external transcription service
+  #
+  # When transcriptionService.enabled=true the URL is auto-generated to point
+  # at the in-cluster transcription-service Pod.  Override any of these to
+  # route bots to an external GPU host instead.
+  #
+  # URL
+  #   Leave empty → auto-generated: http://<release>-vexa-transcription-service.<ns>.svc.cluster.local:8000/v1/audio/transcriptions
+  #   Set explicitly for an external host:
+  #     transcriptionServiceUrl: "http://gpu-host.internal:8000/v1/audio/transcriptions"
+  transcriptionServiceUrl: ""
+
+  # Auth token — three options (evaluated top-to-bottom, first match wins):
+  #
+  #   Option 1 – plain text (dev/test only, value lands in values.yaml or --set):
+  #     transcriptionServiceToken: "sk-..."
+  #
+  #   Option 2 – reference a key in an existing Kubernetes Secret (recommended):
+  #     transcriptionServiceSecretName: "my-gpu-credentials"   # omit to use secrets.existingSecretName
+  #     transcriptionServiceTokenSecretKey: "GPU_TRANSCRIBER_API_KEY"
+  #
+  #   Option 3 – bake the token into the chart-managed secret via secrets.transcriberApiKey.
+  #              The key name is always TRANSCRIBER_API_KEY in that case.
+  #
+  # Defaults (no token configured → TRANSCRIPTION_SERVICE_TOKEN env var is not injected):
+  transcriptionServiceToken: ""
+  transcriptionServiceSecretName: ""       # defaults to secrets.existingSecretName when blank
+  transcriptionServiceTokenSecretKey: "TRANSCRIBER_API_KEY"  # key to read from the secret
+
+  # ---------------------------------------------------------------------------
+  # Zoom OAuth app credentials
+  #
+  # These are the app-level credentials for your Zoom OAuth app — NOT per-user
+  # credentials. Every user authenticates their own Zoom account via the OAuth
+  # consent flow in the dashboard; bot-manager uses these shared credentials to
+  # refresh per-user tokens and mint OBF tokens for each bot.
+  #
+  # How to obtain:
+  #   1. Go to https://marketplace.zoom.us/ → Develop → Build App → General App
+  #   2. Select management model: "User-managed" (recommended) or "Admin-managed"
+  #   3. Enable Features → Embed → Meeting SDK
+  #   4. Set the OAuth redirect URL to: https://<your-domain>/auth/zoom/callback
+  #   5. Copy the Client ID and Client Secret from the App Credentials page
+  #   See: docs/zoom-app-setup.mdx for the full setup guide
+  #
+  # Note: Zoom bot joins only work when these are configured. If not set,
+  #       launching a Zoom bot will fail with a descriptive error at request time.
+  #       Non-Zoom bots (Google Meet, MS Teams) are completely unaffected.
+  #
+  #   Option 1 – plain text (dev/test only):
+  #     zoom:
+  #       clientId: "my-client-id"
+  #       clientSecret: "my-client-secret"
+  #
+  #   Option 2 – reference an existing Kubernetes Secret (recommended):
+  #     If existingSecretName is empty, falls back to secrets.existingSecretName
+  #     (the common shared secret used across the chart). Override only if your
+  #     Zoom credentials live in a separate secret.
+  #     zoom:
+  #       existingSecretName: ""              # defaults to secrets.existingSecretName
+  #       clientIdKey: "ZOOM_CLIENT_ID"       # key inside the secret
+  #       clientSecretKey: "ZOOM_CLIENT_SECRET"
+  zoom:
+    clientId: ""
+    clientSecret: ""
+    existingSecretName: ""        # defaults to secrets.existingSecretName when blank
+    clientIdKey: "ZOOM_CLIENT_ID"
+    clientSecretKey: "ZOOM_CLIENT_SECRET"
+
+  # ---------------------------------------------------------------------------
+  # TTS service URL (only injected when ttsService.enabled=true)
+  #
+  #   Leave empty → auto-generated: http://<release>-vexa-tts-service.<ns>.svc.cluster.local:<port>
+  #   Set explicitly to route bots to an external TTS host:
+  #     ttsServiceUrl: "http://tts-host.internal:8059"
+  ttsServiceUrl: ""
+
+  # ---------------------------------------------------------------------------
+  # Bot lifecycle
+  #
+  # botStopDelaySeconds: grace period between stop request and the bot container
+  #   actually being killed. Gives the bot time to flush recordings and send
+  #   final webhooks before termination. Code default: 90.
+  botStopDelaySeconds: 90
+
+  # ---------------------------------------------------------------------------
+  # Recording defaults
+  #
+  # These set the deployment-wide defaults. Individual API requests can override
+  # them per meeting via the recording config in the bot launch payload.
+  #
+  # recording.enabled:
+  #   Auto-derived when not set (null):
+  #     true  — when minioConfig.enabled=true (in-cluster MinIO or external S3)
+  #     false — when minioConfig.enabled=false (no storage configured)
+  #   Override explicitly to force a value regardless of storage config:
+  #     recording:
+  #       enabled: true   # force on even without minioConfig (e.g. local storage)
+  #       enabled: false  # force off even when minioConfig is enabled
+  #
+  # recording.captureModes: comma-separated list of capture modes.
+  #   Valid values: audio, video, screen  (default: "audio")
+  recording:
+    enabled: null   # null = auto-derive from minioConfig.enabled
+    captureModes: "audio"
+
   resources:
     requests:
       cpu: 200m
@@ -151,6 +260,7 @@ transcriptionCollector:
   service:
     type: ClusterIP
     port: 8000
+  logLevel: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
   resources:
     requests:
       cpu: 200m
@@ -211,6 +321,37 @@ mcp:
       memory: 1Gi
   extraEnv: []
 
+ttsService:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: vexa/tts-service
+    tag: local
+  service:
+    type: ClusterIP
+    port: 8059
+  logLevel: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  config:
+    piperVoicesDir: "/app/voices"
+    defaultVoices: "en_US-amy-medium,en_US-danny-low"
+    outputSampleRate: "24000"
+  auth:
+    apiToken: ""           # plain-text token; prefer existingSecretName for production
+    existingSecretName: ""
+    secretKey: "TTS_API_TOKEN"
+  persistence:
+    enabled: true
+    size: 2Gi              # voice model cache (~200 MB per voice)
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  extraEnv: []
+
 dashboard:
   enabled: false
   replicaCount: 1
@@ -241,6 +382,43 @@ dashboard:
     host: ""
     tls: []
 
+decisionListener:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: vexa/decision-listener
+    tag: local
+  service:
+    type: ClusterIP
+    port: 8765
+  logLevel: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  # Public URL of the decision-listener, injected into the dashboard as
+  # NEXT_PUBLIC_DECISION_LISTENER_URL so the browser can connect to it directly.
+  # Must be a URL reachable from the end-user's browser (not an in-cluster address).
+  # Defaults to "http://localhost:8765" when left empty (dev only).
+  # Example: "https://your-domain.com/vexa/decision-tracker"
+  publicUrl: ""
+  config:
+    pubsubChannelPattern: "tc:meeting:*:mutable"
+    windowSegments: 30
+    offsetSegments: 1
+    debounceMs: 800
+    decisionsTtlSeconds: 7200
+  llm:
+    model: "gpt-4.1-mini"
+    baseUrl: ""
+    openaiApiKey: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  extraEnv: []
+  extraSecretName: ""
+  extraSecretEnv: {}
+
 migrations:
   enabled: false
   backoffLimit: 3
@@ -254,6 +432,14 @@ migrations:
     limits:
       cpu: 200m
       memory: 256Mi
+
+# Shared MinIO/S3 config (used by bot-manager for recording storage)
+minioConfig:
+  enabled: false          # set to true to inject MINIO_* env vars into bot-manager
+  storageBackend: "minio" # "minio", "s3", or "local"
+  endpoint: ""            # auto-filled if minio.enabled=true, else REQUIRED
+  bucket: "vexa-recordings"
+  useSSL: false
 
 # ---------- Optional bundled dependencies (for dev) ----------
 
@@ -291,6 +477,28 @@ redis:
     limits:
       cpu: 1000m
       memory: 1Gi
+
+minio:
+  enabled: false
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  existingSecretName: ""   # if set, uses this secret; otherwise auto-creates one
+  auth:
+    rootUser: ""       # leave empty to auto-generate
+    rootPassword: ""   # leave empty to auto-generate
+  defaultBucket: "vexa-recordings"
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  persistence:
+    size: 50Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
 
 # ---------- Ingress (optional; exposes api-gateway by default) ----------
 ingress:

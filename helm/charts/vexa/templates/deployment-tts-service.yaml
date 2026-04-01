@@ -1,0 +1,102 @@
+{{- if .Values.ttsService.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vexa.componentName" (list . "tts-service") }}
+  labels:
+    {{- include "vexa.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ttsService.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vexa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: tts-service
+  template:
+    metadata:
+      labels:
+        {{- include "vexa.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tts-service
+      annotations:
+        {{- toYaml .Values.global.podAnnotations | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: tts-service
+          securityContext:
+            {{- toYaml .Values.global.securityContext | nindent 12 }}
+          image: "{{ .Values.ttsService.image.repository }}:{{ .Values.ttsService.image.tag }}"
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ttsService.service.port }}
+          env:
+            {{- with .Values.ttsService.config.piperVoicesDir }}
+            - name: PIPER_VOICES_DIR
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.ttsService.config.defaultVoices }}
+            - name: PIPER_DEFAULT_VOICES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.ttsService.config.outputSampleRate }}
+            - name: TTS_OUTPUT_SAMPLE_RATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.ttsService.auth.apiToken }}
+            - name: TTS_API_TOKEN
+              value: {{ .Values.ttsService.auth.apiToken | quote }}
+            {{- else if .Values.ttsService.auth.existingSecretName }}
+            - name: TTS_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ttsService.auth.existingSecretName | quote }}
+                  key: {{ .Values.ttsService.auth.secretKey | default "TTS_API_TOKEN" | quote }}
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.ttsService.logLevel | quote }}
+            {{- with .Values.ttsService.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- if .Values.ttsService.persistence.enabled }}
+          volumeMounts:
+            - name: voices
+              mountPath: {{ .Values.ttsService.config.piperVoicesDir | default "/app/voices" }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.ttsService.resources | nindent 12 }}
+      {{- if .Values.ttsService.persistence.enabled }}
+      volumes:
+        - name: voices
+          persistentVolumeClaim:
+            claimName: {{ include "vexa.componentName" (list . "tts-voices") }}
+      {{- end }}
+      {{- with .Values.global.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.global.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.global.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

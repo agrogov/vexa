@@ -45,8 +45,6 @@ spec:
               value: {{ default (printf "http://%s:%d" (include "vexa.componentName" (list . "mcp")) (.Values.mcp.service.port | int)) .Values.apiGateway.mcpUrl | quote }}
             - name: REDIS_URL
               value: {{ include "vexa.redisUrl" . | quote }}
-            - name: REDIS_HOST
-              value: {{ include "vexa.redisUrl" . | quote }}
             {{- with .Values.apiGateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

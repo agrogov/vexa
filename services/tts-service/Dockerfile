@@ -1,11 +1,25 @@
-FROM python:3.10-slim
+FROM docker.ib-ci.com/python:3.10-slim
 
-WORKDIR /app
+# Install CA tools (slim images don't always include them)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Infobip Root CA
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+
+# Update CA bundle
+RUN update-ca-certificates
+
+# Set environment variables to ensure Python uses the updated CA bundle
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # piper-tts bundles espeak-ng data, but we need shared libs for onnxruntime
 RUN apt-get update && \
     apt-get install -y --no-install-recommends libgomp1 && \
     rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
 
 COPY services/tts-service/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

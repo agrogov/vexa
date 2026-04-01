@@ -31,6 +31,14 @@ spec:
             {{- toYaml .Values.global.securityContext | nindent 12 }}
           image: "{{ .Values.transcriptionService.image.repository }}:{{ .Values.transcriptionService.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          {{- with .Values.transcriptionService.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.transcriptionService.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: 8000
@@ -43,20 +51,20 @@ spec:
             {{- with .Values.transcriptionService.azure.endpoint }}
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ . | quote }}
-            {{- end }}
-            {{- with .Values.transcriptionService.azure.apiVersion }}
+            {{- with $.Values.transcriptionService.azure.apiVersion }}
             - name: AZURE_OPENAI_API_VERSION
               value: {{ . | quote }}
             {{- end }}
-            {{- if .Values.transcriptionService.azure.apiKey }}
+            {{- if $.Values.transcriptionService.azure.apiKey }}
             - name: AZURE_OPENAI_API_KEY
-              value: {{ .Values.transcriptionService.azure.apiKey | quote }}
-            {{- else if .Values.secrets.existingSecretName }}
+              value: {{ $.Values.transcriptionService.azure.apiKey | quote }}
+            {{- else if $.Values.secrets.existingSecretName }}
             - name: AZURE_OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.secrets.existingSecretName | quote }}
+                  name: {{ $.Values.secrets.existingSecretName | quote }}
                   key: AZURE_OPENAI_API_KEY
+            {{- end }}
             {{- end }}
             {{- with .Values.transcriptionService.extraEnv }}
             {{- toYaml . | nindent 12 }}
@@ -75,15 +83,15 @@ spec:
             periodSeconds: 20
           resources:
             {{- toYaml .Values.transcriptionService.resources | nindent 12 }}
-      {{- with .Values.global.nodeSelector }}
+      {{- with (merge (.Values.transcriptionService.nodeSelector | default dict) .Values.global.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.global.tolerations }}
+      {{- with (concat (.Values.transcriptionService.tolerations | default list) .Values.global.tolerations) }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.global.affinity }}
+      {{- with (merge (.Values.transcriptionService.affinity | default dict) .Values.global.affinity) }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}

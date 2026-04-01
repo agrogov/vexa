@@ -1,0 +1,17 @@
+{{- if and .Values.ttsService.enabled .Values.ttsService.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vexa.componentName" (list . "tts-voices") }}
+  labels:
+    {{- include "vexa.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.ttsService.persistence.size }}
+  {{- if .Values.ttsService.persistence.storageClassName }}
+  storageClassName: {{ .Values.ttsService.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}

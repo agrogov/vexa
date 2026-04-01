@@ -62,6 +62,10 @@ spec:
                   key: {{ $key | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.decisionListener.enabled }}
+            - name: NEXT_PUBLIC_DECISION_LISTENER_URL
+              value: {{ default "http://localhost:8765" .Values.decisionListener.publicUrl | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.dashboard.resources | nindent 12 }}
       {{- with .Values.global.nodeSelector }}

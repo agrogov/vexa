@@ -73,3 +73,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "vexa.minioEndpoint" -}}
+{{- if .Values.minio.enabled -}}
+{{- printf "%s:%d" (include "vexa.componentName" (list . "minio")) (.Values.minio.service.apiPort | int) -}}
+{{- else -}}
+{{- required "minioConfig.endpoint is required when minio.enabled=false and minioConfig.enabled=true" .Values.minioConfig.endpoint -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "vexa.minioSecretName" -}}
+{{- if .Values.minio.existingSecretName -}}
+{{- .Values.minio.existingSecretName -}}
+{{- else -}}
+{{- include "vexa.componentName" (list . "minio-credentials") -}}
+{{- end -}}
+{{- end -}}
+

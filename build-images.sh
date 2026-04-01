@@ -10,7 +10,7 @@ set -euo pipefail
 # - For kind/minikube you may need to load images into the cluster after building.
 
 PROFILE="${1:-cpu}"
-VERSION="v0.6.0"
+VERSION="v0.6.1"
 BASE_REPO="docker.ib-ci.com"
 
 echo "Building Vexa images (PROFILE=$PROFILE, VERSION=$VERSION)"
@@ -32,20 +32,17 @@ echo "Building ${BASE_REPO}/vexa/transcription-collector:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/transcription-collector:${VERSION}" -f services/transcription-collector/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/mcp:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/mcp:${VERSION}" -f services/mcp/Dockerfile .
-echo "Building ${BASE_REPO}/vexa/transcription-service:${VERSION}"
-docker build -t "${BASE_REPO}/vexa/transcription-service:${VERSION}" -f services/transcription-service/Dockerfile.cpu services/transcription-service
 
-# WhisperLive
 if [ "${PROFILE}" == "gpu" ]; then
-  echo "Building ${BASE_REPO}/vexa/whisperlive (GPU version):${VERSION}"
-  docker build -t "${BASE_REPO}/vexa/whisperlive:${VERSION}" -f services/WhisperLive/Dockerfile.project .
+  echo "Building (GPU version) ${BASE_REPO}/vexa/transcription-service:${VERSION}"
+  docker build -t "${BASE_REPO}/vexa/transcription-service:${VERSION}" -f services/transcription-service/Dockerfile services/transcription-service
 else
-  echo "Building ${BASE_REPO}/vexa/whisperlive (CPU version):${VERSION}"
-  docker build -t "${BASE_REPO}/vexa/whisperlive:${VERSION}" -f services/WhisperLive/Dockerfile.cpu .
+  echo "Building (CPU version) ${BASE_REPO}/vexa/transcription-service:${VERSION}"
+  docker build -t "${BASE_REPO}/vexa/transcription-service:${VERSION}" -f services/transcription-service/Dockerfile.cpu services/transcription-service
 fi
 
-echo "Building ${BASE_REPO}/vexa/vexa-lite:${VERSION}"
-docker build -t "${BASE_REPO}/vexa/vexa-lite:${VERSION}" -f docker/lite/Dockerfile.lite .
+echo "Building ${BASE_REPO}/vexa/tts-service:${VERSION}"
+docker build -t "${BASE_REPO}/vexa/tts-service:${VERSION}" -f services/tts-service/Dockerfile .
 
 echo ""
 echo "Done. Images built with ${VERSION} tag."
@@ -61,8 +58,11 @@ docker push "${BASE_REPO}/vexa/decision-listener:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-collector:${VERSION}"
 docker push "${BASE_REPO}/vexa/mcp:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-service:${VERSION}"
-docker push "${BASE_REPO}/vexa/whisperlive:${VERSION}"
-docker push "${BASE_REPO}/vexa/vexa-lite:${VERSION}"
+docker push "${BASE_REPO}/vexa/tts-service:${VERSION}"
+
+#echo "Building ${BASE_REPO}/vexa/vexa-lite:${VERSION}"
+#docker build -t "${BASE_REPO}/vexa/vexa-lite:${VERSION}" -f docker/lite/Dockerfile.lite .
+#docker push "${BASE_REPO}/vexa/vexa-lite:${VERSION}"
 
 echo ""
 echo "All done."

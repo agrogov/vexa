@@ -54,6 +54,8 @@ spec:
             {{- end }}
             - name: BOT_IMAGE_NAME
               value: {{ .Values.botManager.bot.imageName | quote }}
+            - name: BOT_IMAGE_PULL_POLICY
+              value: {{ default .Values.global.imagePullPolicy .Values.botManager.bot.imagePullPolicy | quote }}
             {{- with .Values.botManager.bot.resources }}
             - name: BOT_POD_CPU_REQUEST
               value: {{ .requests.cpu | quote }}
@@ -66,8 +68,34 @@ spec:
             {{- end }}
             - name: DOCKER_NETWORK
               value: {{ .Values.botManager.bot.dockerNetwork | quote }}
+            - name: BOT_CALLBACK_BASE_URL
+              value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "bot-manager")) .Release.Namespace .Values.global.clusterDomain (.Values.botManager.service.port | int)) .Values.botManager.callbackBaseUrl | quote }}
             - name: TRANSCRIPTION_COLLECTOR_URL
               value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "transcription-collector")) .Release.Namespace .Values.global.clusterDomain (.Values.transcriptionCollector.service.port | int)) .Values.botManager.transcriptionCollectorUrl | quote }}
+            {{- if .Values.ttsService.enabled }}
+            - name: TTS_SERVICE_URL
+              value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "tts-service")) .Release.Namespace .Values.global.clusterDomain (.Values.ttsService.service.port | int)) .Values.botManager.ttsServiceUrl | quote }}
+            {{- end }}
+            {{- if .Values.botManager.zoom.clientId }}
+            - name: ZOOM_CLIENT_ID
+              value: {{ .Values.botManager.zoom.clientId | quote }}
+            {{- else if or .Values.botManager.zoom.existingSecretName .Values.secrets.existingSecretName }}
+            - name: ZOOM_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.secrets.existingSecretName .Values.botManager.zoom.existingSecretName | quote }}
+                  key: {{ .Values.botManager.zoom.clientIdKey | quote }}
+            {{- end }}
+            {{- if .Values.botManager.zoom.clientSecret }}
+            - name: ZOOM_CLIENT_SECRET
+              value: {{ .Values.botManager.zoom.clientSecret | quote }}
+            {{- else if or .Values.botManager.zoom.existingSecretName .Values.secrets.existingSecretName }}
+            - name: ZOOM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.secrets.existingSecretName .Values.botManager.zoom.existingSecretName | quote }}
+                  key: {{ .Values.botManager.zoom.clientSecretKey | quote }}
+            {{- end }}
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -106,18 +134,62 @@ spec:
             - name: DOCKER_HOST
               value: "unix:///var/run/docker.sock"
             {{- end }}
-            {{- if .Values.botManager.transcriptionServiceUrl }}
-            - name: TRANSCRIPTION_SERVICE_URL
-              value: {{ .Values.botManager.transcriptionServiceUrl | quote }}
+            {{- if .Values.minioConfig.enabled }}
+            - name: STORAGE_BACKEND
+              value: {{ .Values.minioConfig.storageBackend | quote }}
+            - name: MINIO_ENDPOINT
+              value: {{ include "vexa.minioEndpoint" . | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.minioSecretName" . }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.minioSecretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+            - name: MINIO_BUCKET
+              value: {{ .Values.minioConfig.bucket | quote }}
+            - name: MINIO_SECURE
+              value: {{ .Values.minioConfig.useSSL | quote }}
             {{- end }}
+            - name: TRANSCRIPTION_SERVICE_URL
+              value: {{ default (printf "http://%s.%s.svc.%s:%d/v1/audio/transcriptions" (include "vexa.componentName" (list . "transcription-service")) .Release.Namespace .Values.global.clusterDomain (.Values.transcriptionService.service.port | int)) .Values.botManager.transcriptionServiceUrl | quote }}
             {{- if .Values.botManager.transcriptionServiceToken }}
             - name: TRANSCRIPTION_SERVICE_TOKEN
               value: {{ .Values.botManager.transcriptionServiceToken | quote }}
+            {{- else if or .Values.botManager.transcriptionServiceSecretName .Values.secrets.existingSecretName }}
+            - name: TRANSCRIPTION_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default .Values.secrets.existingSecretName .Values.botManager.transcriptionServiceSecretName | quote }}
+                  key: {{ .Values.botManager.transcriptionServiceTokenSecretKey | quote }}
+            {{- else if .Values.secrets.transcriberApiKey }}
+            - name: TRANSCRIPTION_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.adminTokenSecretName" . }}
+                  key: TRANSCRIBER_API_KEY
             {{- end }}
             {{- if .Values.botManager.postMeetingHooks }}
             - name: POST_MEETING_HOOKS
               value: {{ .Values.botManager.postMeetingHooks | quote }}
             {{- end }}
+            - name: BOT_STOP_DELAY_SECONDS
+              value: {{ .Values.botManager.botStopDelaySeconds | quote }}
+            - name: RECORDING_ENABLED
+              {{- if kindIs "bool" .Values.botManager.recording.enabled }}
+              value: {{ .Values.botManager.recording.enabled | quote }}
+              {{- else }}
+              value: {{ .Values.minioConfig.enabled | quote }}
+              {{- end }}
+            {{- if .Values.botManager.recording.captureModes }}
+            - name: CAPTURE_MODES
+              value: {{ .Values.botManager.recording.captureModes | quote }}
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.botManager.logLevel | quote }}
             {{- with .Values.botManager.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

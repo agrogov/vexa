@@ -1,5 +1,19 @@
 FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
+# Add Infobip Root CA before any apt-get update.
+# The cert is PEM format. We use apt (HTTP only) to bootstrap curl, then fetch
+# the cert over plain HTTP so no existing trust is needed.
+RUN apt-get update -o Acquire::https::Verify-Peer=false \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL http://ca.infobip.com/crl/RootCA.crt \
+        -o /usr/local/share/ca-certificates/infobip-rootca.crt \
+    && update-ca-certificates
+
+# Set environment variables to ensure Python uses the updated CA bundle
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 # Install Python and dependencies
 RUN apt-get update && apt-get install -y \
     python3.10 \
