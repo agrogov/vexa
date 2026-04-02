@@ -8,6 +8,7 @@ interface RuntimeConfig {
   defaultBotName: string | null;
   hostedMode: boolean;
   webappUrl: string;
+  decisionListenerUrl?: string | null;
 }
 
 // Global cache to avoid refetching on every component mount

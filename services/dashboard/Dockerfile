@@ -1,7 +1,11 @@
 # Build stage
-FROM node:20-alpine AS builder
+FROM docker.ib-ci.com/node:20-alpine AS builder
 
 WORKDIR /app
+
+# Optional build-time basePath (e.g. /vexa)
+ARG NEXT_PUBLIC_BASE_PATH
+ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
 
 # Install dependencies
 COPY package*.json ./
@@ -16,11 +20,16 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine AS runner
+FROM docker.ib-ci.com/node:20-alpine AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
+
+# Install CA tools and trust Infobip Root CA
+RUN apk add --no-cache ca-certificates curl
+RUN curl -fsSL http://ca.infobip.com/crl/RootCA.crt -o /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs
@@ -37,5 +46,6 @@ EXPOSE 3000
 
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 CMD ["node", "server.js"]

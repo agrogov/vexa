@@ -17,6 +17,8 @@ function getVersion(): string {
 }
 
 const nextConfig: NextConfig = {
+  basePath: process.env.NEXT_PUBLIC_BASE_PATH || "",
+  assetPrefix: process.env.NEXT_PUBLIC_BASE_PATH || "",
   // Only use standalone output for production builds
   ...(process.env.NODE_ENV === 'production' ? { output: 'standalone' } : {}),
   transpilePackages: ['@vexaai/transcript-rendering'],

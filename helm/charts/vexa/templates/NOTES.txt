@@ -1,20 +1,83 @@
-Vexa installed.
+Vexa installed successfully.
 
-This chart is designed around the upstream Vexa Docker Compose topology.
+─────────────────────────────────────────────────
+ Services
+─────────────────────────────────────────────────
+{{- if .Values.apiGateway.enabled }}
+  API Gateway:               {{ include "vexa.componentName" (list . "api-gateway") }}:{{ .Values.apiGateway.service.port }}
+{{- end }}
+{{- if .Values.adminApi.enabled }}
+  Admin API:                 {{ include "vexa.componentName" (list . "admin-api") }}:{{ .Values.adminApi.service.port }}
+{{- end }}
+{{- if .Values.botManager.enabled }}
+  Bot Manager:               {{ include "vexa.componentName" (list . "bot-manager") }}:{{ .Values.botManager.service.port }}
+{{- end }}
+{{- if .Values.transcriptionCollector.enabled }}
+  Transcription Collector:   {{ include "vexa.componentName" (list . "transcription-collector") }}:{{ .Values.transcriptionCollector.service.port }}
+{{- end }}
+{{- if .Values.mcp.enabled }}
+  MCP:                       {{ include "vexa.componentName" (list . "mcp") }}:{{ .Values.mcp.service.port }}
+{{- end }}
+{{- if .Values.dashboard.enabled }}
+  Dashboard:                 {{ include "vexa.componentName" (list . "dashboard") }}:{{ .Values.dashboard.service.port }}
+{{- end }}
+{{- if .Values.transcriptionService.enabled }}
+  Transcription Service:     {{ include "vexa.componentName" (list . "transcription-service") }}:{{ .Values.transcriptionService.service.port }}
+{{- end }}
+{{- if .Values.ttsService.enabled }}
+  TTS Service:               {{ include "vexa.componentName" (list . "tts-service") }}:{{ .Values.ttsService.service.port }}
+{{- end }}
+{{- if .Values.decisionListener.enabled }}
+  Decision Listener:         {{ include "vexa.componentName" (list . "decision-listener") }}:{{ .Values.decisionListener.service.port }}
+{{- end }}
+{{- if .Values.postgres.enabled }}
+  Postgres:                  {{ include "vexa.componentName" (list . "postgres") }}:{{ .Values.postgres.service.port }}
+{{- end }}
+{{- if .Values.redis.enabled }}
+  Redis:                     {{ include "vexa.componentName" (list . "redis") }}:{{ .Values.redis.service.port }}
+{{- end }}
+{{- if .Values.minio.enabled }}
+  MinIO API:                 {{ include "vexa.componentName" (list . "minio") }}:9000
+  MinIO Console:             {{ include "vexa.componentName" (list . "minio") }}:9001
+{{- end }}
 
-Bot orchestration in Kubernetes:
-- Default in this chart: ORCHESTRATOR=process
-  Bots are spawned as child Node.js processes inside the bot-manager Pod (no Docker socket).
-  NOTE: this requires your bot-manager image to include the vexa-bot Node.js code/runtime + Playwright deps.
+─────────────────────────────────────────────────
+ Bot Orchestration: {{ .Values.botManager.orchestrator }}
+─────────────────────────────────────────────────
+{{- if eq .Values.botManager.orchestrator "process" }}
+  Bots run as child Node.js processes inside the bot-manager Pod.
+  Requires the bot-manager image to include vexa-bot runtime + Playwright.
+{{- else if eq .Values.botManager.orchestrator "kubernetes" }}
+  Bots spawn as Kubernetes Pods via the API.
+{{- if .Values.botManager.kubernetesOrchestrator.createRbac }}
+  RBAC: ServiceAccount + Role created for this release.
+{{- else }}
+  WARNING: createRbac=false — ensure a ServiceAccount with pod management
+  permissions exists and is bound to the bot-manager Pod.
+{{- end }}
+{{- else if eq .Values.botManager.orchestrator "docker" }}
+  Bots spawn as Docker containers via the mounted Docker socket.
+  WARNING: requires privileged access to the Docker daemon.
+{{- else if eq .Values.botManager.orchestrator "nomad" }}
+  Bots spawn via Nomad jobs.
+{{- end }}
 
-- Optional PoC: ORCHESTRATOR=kubernetes
-  Bots are spawned as Kubernetes Pods via the Kubernetes API.
-  Enable RBAC for bot-manager with:
-    botManager.kubernetesOrchestrator.createRbac=true
+─────────────────────────────────────────────────
+ Transcription
+─────────────────────────────────────────────────
+{{- if .Values.transcriptionService.enabled }}
+  In-cluster transcription-service is enabled (GPU required).
+{{- else }}
+  Transcription service is external.
+  Set botManager.transcriptionServiceUrl if not using the default.
+{{- end }}
 
-Services:
-- API Gateway: {{ include "vexa.componentName" (list . "api-gateway") }}
-- Admin API: {{ include "vexa.componentName" (list . "admin-api") }}
-- Bot Manager: {{ include "vexa.componentName" (list . "bot-manager") }}
-- Transcription Collector: {{ include "vexa.componentName" (list . "transcription-collector") }}
-- MCP: {{ include "vexa.componentName" (list . "mcp") }}
+─────────────────────────────────────────────────
+ Migrations
+─────────────────────────────────────────────────
+{{- if .Values.migrations.enabled }}
+  Database migration Job was submitted with this release.
+{{- else }}
+  Migrations are DISABLED. Run manually or set migrations.enabled=true
+  before upgrading to a new schema version.
+{{- end }}

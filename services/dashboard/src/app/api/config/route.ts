@@ -30,6 +30,9 @@ export async function GET() {
   const hostedMode = process.env.NEXT_PUBLIC_HOSTED_MODE === "true";
   const webappUrl = process.env.NEXT_PUBLIC_WEBAPP_URL || "https://vexa.ai";
 
+  // Decision listener URL for meeting anthology (entity enrichment + live decisions)
+  const decisionListenerUrl = process.env.DECISION_LISTENER_URL || null;
+
   // Public API URL for client-facing configs (MCP, docs, etc.)
   // Falls back to VEXA_PUBLIC_API_URL -> NEXT_PUBLIC_VEXA_API_URL -> apiUrl
   const publicApiUrl = process.env.VEXA_PUBLIC_API_URL
@@ -44,5 +47,6 @@ export async function GET() {
     defaultBotName,
     hostedMode,
     webappUrl,
+    decisionListenerUrl,
   });
 }

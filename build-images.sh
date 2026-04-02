@@ -9,7 +9,7 @@ set -euo pipefail
 # Notes:
 # - For kind/minikube you may need to load images into the cluster after building.
 
-PROFILE="${1:-cpu}"
+PROFILE="${1:-gpu}"
 VERSION="v0.6.1"
 BASE_REPO="docker.ib-ci.com"
 
@@ -44,7 +44,7 @@ fi
 echo "Building ${BASE_REPO}/vexa/tts-service:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/tts-service:${VERSION}" -f services/tts-service/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/vexa-dashboard:${VERSION}"
-docker build --build-arg NEXT_PUBLIC_BASE_PATH=/vexa -t "${BASE_REPO}/vexa/vexa-dashboard:${VERSION}" -f services/dashboard/Dockerfile .
+docker build --build-arg NEXT_PUBLIC_BASE_PATH=/vexa -t "${BASE_REPO}/vexa/vexa-dashboard:${VERSION}" -f services/dashboard/Dockerfile services/dashboard
 
 echo ""
 echo "Done. Images built with ${VERSION} tag."
