@@ -43,6 +43,8 @@ fi
 
 echo "Building ${BASE_REPO}/vexa/tts-service:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/tts-service:${VERSION}" -f services/tts-service/Dockerfile .
+echo "Building ${BASE_REPO}/vexa/vexa-dashboard:${VERSION}"
+docker build --build-arg NEXT_PUBLIC_BASE_PATH=/vexa -t "${BASE_REPO}/vexa/vexa-dashboard:${VERSION}" .
 
 echo ""
 echo "Done. Images built with ${VERSION} tag."
@@ -59,6 +61,7 @@ docker push "${BASE_REPO}/vexa/transcription-collector:${VERSION}"
 docker push "${BASE_REPO}/vexa/mcp:${VERSION}"
 docker push "${BASE_REPO}/vexa/transcription-service:${VERSION}"
 docker push "${BASE_REPO}/vexa/tts-service:${VERSION}"
+docker push "${BASE_REPO}/vexa/vexa-dashboard:${VERSION}"
 
 #echo "Building ${BASE_REPO}/vexa/vexa-lite:${VERSION}"
 #docker build -t "${BASE_REPO}/vexa/vexa-lite:${VERSION}" -f docker/lite/Dockerfile.lite .
