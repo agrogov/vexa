@@ -136,6 +136,17 @@ botManager:
         memory: "1Gi"      # ~1.7x headroom
 
   # ---------------------------------------------------------------------------
+  # Callback URLs
+  #
+  # Both are auto-generated from the bot-manager Service name/namespace/port.
+  # Override only if the release name or namespace differs from what the chart computes.
+  #
+  #   callbackBaseUrl: "http://my-release-vexa-bot-manager.my-ns.svc.cluster.local:8080"
+  #   callbackUrl:     "http://my-release-vexa-bot-manager.my-ns.svc.cluster.local:8080/bots/internal/callback/exited"
+  callbackBaseUrl: ""
+  callbackUrl: ""
+
+  # ---------------------------------------------------------------------------
   # Remote / external transcription service
   #
   # When transcriptionService.enabled=true the URL is auto-generated to point
