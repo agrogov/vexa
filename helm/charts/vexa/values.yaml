@@ -434,8 +434,8 @@ migrations:
   enabled: false
   backoffLimit: 3
   image:
-    repository: ""
-    tag: ""
+    repository: ""  # leave empty to auto-derive from transcriptionCollector.image.repository
+    tag: ""         # leave empty to auto-derive from transcriptionCollector.image.tag
   resources:
     requests:
       cpu: 50m
