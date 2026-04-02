@@ -44,7 +44,7 @@ fi
 echo "Building ${BASE_REPO}/vexa/tts-service:${VERSION}"
 docker build -t "${BASE_REPO}/vexa/tts-service:${VERSION}" -f services/tts-service/Dockerfile .
 echo "Building ${BASE_REPO}/vexa/vexa-dashboard:${VERSION}"
-docker build --build-arg NEXT_PUBLIC_BASE_PATH=/vexa -t "${BASE_REPO}/vexa/vexa-dashboard:${VERSION}" .
+docker build --build-arg NEXT_PUBLIC_BASE_PATH=/vexa -t "${BASE_REPO}/vexa/vexa-dashboard:${VERSION}" -f services/dashboard/Dockerfile .
 
 echo ""
 echo "Done. Images built with ${VERSION} tag."
