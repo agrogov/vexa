@@ -1,0 +1,291 @@
+diff --git a/services/vexa-bot/core/src/platforms/msteams/join.ts b/services/vexa-bot/core/src/platforms/msteams/join.ts
+index 4a61e18d..4dc09c9e 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/join.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/join.ts
+@@ -59,8 +59,18 @@ async function waitForTeamsPreJoinReadiness(page: Page, timeoutMs: number): Prom
+       .catch(() => false);
+     const computerAudioVisible = await page.locator(teamsComputerAudioRadioSelectors.join(", ")).first().isVisible().catch(() => false);
+ 
+-    if (joinNowVisible || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
+-      log("✅ Teams pre-join controls are ready");
++    // Also check DOM presence directly — light-meetings experience renders the join button
++    // before Playwright considers it "visible", so isVisible() returns false even when ready.
++    const joinNowInDom = await page.evaluate(() =>
++      !!(
++        document.getElementById("prejoin-join-button") ||
++        document.querySelector('[data-tid="prejoin-join-button"]') ||
++        document.querySelector('[aria-label="Join now"]')
++      )
++    ).catch(() => false);
++
++    if (joinNowVisible || joinNowInDom || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
++      log(`✅ Teams pre-join controls are ready (joinNowVisible=${joinNowVisible}, joinNowInDom=${joinNowInDom})`);
+       return true;
+     }
+ 
+@@ -377,27 +387,58 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
+ 
+   log("Step 6: Clicking 'Join now' to enter the meeting...");
+   try {
+-    // Use the more specific "Join now" selector first to avoid ambiguity
+-    const joinNowButton = page.locator('button:has-text("Join now")').first();
+-    const joinNowVisible = await joinNowButton.isVisible().catch(() => false);
++    // Primary: JS click by known id/data-tid — bypasses Playwright visibility checks.
++    // The light-meetings experience renders the button in the DOM before Playwright
++    // considers it "visible", so direct JS click is the most reliable approach.
++    const jsClicked = await page.evaluate(() => {
++      const btn = (
++        document.getElementById("prejoin-join-button") ||
++        document.querySelector<HTMLElement>('[data-tid="prejoin-join-button"]') ||
++        document.querySelector<HTMLElement>('[aria-label="Join now"]') ||
++        Array.from(document.querySelectorAll<HTMLElement>("button")).find(
++          (b) => b.innerText?.trim() === "Join now"
++        )
++      );
++      if (btn) { btn.click(); return true; }
++      return false;
++    });
+ 
+-    if (joinNowVisible) {
+-      await joinNowButton.click();
+-      log("✅ Clicked 'Join now' button");
++    if (jsClicked) {
++      log("✅ Clicked 'Join now' button (JS click)");
+     } else {
+-      // Fall back to generic join selectors
++      // Fallback: Playwright click with force
+       const fallbackJoinButton = page.locator(teamsJoinButtonSelectors.join(', ')).first();
+       await fallbackJoinButton.waitFor({ timeout: 10000 });
+-      await fallbackJoinButton.click();
++      await fallbackJoinButton.click({ force: true });
+       log("✅ Clicked join button (fallback selector)");
+     }
+-    // Wait for Teams to transition from pre-join to lobby/meeting.
+-    // Teams needs several seconds to process the join request and show
+-    // either the waiting room or the meeting view.
+     log("Waiting for Teams to process join request...");
+     await page.waitForTimeout(8000);
+   } catch (error) {
+     log("⚠️ Join button not found — bot may not be able to enter the meeting");
++    // Dump all visible buttons to help diagnose selector mismatches (especially light experience)
++    try {
++      const visibleButtons = await page.evaluate(() =>
++        Array.from(document.querySelectorAll("button, [role='button'], input[type='button']"))
++          .filter((el) => {
++            const r = (el as HTMLElement).getBoundingClientRect();
++            return r.width > 0 && r.height > 0;
++          })
++          .map((el) => ({
++            tag: el.tagName,
++            text: ((el as HTMLElement).innerText || "").trim().slice(0, 60),
++            ariaLabel: el.getAttribute("aria-label"),
++            dataTid: el.getAttribute("data-tid"),
++            id: el.id || null,
++          }))
++      );
++      log(`[Join Debug] Visible buttons on page (url=${page.url()}):`);
++      for (const b of visibleButtons) {
++        log(`  [Join Debug] <${b.tag}> text="${b.text}" aria-label="${b.ariaLabel}" data-tid="${b.dataTid}" id="${b.id}"`);
++      }
++    } catch (dumpErr: any) {
++      log(`[Join Debug] Could not dump buttons: ${dumpErr?.message}`);
++    }
+   }
+ 
+   log("Step 7: Checking current state...");
+diff --git a/services/vexa-bot/core/src/platforms/msteams/leave.ts b/services/vexa-bot/core/src/platforms/msteams/leave.ts
+index ffb73149..64af47fe 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/leave.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/leave.ts
+@@ -129,39 +129,57 @@ export async function leaveMicrosoftTeams(page: Page | null, botConfig?: BotConf
+   }
+ 
+   try {
+-    // First, try using Playwright's native click method for the most reliable selector
+-    log("[leaveMicrosoftTeams] Attempting to click leave button using Playwright's native click...");
+-    
+-    // Try the most reliable selector first: primary hangup button
++    // Primary: JS click — bypasses overlay/z-index issues that block Playwright's native click.
++    // The #hangup-button may be covered by a ui-dialog__overlay in the Teams light experience,
++    // which causes Playwright's click to time out even though the element is visible.
++    log("[leaveMicrosoftTeams] Attempting JS click on leave button (bypasses overlay)...");
++    const jsResult = await page.evaluate((selectors) => {
++      const candidates = [
++        document.getElementById("hangup-button"),
++        document.querySelector<HTMLElement>('[data-tid="hangup-main-btn"]'),
++        document.querySelector<HTMLElement>('[aria-label="Leave"]'),
++        ...selectors.map((s: string) => document.querySelector<HTMLElement>(s)).filter(Boolean),
++      ];
++      for (const btn of candidates) {
++        if (!btn) continue;
++        const rect = btn.getBoundingClientRect();
++        if (rect.width > 0 && rect.height > 0) {
++          btn.click();
++          return btn.getAttribute("aria-label") || btn.id || "leave-btn";
++        }
++      }
++      return null;
++    }, teamsLeaveSelectors).catch(() => null);
++
++    if (jsResult) {
++      log(`[leaveMicrosoftTeams] JS click succeeded on: ${jsResult}`);
++      await new Promise(resolve => setTimeout(resolve, 3000));
++      return true;
++    }
++
++    // Fallback: Playwright force-click (force bypasses overlay interception)
++    log("[leaveMicrosoftTeams] JS click found no button — trying Playwright force-click...");
+     try {
+       const hangupButton = page.locator(teamsPrimaryHangupButtonSelector);
+-      const isVisible = await hangupButton.isVisible({ timeout: 2000 }).catch(() => false);
+-      
+-      if (isVisible) {
+-        log(`[leaveMicrosoftTeams] Found ${teamsPrimaryHangupButtonSelector}, clicking with Playwright...`);
+-        await hangupButton.click({ timeout: 5000 });
+-        log(`[leaveMicrosoftTeams] Successfully clicked ${teamsPrimaryHangupButtonSelector} using Playwright`);
+-        
+-        // Wait for Teams to process the leave
+-        log("[leaveMicrosoftTeams] Waiting 3 seconds for Teams to process leave...");
++      const exists = await hangupButton.count().then(c => c > 0).catch(() => false);
++      if (exists) {
++        log(`[leaveMicrosoftTeams] Found ${teamsPrimaryHangupButtonSelector}, force-clicking...`);
++        await hangupButton.click({ force: true, timeout: 5000 });
++        log(`[leaveMicrosoftTeams] Force-click succeeded on ${teamsPrimaryHangupButtonSelector}`);
+         await new Promise(resolve => setTimeout(resolve, 3000));
+-        log("[leaveMicrosoftTeams] Wait complete. Teams should have processed the leave action.");
+         return true;
+       }
+     } catch (hangupError: any) {
+-      log(`[leaveMicrosoftTeams] Could not click ${teamsPrimaryHangupButtonSelector} with Playwright: ${hangupError.message}`);
++      log(`[leaveMicrosoftTeams] Force-click failed: ${hangupError.message}`);
+     }
+-    
+-    // Fallback to browser-side click method for other selectors
+-    log("[leaveMicrosoftTeams] Falling back to browser-side click method...");
++
++    // Last resort: performLeaveAction registered by prepareForRecording
++    log("[leaveMicrosoftTeams] Falling back to performLeaveAction...");
+     const result = await page.evaluate(async () => {
+       if (typeof (window as any).performLeaveAction === "function") {
+         return await (window as any).performLeaveAction();
+-      } else {
+-        (window as any).logBot?.("[Node Eval Error] performLeaveAction function not found on window.");
+-        console.error("[Node Eval Error] performLeaveAction function not found on window.");
+-        return false;
+       }
++      return false;
+     });
+     log(`[leaveMicrosoftTeams] Browser leave action result: ${result}`);
+     
+diff --git a/services/vexa-bot/core/src/platforms/msteams/recording.ts b/services/vexa-bot/core/src/platforms/msteams/recording.ts
+index 8c72d107..ee20cd89 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/recording.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/recording.ts
+@@ -864,15 +864,25 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+                 const source = ctx.createMediaStreamSource(stream);
+                 const processor = ctx.createScriptProcessor(4096, 1, 1);
+ 
++                // Grace window: route audio to last known speaker after their
++                // SPEAKER_END event. Teams DOM speaker state flaps rapidly —
++                // SPEAKER_END fires between words, dropping audio for the
++                // silent frames between utterances.
++                // Configured via TEAMS_SPEAKING_KEEPALIVE_MS env var (default 8000ms).
++                const SPEAKER_GRACE_MS = (botConfigData as any)?.teamsSpeakingKeepaliveMs ?? 8000;
++                let lastSpeakerNames: string[] = [];
++                let lastSpeakerTs = 0;
++
+                 processor.onaudioprocess = (e: AudioProcessingEvent) => {
+                   const data = e.inputBuffer.getChannelData(0);
+-                  // Skip silence
++                  // Skip near-silence (Teams sends very low-amplitude silence frames).
++                  // Threshold lowered from 0.005 → 0.001 to catch quieter speech.
+                   let maxVal = 0;
+                   for (let j = 0; j < data.length; j++) {
+                     const abs = data[j] < 0 ? -data[j] : data[j];
+                     if (abs > maxVal) maxVal = abs;
+                   }
+-                  if (maxVal <= 0.005) return;
++                  if (maxVal <= 0.001) return;
+ 
+                   // Find active speakers from DOM state (exclude bot itself)
+                   const botNameLower = ((botConfigData as any)?.botName || (botConfigData as any)?.name || 'vexa').toLowerCase();
+@@ -886,11 +896,22 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+                     }
+                   }
+ 
+-                  if (activeSpeakerNames.length === 0) return;
++                  const now = Date.now();
++                  if (activeSpeakerNames.length > 0) {
++                    // Update last known speaker
++                    lastSpeakerNames = activeSpeakerNames;
++                    lastSpeakerTs = now;
++                  } else if (lastSpeakerNames.length > 0 && (now - lastSpeakerTs) < SPEAKER_GRACE_MS) {
++                    // No active DOM speaker but within grace window — route to last speaker.
++                    // This captures audio between DOM speaking events (Teams flaps rapidly).
++                  } else {
++                    return;
++                  }
+ 
+-                  // Route audio to each active speaker
++                  // Route audio to active (or grace-window) speakers
++                  const targets = activeSpeakerNames.length > 0 ? activeSpeakerNames : lastSpeakerNames;
+                   const audioArray = Array.from(data);
+-                  for (const name of activeSpeakerNames) {
++                  for (const name of targets) {
+                     if (typeof (window as any).__vexaTeamsAudioData === 'function') {
+                       (window as any).__vexaTeamsAudioData(name, audioArray);
+                     }
+diff --git a/services/vexa-bot/core/src/platforms/msteams/selectors.ts b/services/vexa-bot/core/src/platforms/msteams/selectors.ts
+index 78e0adee..7143de7f 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/selectors.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/selectors.ts
+@@ -247,8 +247,19 @@ export const teamsContinueButtonSelectors: string[] = [
+ ];
+ 
+ export const teamsJoinButtonSelectors: string[] = [
++  // data-tid based (most reliable, works in both full and light experience)
++  'button[data-tid="prejoin-join-button"]',
++  'button[data-tid*="join-button"]',
++  'button[data-tid*="join_button"]',
++  // aria-label based
++  'button[aria-label="Join now"]',
++  'button[aria-label="Join meeting"]',
++  'button[aria-label*="Join now"]',
++  'button[aria-label*="Join meeting"]',
++  // text based (full experience)
++  'button:has-text("Join now")',
++  'button:has-text("Join meeting")',
+   'button:has-text("Join")',
+-  'button:has-text("Join now")'
+ ];
+ 
+ export const teamsCameraButtonSelectors: string[] = [
+diff --git a/services/vexa-bot/core/src/utils/browser.ts b/services/vexa-bot/core/src/utils/browser.ts
+index 5c149b85..aa8b5e35 100644
+--- a/services/vexa-bot/core/src/utils/browser.ts
++++ b/services/vexa-bot/core/src/utils/browser.ts
+@@ -40,6 +40,24 @@ export class BrowserAudioService {
+       const allMediaElements = Array.from(document.querySelectorAll("audio, video")) as HTMLMediaElement[];
+       (window as any).logBot(`[Audio] Attempt ${i + 1}/${retries}: Found ${allMediaElements.length} total media elements in DOM`);
+       
++      // Try to play any paused elements that have a valid MediaStream with audio tracks.
++      // Teams (especially the light-meetings experience) may leave elements paused even
++      // after the bot is admitted — calling play() unblocks audio capture.
++      for (const el of allMediaElements as any[]) {
++        if (
++          el.paused &&
++          el.srcObject instanceof MediaStream &&
++          el.srcObject.getAudioTracks().length > 0
++        ) {
++          try {
++            await el.play();
++            (window as any).logBot(`[Audio] Triggered play() on paused element (readyState: ${el.readyState})`);
++          } catch (playErr: any) {
++            (window as any).logBot(`[Audio] play() failed: ${playErr?.message || playErr}`);
++          }
++        }
++      }
++
+       // Filter for active media elements with proper checks
+       const mediaElements = allMediaElements.filter((el: any) => {
+         // Check if element has srcObject
