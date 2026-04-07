@@ -3,8 +3,8 @@
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { signIn } from "next-auth/react";
 import { Mail, Loader2, CheckCircle, ArrowLeft, AlertTriangle, XCircle, ArrowRight, Plus } from "lucide-react";
+import { withBasePath } from "@/lib/base-path";
 import { Logo } from "@/components/ui/logo";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -21,11 +21,11 @@ type LoginState = "onboarding" | "email" | "sent";
 
 interface HealthStatus {
   status: "ok" | "degraded" | "error";
-  authMode: "direct" | "magic-link" | "google" | "oauth";
+  authMode: "direct" | "magic-link" | "google" | "entra-id";
   checks: {
     smtp: { configured: boolean; optional?: boolean; error?: string };
     googleOAuth: { configured: boolean; optional?: boolean; error?: string };
-    microsoftOAuth?: { configured: boolean; optional?: boolean; error?: string };
+    azureAdOAuth?: { configured: boolean; optional?: boolean; error?: string };
     adminApi: { configured: boolean; reachable: boolean; error?: string };
     vexaApi: { configured: boolean; reachable: boolean; error?: string };
   };
@@ -56,7 +56,7 @@ export default function LoginPage() {
     // Hosted mode: redirect to external auth (webapp) instead of showing dashboard login
     const checkHostedMode = async () => {
       try {
-        const res = await fetch("/api/config");
+        const res = await fetch(withBasePath("/api/config"));
         const config = await res.json();
         if (config.hostedMode && config.webappUrl) {
           const returnUrl = encodeURIComponent(window.location.origin);
@@ -70,7 +70,7 @@ export default function LoginPage() {
   useEffect(() => {
     const checkHealth = async () => {
       try {
-        const response = await fetch("/api/health");
+        const response = await fetch(withBasePath("/api/health"));
         const data = await response.json();
         setHealthStatus(data);
       } catch {
@@ -160,12 +160,29 @@ export default function LoginPage() {
     setState("email");
   };
 
+  const signInWithProvider = async (providerId: "google" | "azure-ad") => {
+    const callbackUrl = withBasePath("/");
+    const csrfResponse = await fetch(withBasePath("/api/auth/csrf"));
+    const { csrfToken } = await csrfResponse.json();
+    // Use a real form submit so NextAuth sets the state cookie and handles the
+    // redirect to the provider in a single response — avoids fetch cookie timing issues.
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = withBasePath(`/api/auth/signin/${providerId}`);
+    for (const [name, value] of Object.entries({ csrfToken, callbackUrl })) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
+  };
+
   const handleGoogleSignIn = async () => {
     try {
-      await signIn("google", {
-        callbackUrl: "/",
-        redirect: true,
-      });
+      await signInWithProvider("google");
     } catch (error) {
       console.error("Google sign-in error:", error);
       toast.error("Failed to sign in with Google");
@@ -174,10 +191,7 @@ export default function LoginPage() {
 
   const handleMicrosoftSignIn = async () => {
     try {
-      await signIn("microsoft", {
-        callbackUrl: "/",
-        redirect: true,
-      });
+      await signInWithProvider("azure-ad");
     } catch (error) {
       console.error("Microsoft sign-in error:", error);
       toast.error("Failed to sign in with Microsoft");
@@ -188,7 +202,7 @@ export default function LoginPage() {
   const hasWarnings = healthStatus?.status === "degraded";
   const isDirectMode = healthStatus?.authMode === "direct";
   const isGoogleAuthEnabled = healthStatus?.checks.googleOAuth.configured === true;
-  const isMicrosoftAuthEnabled = healthStatus?.checks.microsoftOAuth?.configured === true;
+  const isMicrosoftAuthEnabled = healthStatus?.checks.azureAdOAuth?.configured === true;
   const isOAuthEnabled = isGoogleAuthEnabled || isMicrosoftAuthEnabled;
   const isEmailAuthEnabled = !isOAuthEnabled && (healthStatus?.authMode === "magic-link" || healthStatus?.authMode === "direct");
 

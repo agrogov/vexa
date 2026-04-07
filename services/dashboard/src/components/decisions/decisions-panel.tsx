@@ -13,6 +13,8 @@ import {
   Cpu,
   Check,
   X,
+  Lightbulb,
+  Timer,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -20,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { cn } from "@/lib/utils";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -29,7 +32,9 @@ import { cn } from "@/lib/utils";
 export type DecisionItemType =
   | "decision"
   | "action_item"
-  | "architecture_statement";
+  | "architecture_statement"
+  | "key_insight"
+  | "commitment";
 
 export interface DecisionItem {
   id: string; // client-generated UUID
@@ -46,9 +51,6 @@ export interface DecisionItem {
 // ────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────────────────
-
-const DECISION_LISTENER_URL =
-  process.env.NEXT_PUBLIC_DECISION_LISTENER_URL ?? "http://localhost:8765";
 
 function uid() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -95,6 +97,16 @@ const TYPE_META: Record<
     label: "Architecture",
     icon: <Cpu className="h-3.5 w-3.5" />,
     badgeClass: "bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300",
+  },
+  key_insight: {
+    label: "Key Insight",
+    icon: <Lightbulb className="h-3.5 w-3.5" />,
+    badgeClass: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
+  },
+  commitment: {
+    label: "Commitment",
+    icon: <Timer className="h-3.5 w-3.5" />,
+    badgeClass: "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300",
   },
 };
 
@@ -364,6 +376,8 @@ interface DecisionsPanelProps {
 }
 
 export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanelProps) {
+  const { config } = useRuntimeConfig();
+  const decisionListenerUrl = config?.decisionListenerUrl ?? "http://localhost:8765";
   const [items, setItems] = useState<DecisionItem[]>([]);
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -376,7 +390,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
 
   const connectSSE = useCallback(() => {
     if (esRef.current) return; // already connected
-    const url = `${DECISION_LISTENER_URL}/decisions/${meetingId}`;
+    const url = `${decisionListenerUrl}/decisions/${meetingId}`;
     const es = new EventSource(url);
     esRef.current = es;
 
@@ -430,7 +444,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
         if (isActive) connectSSE();
       }, 5000);
     };
-  }, [meetingId, isActive]);
+  }, [decisionListenerUrl, meetingId, isActive]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -447,7 +461,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
     const load = async () => {
       try {
         const res = await fetch(
-          `${DECISION_LISTENER_URL}/decisions/${meetingId}/all`
+          `${decisionListenerUrl}/decisions/${meetingId}/all`
         );
         if (!res.ok) return;
         const data = await res.json();
@@ -474,7 +488,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
       }
     };
     load();
-  }, [meetingId]);
+  }, [decisionListenerUrl, meetingId]);
 
   // ── Item actions ─────────────────────────────────────────────────────────
 

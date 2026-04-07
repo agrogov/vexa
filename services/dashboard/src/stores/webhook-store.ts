@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { withBasePath } from "@/lib/base-path";
 
 // ==========================================
 // Webhook Types
@@ -109,7 +110,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
       params.set("time_range", timeRange);
       if (userId) params.set("userId", String(userId));
 
-      const response = await fetch(`/api/webhooks/deliveries?${params}`);
+      const response = await fetch(withBasePath(`/api/webhooks/deliveries?${params}`));
       if (!response.ok) {
         // If endpoint doesn't exist yet, use empty state
         if (response.status === 404) {
@@ -132,7 +133,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
   fetchMeetingDeliveries: async (meetingId: string) => {
     set({ isLoadingMeetingDeliveries: true });
     try {
-      const response = await fetch(`/api/webhooks/deliveries/${meetingId}`);
+      const response = await fetch(withBasePath(`/api/webhooks/deliveries/${meetingId}`));
       if (!response.ok) {
         if (response.status === 404) {
           set({ meetingDeliveries: [], isLoadingMeetingDeliveries: false });
@@ -152,7 +153,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
     set({ isLoadingConfig: true });
     try {
       const params = userId ? `?userId=${userId}` : "";
-      const response = await fetch(`/api/webhooks/config${params}`);
+      const response = await fetch(withBasePath(`/api/webhooks/config${params}`));
       if (!response.ok) {
         if (response.status === 404) {
           set({ config: null, isLoadingConfig: false });
@@ -171,7 +172,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
     const { userId } = get();
     set({ isSavingConfig: true });
     try {
-      const response = await fetch("/api/webhooks/config", {
+      const response = await fetch(withBasePath("/api/webhooks/config"), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...configUpdate, userId }),
@@ -187,7 +188,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
 
   testWebhook: async (url: string) => {
     const { userId } = get();
-    const response = await fetch("/api/webhooks/test", {
+    const response = await fetch(withBasePath("/api/webhooks/test"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url, userId }),
@@ -197,7 +198,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
 
   rotateSecret: async () => {
     const { userId } = get();
-    const response = await fetch("/api/webhooks/rotate-secret", {
+    const response = await fetch(withBasePath("/api/webhooks/rotate-secret"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId }),

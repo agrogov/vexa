@@ -40,6 +40,24 @@ export class BrowserAudioService {
       const allMediaElements = Array.from(document.querySelectorAll("audio, video")) as HTMLMediaElement[];
       (window as any).logBot(`[Audio] Attempt ${i + 1}/${retries}: Found ${allMediaElements.length} total media elements in DOM`);
       
+      // Try to play any paused elements that have a valid MediaStream with audio tracks.
+      // Teams (especially the light-meetings experience) may leave elements paused even
+      // after the bot is admitted — calling play() unblocks audio capture.
+      for (const el of allMediaElements as any[]) {
+        if (
+          el.paused &&
+          el.srcObject instanceof MediaStream &&
+          el.srcObject.getAudioTracks().length > 0
+        ) {
+          try {
+            await el.play();
+            (window as any).logBot(`[Audio] Triggered play() on paused element (readyState: ${el.readyState})`);
+          } catch (playErr: any) {
+            (window as any).logBot(`[Audio] play() failed: ${playErr?.message || playErr}`);
+          }
+        }
+      }
+
       // Filter for active media elements with proper checks
       const mediaElements = allMediaElements.filter((el: any) => {
         // Check if element has srcObject

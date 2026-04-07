@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { VexaUser } from "@/types/vexa";
+import { withBasePath } from "@/lib/base-path";
 
 interface LoginResult {
   success: boolean;
@@ -42,7 +43,7 @@ export const useAuthStore = create<AuthState>()(
       sendMagicLink: async (email: string): Promise<LoginResult> => {
         set({ isLoading: true });
         try {
-          const response = await fetch("/api/auth/send-magic-link", {
+          const response = await fetch(withBasePath("/api/auth/send-magic-link"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email }),
@@ -101,7 +102,7 @@ export const useAuthStore = create<AuthState>()(
       login: async (email: string) => {
         set({ isLoading: true });
         try {
-          const response = await fetch("/api/auth/login", {
+          const response = await fetch(withBasePath("/api/auth/login"), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email }),
@@ -131,7 +132,7 @@ export const useAuthStore = create<AuthState>()(
 
       logout: () => {
         // Clear server-side cookie
-        fetch("/api/auth/logout", { method: "POST" });
+        fetch(withBasePath("/api/auth/logout"), { method: "POST" });
         // Clear state
         set({
           user: null,
@@ -163,7 +164,7 @@ export const useAuthStore = create<AuthState>()(
         // Always verify with server — localStorage may be stale (e.g. different
         // user logged in on the webapp since last dashboard visit).
         try {
-          const response = await fetch("/api/auth/me");
+          const response = await fetch(withBasePath("/api/auth/me"));
           if (response.ok) {
             const meData = await response.json();
 
@@ -182,7 +183,7 @@ export const useAuthStore = create<AuthState>()(
             // OAuth callback path (Dashboard's own auth flow)
             if (!get().user || !get().token) {
               try {
-                const oauthResponse = await fetch("/api/auth/oauth-callback");
+                const oauthResponse = await fetch(withBasePath("/api/auth/oauth-callback"));
                 if (oauthResponse.ok) {
                   const oauthData = await oauthResponse.json();
                   if (oauthData.user && oauthData.token) {

@@ -1,7 +1,14 @@
 # ==============================================================================
 # Stage 1: Build native addon (Zoom SDK wrapper)
 # ==============================================================================
-FROM --platform=linux/amd64 node:20-bullseye AS native-builder
+FROM --platform=linux/amd64 docker.ib-ci.com/node:20-bullseye AS native-builder
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -26,12 +33,20 @@ COPY core/src/platforms/zoom/native/ ./core/src/platforms/zoom/native/
 RUN npm install --ignore-scripts
 
 # Build native addon (will skip if SDK not present)
-RUN npm run build:native || echo "[Build] Native addon build skipped (SDK not available)"
+# Always create the build dir so the COPY in the runtime stage doesn't fail when SDK is absent.
+RUN mkdir -p /app/vexa-bot/build && (npm run build:native || echo "[Build] Native addon build skipped (SDK not available)")
 
 # ==============================================================================
 # Stage 2: Build TypeScript
 # ==============================================================================
 FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS ts-builder
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app/vexa-bot
 
@@ -76,6 +91,12 @@ RUN arch=$(uname -m) && if [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ]; then
 # Stage 3: Runtime
 # ==============================================================================
 FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS runtime
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app/vexa-bot
 

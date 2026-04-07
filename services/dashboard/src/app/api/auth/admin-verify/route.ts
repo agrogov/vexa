@@ -6,7 +6,7 @@ const ADMIN_COOKIE_NAME = "vexa-admin-session";
 const COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours
 
 function getSigningSecret(): string {
-  const secret = process.env.JWT_SECRET;
+  const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET;
   if (!secret) {
     throw new Error("JWT_SECRET is not configured");
   }

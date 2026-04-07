@@ -16,19 +16,21 @@ const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
 });
 
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
+
 export const metadata: Metadata = {
   title: "Vexa Dashboard",
   description: "Open source meeting transcription dashboard for Vexa",
   icons: {
     icon: [
       {
-        url: "/icons/vexadark.svg",
+        url: `${basePath}/icons/vexadark.svg`,
         type: "image/svg+xml",
       },
     ],
     apple: [
       {
-        url: "/icons/vexadark.svg",
+        url: `${basePath}/icons/vexadark.svg`,
         type: "image/svg+xml",
       },
     ],

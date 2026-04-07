@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface RuntimeConfig {
   wsUrl: string;
   apiUrl: string;
+  publicApiUrl?: string;
   defaultBotName: string | null;
   hostedMode: boolean;
   webappUrl: string;
@@ -16,7 +18,7 @@ let cachedConfig: RuntimeConfig | null = null;
 let configPromise: Promise<RuntimeConfig> | null = null;
 
 async function fetchConfig(): Promise<RuntimeConfig> {
-  const response = await fetch("/api/config");
+  const response = await fetch(withBasePath("/api/config"));
   if (!response.ok) {
     throw new Error("Failed to fetch runtime config");
   }
@@ -64,6 +66,17 @@ export function useRuntimeConfig() {
  * Get the WebSocket URL synchronously (returns cached value or fallback)
  * For use in non-hook contexts or when you need immediate access
  */
+/**
+ * Get the decision listener URL synchronously (returns cached value or fallback)
+ * For use in non-hook contexts or when you need immediate access
+ */
+export function getDecisionListenerUrl(): string {
+  if (cachedConfig?.decisionListenerUrl) {
+    return cachedConfig.decisionListenerUrl;
+  }
+  return "http://localhost:8765";
+}
+
 export function getWsUrl(): string {
   if (cachedConfig) {
     return cachedConfig.wsUrl;

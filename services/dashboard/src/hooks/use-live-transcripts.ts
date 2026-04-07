@@ -12,6 +12,7 @@ import type {
 import { useMeetingsStore } from "@/stores/meetings-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { vexaAPI } from "@/lib/api";
+import { withBasePath } from "@/lib/base-path";
 
 interface UseLiveTranscriptsOptions {
   platform: Platform;
@@ -164,7 +165,7 @@ export function useLiveTranscripts(
     // Auth token comes from the client-side auth store (more reliable than httpOnly cookie)
     let wsUrl: string;
     try {
-      const configResponse = await fetch("/api/config");
+      const configResponse = await fetch(withBasePath("/api/config"));
       const config = await configResponse.json();
       wsUrl = config.wsUrl;
     } catch (error) {

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { redirect } from "next/navigation";
 import {
   Zap,
   Plus,
@@ -17,13 +16,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { cn } from "@/lib/utils";
-
-const DECISION_LISTENER_URL =
-  process.env.NEXT_PUBLIC_DECISION_LISTENER_URL ?? "http://localhost:8765";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -127,10 +123,8 @@ function CategoryRow({
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function TrackerPage() {
-  if (process.env.NEXT_PUBLIC_TRACKER_ENABLED !== "true") {
-    redirect("/");
-  }
-
+  const { config: runtimeConfig, isLoading: isRuntimeConfigLoading } = useRuntimeConfig();
+  const decisionListenerUrl = runtimeConfig?.decisionListenerUrl ?? "http://localhost:8765";
   const [config, setConfig] = useState<TrackerConfig | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -140,8 +134,9 @@ export default function TrackerPage() {
   // ── Fetch current config from listener ──────────────────────────────────────
 
   const fetchConfig = useCallback(async () => {
+    if (isRuntimeConfigLoading) return;
     try {
-      const res = await fetch(`${DECISION_LISTENER_URL}/config`);
+      const res = await fetch(`${decisionListenerUrl}/config`);
       if (!res.ok) throw new Error("fetch failed");
       const data: TrackerConfig = await res.json();
       setConfig(data);
@@ -151,7 +146,7 @@ export default function TrackerPage() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [decisionListenerUrl, isRuntimeConfigLoading]);
 
   useEffect(() => {
     fetchConfig();
@@ -163,7 +158,7 @@ export default function TrackerPage() {
     if (!config) return;
     setIsSaving(true);
     try {
-      const res = await fetch(`${DECISION_LISTENER_URL}/config`, {
+      const res = await fetch(`${decisionListenerUrl}/config`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),
@@ -184,7 +179,7 @@ export default function TrackerPage() {
   const handleReset = async () => {
     setIsResetting(true);
     try {
-      const res = await fetch(`${DECISION_LISTENER_URL}/config/reset`, { method: "POST" });
+      const res = await fetch(`${decisionListenerUrl}/config/reset`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       const defaults: TrackerConfig = await res.json();
       setConfig(defaults);
@@ -238,7 +233,7 @@ export default function TrackerPage() {
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-[-0.02em] text-foreground flex items-center gap-2">
+          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
             <Zap className="h-7 w-7 text-amber-500" />
             Tracker Config
           </h1>
@@ -272,7 +267,7 @@ export default function TrackerPage() {
           <CardContent className="pt-4 flex items-center gap-3 text-sm">
             <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
             <span>
-              Decision listener is offline at <code className="bg-muted px-1 rounded">{DECISION_LISTENER_URL}</code>.
+              Decision listener is offline at <code className="bg-muted px-1 rounded">{decisionListenerUrl}</code>.
               Start it first, then reload this page.
             </span>
           </CardContent>

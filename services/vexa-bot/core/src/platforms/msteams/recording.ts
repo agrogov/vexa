@@ -864,15 +864,25 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                 const source = ctx.createMediaStreamSource(stream);
                 const processor = ctx.createScriptProcessor(4096, 1, 1);
 
+                // Grace window: route audio to last known speaker after their
+                // SPEAKER_END event. Teams DOM speaker state flaps rapidly —
+                // SPEAKER_END fires between words, dropping audio for the
+                // silent frames between utterances.
+                // Configured via TEAMS_SPEAKING_KEEPALIVE_MS env var (default 8000ms).
+                const SPEAKER_GRACE_MS = (botConfigData as any)?.teamsSpeakingKeepaliveMs ?? 8000;
+                let lastSpeakerNames: string[] = [];
+                let lastSpeakerTs = 0;
+
                 processor.onaudioprocess = (e: AudioProcessingEvent) => {
                   const data = e.inputBuffer.getChannelData(0);
-                  // Skip silence
+                  // Skip near-silence (Teams sends very low-amplitude silence frames).
+                  // Threshold lowered from 0.005 → 0.001 to catch quieter speech.
                   let maxVal = 0;
                   for (let j = 0; j < data.length; j++) {
                     const abs = data[j] < 0 ? -data[j] : data[j];
                     if (abs > maxVal) maxVal = abs;
                   }
-                  if (maxVal <= 0.005) return;
+                  if (maxVal <= 0.001) return;
 
                   // Find active speakers from DOM state (exclude bot itself)
                   const botNameLower = ((botConfigData as any)?.botName || (botConfigData as any)?.name || 'vexa').toLowerCase();
@@ -886,11 +896,22 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                     }
                   }
 
-                  if (activeSpeakerNames.length === 0) return;
+                  const now = Date.now();
+                  if (activeSpeakerNames.length > 0) {
+                    // Update last known speaker
+                    lastSpeakerNames = activeSpeakerNames;
+                    lastSpeakerTs = now;
+                  } else if (lastSpeakerNames.length > 0 && (now - lastSpeakerTs) < SPEAKER_GRACE_MS) {
+                    // No active DOM speaker but within grace window — route to last speaker.
+                    // This captures audio between DOM speaking events (Teams flaps rapidly).
+                  } else {
+                    return;
+                  }
 
-                  // Route audio to each active speaker
+                  // Route audio to active (or grace-window) speakers
+                  const targets = activeSpeakerNames.length > 0 ? activeSpeakerNames : lastSpeakerNames;
                   const audioArray = Array.from(data);
-                  for (const name of activeSpeakerNames) {
+                  for (const name of targets) {
                     if (typeof (window as any).__vexaTeamsAudioData === 'function') {
                       (window as any).__vexaTeamsAudioData(name, audioArray);
                     }

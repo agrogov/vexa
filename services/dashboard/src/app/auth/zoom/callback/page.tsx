@@ -1,5 +1,6 @@
 "use client";
 
+import { withBasePath } from "@/lib/base-path";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, CheckCircle2, XCircle } from "lucide-react";
@@ -50,7 +51,7 @@ function ZoomCallbackContent() {
         return;
       }
 
-      const completeResp = await fetch("/api/zoom/oauth/complete", {
+      const completeResp = await fetch(withBasePath("/api/zoom/oauth/complete"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code, state: stateParam }),

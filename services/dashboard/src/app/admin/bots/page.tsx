@@ -48,7 +48,7 @@ const STATUS_CONFIG: Record<MeetingStatus, { label: string; color: string; icon:
   joining: { label: "Joining", color: "bg-yellow-100 text-yellow-700", icon: Play },
   awaiting_admission: { label: "Waiting", color: "bg-orange-100 text-orange-700", icon: Clock },
   active: { label: "Active", color: "bg-green-100 text-green-700", icon: CheckCircle },
-  stopping: { label: "Stopping", color: "bg-slate-100 text-slate-700", icon: Loader2 },
+  stopping: { label: "Stopping", color: "bg-orange-100 text-orange-700", icon: Loader2 },
   completed: { label: "Completed", color: "bg-blue-100 text-blue-700", icon: CheckCircle },
   failed: { label: "Failed", color: "bg-red-100 text-red-700", icon: XCircle },
 };
@@ -68,7 +68,10 @@ export default function AdminBotsPage() {
         vexaAPI.getBotStatus().catch(() => ({ running_bots: [] })),
       ]);
       setMeetings(meetingsData);
-      setRunningBots(botsData.running_bots || []);
+      const validRunningBots = (botsData.running_bots || []).filter(
+        (bot) => Boolean(bot.platform) && Boolean(bot.native_meeting_id)
+      );
+      setRunningBots(validRunningBots);
     } catch (error) {
       console.error("Failed to fetch data:", error);
       toast.error("Failed to load data");
@@ -85,7 +88,11 @@ export default function AdminBotsPage() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  const handleStopBot = useCallback(async (platform: Platform, nativeId: string) => {
+  const handleStopBot = useCallback(async (platform?: Platform | null, nativeId?: string | null) => {
+    if (!platform || !nativeId) {
+      toast.error("Missing platform or meeting ID for stop request");
+      return;
+    }
     const key = `${platform}:${nativeId}`;
 
     // Prevent duplicate requests
@@ -118,6 +125,7 @@ export default function AdminBotsPage() {
   );
   const completedMeetings = meetings.filter(m => m.status === "completed");
   const failedMeetings = meetings.filter(m => m.status === "failed");
+  const runningBotKeys = new Set(runningBots.map(bot => `${bot.platform}:${bot.native_meeting_id}`));
 
   if (isLoading) {
     return (
@@ -144,7 +152,7 @@ export default function AdminBotsPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-[-0.02em] text-foreground flex items-center gap-3">
+          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
             <Bot className="h-8 w-8" />
             Bots & Meetings
           </h1>
@@ -333,7 +341,15 @@ export default function AdminBotsPage() {
                     const StatusIcon = statusConfig.icon;
                     const isActive = meeting.status === "requested" || meeting.status === "joining" ||
                                    meeting.status === "awaiting_admission" || meeting.status === "active";
-                    const isStopping = stoppingBots.has(`${meeting.platform}:${meeting.platform_specific_id}`);
+                    const hasStopTarget = Boolean(meeting.platform) && Boolean(meeting.platform_specific_id);
+                    const hasRunningBot = hasStopTarget && runningBotKeys.has(`${meeting.platform}:${meeting.platform_specific_id}`);
+                    const canStop = hasStopTarget && (isActive || hasRunningBot || (meeting.status === "failed" && Boolean(meeting.bot_container_id)));
+                    const isStopping = hasStopTarget && stoppingBots.has(`${meeting.platform}:${meeting.platform_specific_id}`);
+                    const stopDescription = isActive
+                      ? "This will stop the transcription bot for this meeting."
+                      : meeting.status === "failed"
+                        ? "This will attempt to stop any remaining bot process for this failed meeting."
+                        : "This will attempt to stop any remaining bot process for this meeting.";
 
                     const duration = meeting.start_time && meeting.end_time
                       ? Math.round((new Date(meeting.end_time).getTime() - new Date(meeting.start_time).getTime()) / 60000)
@@ -362,7 +378,7 @@ export default function AdminBotsPage() {
                           {duration ? `${duration} min` : "-"}
                         </TableCell>
                         <TableCell className="text-right">
-                          {isActive && (
+                          {canStop && (
                             <AlertDialog>
                               <AlertDialogTrigger asChild>
                                 <Button
@@ -382,7 +398,7 @@ export default function AdminBotsPage() {
                                 <AlertDialogHeader>
                                   <AlertDialogTitle>Stop this bot?</AlertDialogTitle>
                                   <AlertDialogDescription>
-                                    This will stop the transcription bot for this meeting.
+                                    {stopDescription}
                                   </AlertDialogDescription>
                                 </AlertDialogHeader>
                                 <AlertDialogFooter>

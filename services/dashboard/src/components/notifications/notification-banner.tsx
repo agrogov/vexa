@@ -15,8 +15,7 @@ interface Notification {
 }
 
 const DISMISSED_KEY = "dismissed-notifications";
-const BLOG_URL =
-  process.env.NEXT_PUBLIC_BLOG_URL || "https://blog.vexa.ai";
+const BLOG_URL = process.env.NEXT_PUBLIC_BLOG_URL || "";
 
 function getDismissedIds(): string[] {
   if (typeof window === "undefined") return [];
@@ -59,6 +58,7 @@ export function NotificationBanner() {
     setDismissed(getDismissedIds());
 
     async function fetchNotifications() {
+      if (!BLOG_URL) return;
       try {
         const resp = await fetch(`${BLOG_URL}/notifications.json`, {
           cache: "no-store",

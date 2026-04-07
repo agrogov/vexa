@@ -1573,10 +1573,10 @@ async def bot_exit_callback(
         logger.info(f"Bot exit callback: Scheduling post-meeting tasks for meeting {meeting.id}.")
         background_tasks.add_task(run_all_tasks, meeting.id)
 
-        # If the bot exited with an error, it might not have cleaned itself up.
-        # Schedule a delayed stop as a safeguard.
-        if exit_code != 0 and meeting.bot_container_id:
-            logger.warning(f"Bot exit callback: Scheduling delayed stop for container {meeting.bot_container_id} of failed meeting {meeting.id}.")
+        # Always clean up the pod after exit, regardless of exit code.
+        # Completed pods (exit_code=0) are not auto-deleted by K8s and accumulate otherwise.
+        if meeting.bot_container_id:
+            logger.info(f"Bot exit callback: Scheduling pod cleanup for container {meeting.bot_container_id} of meeting {meeting.id} (exit_code={exit_code}).")
             background_tasks.add_task(_delayed_container_stop, meeting.bot_container_id, meeting.id, 10)
 
         return {"status": "callback processed", "meeting_id": meeting.id, "final_status": meeting.status}

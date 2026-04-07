@@ -1,0 +1,13 @@
+diff --git a/build-images.sh b/build-images.sh
+index 6d659466..fb25e2b8 100755
+--- a/build-images.sh
++++ b/build-images.sh
+@@ -17,7 +17,7 @@ echo "Building Vexa images (PROFILE=$PROFILE, VERSION=$VERSION)"
+ 
+ # Bot image (spawned dynamically by bot-manager)
+ echo "Building ${BASE_REPO}/vexa/vexa-bot:${VERSION}"
+-docker build -t "${BASE_REPO}/vexa/vexa-bot:${VERSION}" -f services/vexa-bot/core/Dockerfile services/vexa-bot/core
++docker build -t "${BASE_REPO}/vexa/vexa-bot:${VERSION}" -f services/vexa-bot/Dockerfile services/vexa-bot
+ 
+ # Core services
+ echo "Building ${BASE_REPO}/vexa/api-gateway:${VERSION}"

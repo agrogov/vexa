@@ -1,5 +1,6 @@
 "use client";
 
+import { withBasePath } from "@/lib/base-path";
 import { useState, useEffect } from "react";
 import {
   User,
@@ -95,7 +96,7 @@ export default function ProfilePage() {
     async function fetchKeys() {
       if (!user?.id) return;
       try {
-        const response = await fetch(`/api/profile/keys?userId=${user.id}`);
+        const response = await fetch(withBasePath(`/api/profile/keys?userId=${user.id}`));
         if (!response.ok) {
           // Graceful fallback — endpoint may not exist yet
           setApiKeys([]);
@@ -125,7 +126,7 @@ export default function ProfilePage() {
   const handleCreateKey = async () => {
     setIsCreatingKey(true);
     try {
-      const response = await fetch("/api/profile/keys", {
+      const response = await fetch(withBasePath("/api/profile/keys"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: newKeyName, scope: newKeyScope, userId: user?.id }),
@@ -155,7 +156,7 @@ export default function ProfilePage() {
 
   const handleRevokeKey = async (keyId: string) => {
     try {
-      const response = await fetch(`/api/profile/keys/${keyId}`, { method: "DELETE" });
+      const response = await fetch(withBasePath(`/api/profile/keys/${keyId}`), { method: "DELETE" });
       if (!response.ok) throw new Error("Failed to revoke key");
       setApiKeys((prev) => prev.filter((k) => k.id !== keyId));
       toast.success("API key revoked");

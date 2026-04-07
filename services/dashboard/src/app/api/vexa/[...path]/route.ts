@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 async function proxyRequest(
   request: NextRequest,
   params: Promise<{ path: string[] }>,
@@ -51,13 +54,13 @@ async function proxyRequest(
       }
     }
 
-    const response = await fetch(url, fetchOptions);
+    const response = await fetch(url, { ...fetchOptions, cache: "no-store", next: { revalidate: 0 } });
     clearTimeout(timeoutId);
 
     // Handle empty responses
     const contentType = response.headers.get("content-type");
     if (response.status === 204) {
-      return new NextResponse(null, { status: response.status });
+      return new NextResponse(null, { status: response.status, headers: { "Cache-Control": "no-store" } });
     }
 
     // Stream binary responses (audio, video, octet-stream) directly
@@ -76,7 +79,7 @@ async function proxyRequest(
     }
 
     const data = await response.json();
-    return NextResponse.json(data, { status: response.status });
+    return NextResponse.json(data, { status: response.status, headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     const isTimeout = error instanceof DOMException && error.name === "AbortError";
     console.error(`Proxy ${isTimeout ? "timeout" : "error"} for ${method} ${url}:`, error);

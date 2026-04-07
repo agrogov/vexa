@@ -68,6 +68,10 @@ spec:
             {{- end }}
             - name: DOCKER_NETWORK
               value: {{ .Values.botManager.bot.dockerNetwork | quote }}
+            {{- if .Values.botManager.bot.nodeSelector }}
+            - name: BOT_NODE_SELECTOR
+              value: {{ .Values.botManager.bot.nodeSelector | quote }}
+            {{- end }}
             - name: BOT_CALLBACK_BASE_URL
               value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "bot-manager")) .Release.Namespace .Values.global.clusterDomain (.Values.botManager.service.port | int)) .Values.botManager.callbackBaseUrl | quote }}
             - name: BOT_MANAGER_CALLBACK_URL
@@ -81,21 +85,21 @@ spec:
             {{- if .Values.botManager.zoom.clientId }}
             - name: ZOOM_CLIENT_ID
               value: {{ .Values.botManager.zoom.clientId | quote }}
-            {{- else if or .Values.botManager.zoom.existingSecretName .Values.secrets.existingSecretName }}
+            {{- else if .Values.botManager.zoom.existingSecretName }}
             - name: ZOOM_CLIENT_ID
               valueFrom:
                 secretKeyRef:
-                  name: {{ default .Values.secrets.existingSecretName .Values.botManager.zoom.existingSecretName | quote }}
+                  name: {{ .Values.botManager.zoom.existingSecretName | quote }}
                   key: {{ .Values.botManager.zoom.clientIdKey | quote }}
             {{- end }}
             {{- if .Values.botManager.zoom.clientSecret }}
             - name: ZOOM_CLIENT_SECRET
               value: {{ .Values.botManager.zoom.clientSecret | quote }}
-            {{- else if or .Values.botManager.zoom.existingSecretName .Values.secrets.existingSecretName }}
+            {{- else if .Values.botManager.zoom.existingSecretName }}
             - name: ZOOM_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ default .Values.secrets.existingSecretName .Values.botManager.zoom.existingSecretName | quote }}
+                  name: {{ .Values.botManager.zoom.existingSecretName | quote }}
                   key: {{ .Values.botManager.zoom.clientSecretKey | quote }}
             {{- end }}
             - name: ADMIN_TOKEN

@@ -89,13 +89,13 @@ function mapMeeting(raw: RawMeeting): Meeting {
 export const vexaAPI = {
   // Meetings
   async getMeetings(): Promise<Meeting[]> {
-    const response = await fetch("/api/vexa/meetings");
+    const response = await fetch(withBasePath("/api/vexa/meetings"));
     const data = await handleResponse<{ meetings: RawMeeting[] }>(response);
     return (data.meetings || []).map(mapMeeting);
   },
 
   async getMeeting(id: string): Promise<Meeting> {
-    const response = await fetch(`/api/vexa/meetings/${id}`);
+    const response = await fetch(withBasePath(`/api/vexa/meetings/${id}`));
     return handleResponse<Meeting>(response);
   },
 
@@ -115,7 +115,7 @@ export const vexaAPI = {
     meetingId?: string
   ): Promise<{ meeting: Meeting; segments: TranscriptSegment[]; recordings: RecordingData[] }> {
     const params = meetingId ? `?meeting_id=${meetingId}` : "";
-    const response = await fetch(`/api/vexa/transcripts/${platform}/${nativeId}${params}`);
+    const response = await fetch(withBasePath(`/api/vexa/transcripts/${platform}/${nativeId}${params}`));
     interface RawSegment {
       start: number;
       end: number;
@@ -194,7 +194,7 @@ export const vexaAPI = {
     if (ttlSeconds) params.set("ttl_seconds", String(ttlSeconds));
     const qs = params.toString();
 
-    const response = await fetch(`/api/vexa/transcripts/${platform}/${nativeId}/share${qs ? `?${qs}` : ""}`, {
+    const response = await fetch(withBasePath(`/api/vexa/transcripts/${platform}/${nativeId}/share${qs ? `?${qs}` : ""}`), {
       method: "POST",
     });
     return handleResponse<{ share_id: string; url: string; expires_at: string; expires_in_seconds: number }>(response);
@@ -202,7 +202,7 @@ export const vexaAPI = {
 
   // Bots
   async createBot(request: CreateBotRequest): Promise<Meeting> {
-    const response = await fetch("/api/vexa/bots", {
+    const response = await fetch(withBasePath("/api/vexa/bots"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
@@ -212,7 +212,7 @@ export const vexaAPI = {
   },
 
   async stopBot(platform: Platform, nativeId: string): Promise<void> {
-    const response = await fetch(`/api/vexa/bots/${platform}/${nativeId}`, {
+    const response = await fetch(withBasePath(`/api/vexa/bots/${platform}/${nativeId}`), {
       method: "DELETE",
     });
     if (!response.ok) {
@@ -229,7 +229,7 @@ export const vexaAPI = {
     nativeId: string,
     config: BotConfigUpdate
   ): Promise<void> {
-    const response = await fetch(`/api/vexa/bots/${platform}/${nativeId}/config`, {
+    const response = await fetch(withBasePath(`/api/vexa/bots/${platform}/${nativeId}/config`), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(config),
@@ -251,7 +251,7 @@ export const vexaAPI = {
 
   // Bot status - check if bots are actually running
   async getBotStatus(): Promise<{ running_bots: Array<{ container_id: string; meeting_id: number; platform: string; native_meeting_id: string }> }> {
-    const response = await fetch("/api/vexa/bots/status");
+    const response = await fetch(withBasePath("/api/vexa/bots/status"));
     return handleResponse<{ running_bots: Array<{ container_id: string; meeting_id: number; platform: string; native_meeting_id: string }> }>(response);
   },
 
@@ -278,7 +278,7 @@ export const vexaAPI = {
       languages?: string[];
     }
   ): Promise<Meeting> {
-    const response = await fetch(`/api/vexa/meetings/${platform}/${nativeId}`, {
+    const response = await fetch(withBasePath(`/api/vexa/meetings/${platform}/${nativeId}`), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ data }),
@@ -327,7 +327,7 @@ export const vexaAPI = {
   ): Promise<{ status: string; segment_count: number; language: string }> {
     const body: Record<string, string> = {};
     if (language) body.language = language;
-    const response = await fetch(`/api/vexa/meetings/${meetingId}/transcribe`, {
+    const response = await fetch(withBasePath(`/api/vexa/meetings/${meetingId}/transcribe`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -338,7 +338,7 @@ export const vexaAPI = {
   // Connection test
   async testConnection(): Promise<{ success: boolean; error?: string }> {
     try {
-      const response = await fetch("/api/vexa/meetings");
+      const response = await fetch(withBasePath("/api/vexa/meetings"));
       if (response.ok) {
         return { success: true };
       }

@@ -117,6 +117,7 @@ async def start_bot_container(
     video_receive_enabled: Optional[bool] = None,
     camera_enabled: Optional[bool] = None,
     agent_enabled: Optional[bool] = None,
+    extra_bot_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[Tuple[str, str]]:
     """Start a bot as a Kubernetes Pod.
 
@@ -195,6 +196,8 @@ async def start_bot_container(
         bot_config["cameraEnabled"] = bool(camera_enabled)
     if default_avatar_url:
         bot_config["defaultAvatarUrl"] = default_avatar_url
+    if extra_bot_config and isinstance(extra_bot_config, dict):
+        bot_config.update(extra_bot_config)
 
     # Transcription service URL — required for per-speaker pipeline
     tx_url = os.getenv("TRANSCRIPTION_SERVICE_URL")
@@ -413,6 +416,92 @@ async def verify_container_running(container_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Browser Session (interactive bot with VNC/CDP ports)
+# ---------------------------------------------------------------------------
+
+async def start_browser_session_container(
+    user_id: int,
+    meeting_id: int,
+    container_name: str,
+    bot_config_json: str,
+) -> Optional[Tuple[str, str]]:
+    """Start a vexa-bot Pod in browser_session mode.
+
+    Returns (pod_name, pod_name) on success, (None, None) on failure.
+    """
+    bot_env = [
+        client.V1EnvVar(name="BOT_CONFIG", value=bot_config_json),
+        client.V1EnvVar(name="BOT_MODE", value="browser_session"),
+        client.V1EnvVar(name="LOG_LEVEL", value=os.getenv("LOG_LEVEL", "INFO")),
+    ]
+
+    container = client.V1Container(
+        name="bot",
+        image=BOT_IMAGE_NAME,
+        image_pull_policy=IMAGE_PULL_POLICY,
+        env=bot_env,
+        resources=client.V1ResourceRequirements(
+            requests={"cpu": BOT_CPU_REQUEST, "memory": BOT_MEMORY_REQUEST},
+            limits={"cpu": BOT_CPU_LIMIT, "memory": BOT_MEMORY_LIMIT},
+        ),
+        ports=[
+            client.V1ContainerPort(container_port=6080, name="vnc"),
+            client.V1ContainerPort(container_port=9223, name="cdp"),
+        ],
+        volume_mounts=[
+            client.V1VolumeMount(name="dshm", mount_path="/dev/shm"),
+        ],
+    )
+
+    image_pull_secrets = None
+    if IMAGE_PULL_SECRET:
+        image_pull_secrets = [client.V1LocalObjectReference(name=IMAGE_PULL_SECRET)]
+
+    pod = client.V1Pod(
+        api_version="v1",
+        kind="Pod",
+        metadata=client.V1ObjectMeta(
+            name=container_name,
+            namespace=BOT_NAMESPACE,
+            labels={
+                "app.kubernetes.io/name": "vexa-bot",
+                "app.kubernetes.io/managed-by": "vexa-bot-manager",
+                "vexa.user-id": str(user_id),
+                "vexa.meeting-id": str(meeting_id),
+                "vexa.mode": "browser_session",
+            },
+        ),
+        spec=client.V1PodSpec(
+            restart_policy="Never",
+            termination_grace_period_seconds=10,
+            service_account_name=BOT_SERVICE_ACCOUNT or None,
+            image_pull_secrets=image_pull_secrets,
+            node_selector=BOT_NODE_SELECTOR or None,
+            containers=[container],
+            volumes=[
+                client.V1Volume(
+                    name="dshm",
+                    empty_dir=client.V1EmptyDirVolumeSource(medium="Memory", size_limit="2Gi"),
+                )
+            ],
+        ),
+    )
+
+    try:
+        api = _get_k8s_api()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: api.create_namespaced_pod(namespace=BOT_NAMESPACE, body=pod),
+        )
+        logger.info(f"Started browser session pod {container_name} for user {user_id}, meeting {meeting_id}")
+        return container_name, container_name
+    except Exception as e:
+        logger.error(f"Failed to start browser session pod {container_name}: {e}", exc_info=True)
+        return None, None
+
+
+# ---------------------------------------------------------------------------
 # Session Recording (shared with other orchestrators)
 # ---------------------------------------------------------------------------
 
@@ -427,6 +516,7 @@ __all__ = [
     "get_socket_session",
     "close_docker_client",
     "start_bot_container",
+    "start_browser_session_container",
     "stop_bot_container",
     "_record_session_start",
     "get_running_bots_status",

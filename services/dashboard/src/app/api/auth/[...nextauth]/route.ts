@@ -16,12 +16,12 @@ const isGoogleAuthEnabled = () => {
   return hasConfig;
 };
 
-// Check if Microsoft OAuth is enabled
-const isMicrosoftAuthEnabled = () => {
-  const enableMicrosoftAuth = process.env.ENABLE_MICROSOFT_AUTH;
-  if (enableMicrosoftAuth === "false" || enableMicrosoftAuth === "0") return false;
-  const hasConfig = !!(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET && process.env.NEXTAUTH_URL);
-  if (enableMicrosoftAuth === "true" || enableMicrosoftAuth === "1") return hasConfig;
+// Check if Azure AD OAuth is enabled
+const isAzureAdAuthEnabled = () => {
+  const enableAzureAdAuth = process.env.ENABLE_AZURE_AD_AUTH;
+  if (enableAzureAdAuth === "false" || enableAzureAdAuth === "0") return false;
+  const hasConfig = !!(process.env.AZURE_AD_CLIENT_ID && process.env.AZURE_AD_CLIENT_SECRET && process.env.AZURE_AD_TENANT_ID && process.env.NEXTAUTH_URL);
+  if (enableAzureAdAuth === "true" || enableAzureAdAuth === "1") return hasConfig;
   return hasConfig;
 };
 
@@ -35,26 +35,24 @@ export const authOptions: NextAuthOptions = {
           }),
         ]
       : []),
-    ...(isMicrosoftAuthEnabled()
+    ...(isAzureAdAuthEnabled()
       ? [
           AzureADProvider({
-            id: "microsoft",
-            name: "Microsoft",
-            clientId: process.env.MICROSOFT_CLIENT_ID!,
-            clientSecret: process.env.MICROSOFT_CLIENT_SECRET!,
-            tenantId: process.env.MICROSOFT_TENANT_ID || "common",
+            clientId: process.env.AZURE_AD_CLIENT_ID!,
+            clientSecret: process.env.AZURE_AD_CLIENT_SECRET!,
+            tenantId: process.env.AZURE_AD_TENANT_ID || "common",
           }),
         ]
       : []),
   ],
   pages: {
-    signIn: "/login",
-    error: "/login",
+    signIn: withBasePath("/login"),
+    error: withBasePath("/login"),
   },
   callbacks: {
     async signIn({ user, account, profile }) {
       // This callback is called after successful OAuth but before session creation
-      if ((account?.provider === "google" || account?.provider === "microsoft") && user.email) {
+      if ((account?.provider === "google" || account?.provider === "azure-ad") && user.email) {
         try {
           // Step 1: Find or create user in Vexa Admin API
           let vexaUser;
@@ -151,8 +149,11 @@ export const authOptions: NextAuthOptions = {
   secret: process.env.NEXTAUTH_SECRET || process.env.VEXA_ADMIN_API_KEY,
   // Explicit cookie config avoids the __Host- / __Secure- prefix auto-detection
   // that breaks behind SSL-terminating reverse proxies or when a basePath is set.
-  // Security (Secure flag) is derived from NEXTAUTH_URL so it still works on HTTPS.
-  useSecureCookies: process.env.NEXTAUTH_URL?.startsWith("https://"),
+  // The short-lived OAuth flow cookies (state, pkce) must NOT have Secure=true
+  // because they are set by the pod over HTTP (Istio terminates SSL), so the
+  // browser would receive them but the Set-Cookie with Secure gets dropped in
+  // some proxy configurations. Session token keeps Secure since it's long-lived.
+  useSecureCookies: false,
   cookies: {
     sessionToken: {
       name: "next-auth.session-token",
@@ -169,7 +170,7 @@ export const authOptions: NextAuthOptions = {
         httpOnly: true,
         sameSite: "lax" as const,
         path: "/",
-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
+        secure: false,
       },
     },
     csrfToken: {
@@ -178,7 +179,7 @@ export const authOptions: NextAuthOptions = {
         httpOnly: true,
         sameSite: "lax" as const,
         path: "/",
-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
+        secure: false,
       },
     },
     pkceCodeVerifier: {
@@ -187,7 +188,7 @@ export const authOptions: NextAuthOptions = {
         httpOnly: true,
         sameSite: "lax" as const,
         path: "/",
-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
+        secure: false,
       },
     },
     state: {
@@ -196,7 +197,7 @@ export const authOptions: NextAuthOptions = {
         httpOnly: true,
         sameSite: "lax" as const,
         path: "/",
-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
+        secure: false,
       },
     },
   },

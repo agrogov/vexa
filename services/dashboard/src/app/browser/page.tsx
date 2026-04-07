@@ -2,10 +2,10 @@
 
 import { useState, useEffect } from "react";
 import { Monitor, Plus, ExternalLink, Trash2, Loader2, Save, Copy } from "lucide-react";
+import { withBasePath } from "@/lib/base-path";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-
-const API_URL = process.env.NEXT_PUBLIC_VEXA_API_URL || "http://localhost:8056";
 
 interface BrowserSession {
   id: number;
@@ -18,6 +18,8 @@ interface BrowserSession {
 }
 
 export default function BrowserPage() {
+  const { config } = useRuntimeConfig();
+  const apiUrl = config?.publicApiUrl ?? config?.apiUrl ?? "http://localhost:18056";
   const [session, setSession] = useState<BrowserSession | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -30,7 +32,7 @@ export default function BrowserPage() {
   async function fetchActiveSession() {
     setIsLoading(true);
     try {
-      const response = await fetch("/api/vexa/bots/status");
+      const response = await fetch(withBasePath("/api/vexa/bots/status"));
       if (response.ok) {
         const data = await response.json();
         const sessions = (Array.isArray(data) ? data : data.bots || [])
@@ -47,7 +49,7 @@ export default function BrowserPage() {
   async function createSession() {
     setIsCreating(true);
     try {
-      const response = await fetch("/api/vexa/bots", {
+      const response = await fetch(withBasePath("/api/vexa/bots"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: "browser_session" }),
@@ -68,7 +70,7 @@ export default function BrowserPage() {
     setIsSaving(true);
     try {
       const token = session.data.session_token;
-      const response = await fetch(`${API_URL}/b/${token}/save`, { method: "POST" });
+      const response = await fetch(`${apiUrl}/b/${token}/save`, { method: "POST" });
       if (!response.ok) throw new Error(await response.text());
       toast.success("Storage saved");
     } catch (error) {
@@ -81,7 +83,7 @@ export default function BrowserPage() {
   async function stopSession() {
     if (!session) return;
     try {
-      await fetch(`/api/vexa/bots/browser_session/${session.id}`, { method: "DELETE" });
+      await fetch(withBasePath(`/api/vexa/bots/browser_session/${session.id}`), { method: "DELETE" });
       setSession(null);
       toast.success("Session stopped");
     } catch (error) {
@@ -90,8 +92,8 @@ export default function BrowserPage() {
   }
 
   const token = session?.data?.session_token;
-  const vncUrl = token ? `${API_URL}/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify` : null;
-  const cdpUrl = token ? `${API_URL}/b/${token}/cdp` : null;
+  const vncUrl = token ? `${apiUrl}/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify` : null;
+  const cdpUrl = token ? `${apiUrl}/b/${token}/cdp` : null;
 
   if (isLoading) {
     return (

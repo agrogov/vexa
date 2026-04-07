@@ -1,0 +1,1663 @@
+diff --git a/services/dashboard/src/app/admin/bots/page.tsx b/services/dashboard/src/app/admin/bots/page.tsx
+index c0190581..3f5fab6c 100644
+--- a/services/dashboard/src/app/admin/bots/page.tsx
++++ b/services/dashboard/src/app/admin/bots/page.tsx
+@@ -48,7 +48,7 @@ const STATUS_CONFIG: Record<MeetingStatus, { label: string; color: string; icon:
+   joining: { label: "Joining", color: "bg-yellow-100 text-yellow-700", icon: Play },
+   awaiting_admission: { label: "Waiting", color: "bg-orange-100 text-orange-700", icon: Clock },
+   active: { label: "Active", color: "bg-green-100 text-green-700", icon: CheckCircle },
+-  stopping: { label: "Stopping", color: "bg-slate-100 text-slate-700", icon: Loader2 },
++  stopping: { label: "Stopping", color: "bg-orange-100 text-orange-700", icon: Loader2 },
+   completed: { label: "Completed", color: "bg-blue-100 text-blue-700", icon: CheckCircle },
+   failed: { label: "Failed", color: "bg-red-100 text-red-700", icon: XCircle },
+ };
+@@ -68,7 +68,10 @@ export default function AdminBotsPage() {
+         vexaAPI.getBotStatus().catch(() => ({ running_bots: [] })),
+       ]);
+       setMeetings(meetingsData);
+-      setRunningBots(botsData.running_bots || []);
++      const validRunningBots = (botsData.running_bots || []).filter(
++        (bot) => Boolean(bot.platform) && Boolean(bot.native_meeting_id)
++      );
++      setRunningBots(validRunningBots);
+     } catch (error) {
+       console.error("Failed to fetch data:", error);
+       toast.error("Failed to load data");
+@@ -85,7 +88,11 @@ export default function AdminBotsPage() {
+     return () => clearInterval(interval);
+   }, [fetchData]);
+ 
+-  const handleStopBot = useCallback(async (platform: Platform, nativeId: string) => {
++  const handleStopBot = useCallback(async (platform?: Platform | null, nativeId?: string | null) => {
++    if (!platform || !nativeId) {
++      toast.error("Missing platform or meeting ID for stop request");
++      return;
++    }
+     const key = `${platform}:${nativeId}`;
+ 
+     // Prevent duplicate requests
+@@ -118,6 +125,7 @@ export default function AdminBotsPage() {
+   );
+   const completedMeetings = meetings.filter(m => m.status === "completed");
+   const failedMeetings = meetings.filter(m => m.status === "failed");
++  const runningBotKeys = new Set(runningBots.map(bot => `${bot.platform}:${bot.native_meeting_id}`));
+ 
+   if (isLoading) {
+     return (
+@@ -144,7 +152,7 @@ export default function AdminBotsPage() {
+       {/* Header */}
+       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+         <div>
+-          <h1 className="text-2xl font-semibold tracking-[-0.02em] text-foreground flex items-center gap-3">
++          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-3">
+             <Bot className="h-8 w-8" />
+             Bots & Meetings
+           </h1>
+@@ -333,7 +341,15 @@ export default function AdminBotsPage() {
+                     const StatusIcon = statusConfig.icon;
+                     const isActive = meeting.status === "requested" || meeting.status === "joining" ||
+                                    meeting.status === "awaiting_admission" || meeting.status === "active";
+-                    const isStopping = stoppingBots.has(`${meeting.platform}:${meeting.platform_specific_id}`);
++                    const hasStopTarget = Boolean(meeting.platform) && Boolean(meeting.platform_specific_id);
++                    const hasRunningBot = hasStopTarget && runningBotKeys.has(`${meeting.platform}:${meeting.platform_specific_id}`);
++                    const canStop = hasStopTarget && (isActive || hasRunningBot || (meeting.status === "failed" && Boolean(meeting.bot_container_id)));
++                    const isStopping = hasStopTarget && stoppingBots.has(`${meeting.platform}:${meeting.platform_specific_id}`);
++                    const stopDescription = isActive
++                      ? "This will stop the transcription bot for this meeting."
++                      : meeting.status === "failed"
++                        ? "This will attempt to stop any remaining bot process for this failed meeting."
++                        : "This will attempt to stop any remaining bot process for this meeting.";
+ 
+                     const duration = meeting.start_time && meeting.end_time
+                       ? Math.round((new Date(meeting.end_time).getTime() - new Date(meeting.start_time).getTime()) / 60000)
+@@ -362,7 +378,7 @@ export default function AdminBotsPage() {
+                           {duration ? `${duration} min` : "-"}
+                         </TableCell>
+                         <TableCell className="text-right">
+-                          {isActive && (
++                          {canStop && (
+                             <AlertDialog>
+                               <AlertDialogTrigger asChild>
+                                 <Button
+@@ -382,7 +398,7 @@ export default function AdminBotsPage() {
+                                 <AlertDialogHeader>
+                                   <AlertDialogTitle>Stop this bot?</AlertDialogTitle>
+                                   <AlertDialogDescription>
+-                                    This will stop the transcription bot for this meeting.
++                                    {stopDescription}
+                                   </AlertDialogDescription>
+                                 </AlertDialogHeader>
+                                 <AlertDialogFooter>
+diff --git a/services/dashboard/src/app/api/ai/chat/route.ts b/services/dashboard/src/app/api/ai/chat/route.ts
+index b0669661..5497226a 100644
+--- a/services/dashboard/src/app/api/ai/chat/route.ts
++++ b/services/dashboard/src/app/api/ai/chat/route.ts
+@@ -25,6 +25,7 @@ function getModel() {
+ 
+   const apiKey = process.env.AI_API_KEY;
+   const baseUrl = process.env.AI_BASE_URL;
++  const apiVersion = process.env.AI_API_VERSION;
+   const { provider, model } = config;
+ 
+   switch (provider) {
+@@ -37,6 +38,35 @@ function getModel() {
+       return openai(model);
+     }
+ 
++    case "azure": {
++      if (!apiKey) throw new Error("AI_API_KEY is required for Azure OpenAI");
++      if (!baseUrl) throw new Error("AI_BASE_URL is required for Azure OpenAI");
++      const azureBaseUrl = baseUrl.replace(/\/$/, "");
++
++      const azure = createOpenAI({
++        apiKey,
++        baseURL: azureBaseUrl,
++        fetch: (url, options) => {
++          const requestUrl = url instanceof Request ? new URL(url.url) : new URL(url);
++          if (apiVersion && !requestUrl.searchParams.has("api-version")) {
++            requestUrl.searchParams.set("api-version", apiVersion);
++          }
++          const headers = new Headers((url instanceof Request ? url.headers : options?.headers) || {});
++          if (!headers.has("api-key")) {
++            headers.set("api-key", apiKey);
++          }
++          if (headers.has("authorization")) {
++            headers.delete("authorization");
++          }
++          if (url instanceof Request) {
++            return fetch(new Request(requestUrl.toString(), { ...url, headers }));
++          }
++          return fetch(requestUrl.toString(), { ...options, headers });
++        },
++      });
++      return azure(model);
++    }
++
+     case "anthropic": {
+       if (!apiKey) throw new Error("AI_API_KEY is required for Anthropic");
+       const anthropic = createAnthropic({
+diff --git a/services/dashboard/src/app/api/auth/[...nextauth]/route.ts b/services/dashboard/src/app/api/auth/[...nextauth]/route.ts
+index 519982dd..b5775615 100644
+--- a/services/dashboard/src/app/api/auth/[...nextauth]/route.ts
++++ b/services/dashboard/src/app/api/auth/[...nextauth]/route.ts
+@@ -16,12 +16,12 @@ const isGoogleAuthEnabled = () => {
+   return hasConfig;
+ };
+ 
+-// Check if Microsoft OAuth is enabled
+-const isMicrosoftAuthEnabled = () => {
+-  const enableMicrosoftAuth = process.env.ENABLE_MICROSOFT_AUTH;
+-  if (enableMicrosoftAuth === "false" || enableMicrosoftAuth === "0") return false;
+-  const hasConfig = !!(process.env.MICROSOFT_CLIENT_ID && process.env.MICROSOFT_CLIENT_SECRET && process.env.NEXTAUTH_URL);
+-  if (enableMicrosoftAuth === "true" || enableMicrosoftAuth === "1") return hasConfig;
++// Check if Azure AD OAuth is enabled
++const isAzureAdAuthEnabled = () => {
++  const enableAzureAdAuth = process.env.ENABLE_AZURE_AD_AUTH;
++  if (enableAzureAdAuth === "false" || enableAzureAdAuth === "0") return false;
++  const hasConfig = !!(process.env.AZURE_AD_CLIENT_ID && process.env.AZURE_AD_CLIENT_SECRET && process.env.AZURE_AD_TENANT_ID && process.env.NEXTAUTH_URL);
++  if (enableAzureAdAuth === "true" || enableAzureAdAuth === "1") return hasConfig;
+   return hasConfig;
+ };
+ 
+@@ -35,26 +35,24 @@ export const authOptions: NextAuthOptions = {
+           }),
+         ]
+       : []),
+-    ...(isMicrosoftAuthEnabled()
++    ...(isAzureAdAuthEnabled()
+       ? [
+           AzureADProvider({
+-            id: "microsoft",
+-            name: "Microsoft",
+-            clientId: process.env.MICROSOFT_CLIENT_ID!,
+-            clientSecret: process.env.MICROSOFT_CLIENT_SECRET!,
+-            tenantId: process.env.MICROSOFT_TENANT_ID || "common",
++            clientId: process.env.AZURE_AD_CLIENT_ID!,
++            clientSecret: process.env.AZURE_AD_CLIENT_SECRET!,
++            tenantId: process.env.AZURE_AD_TENANT_ID || "common",
+           }),
+         ]
+       : []),
+   ],
+   pages: {
+-    signIn: "/login",
+-    error: "/login",
++    signIn: withBasePath("/login"),
++    error: withBasePath("/login"),
+   },
+   callbacks: {
+     async signIn({ user, account, profile }) {
+       // This callback is called after successful OAuth but before session creation
+-      if ((account?.provider === "google" || account?.provider === "microsoft") && user.email) {
++      if ((account?.provider === "google" || account?.provider === "azure-ad") && user.email) {
+         try {
+           // Step 1: Find or create user in Vexa Admin API
+           let vexaUser;
+@@ -151,8 +149,11 @@ export const authOptions: NextAuthOptions = {
+   secret: process.env.NEXTAUTH_SECRET || process.env.VEXA_ADMIN_API_KEY,
+   // Explicit cookie config avoids the __Host- / __Secure- prefix auto-detection
+   // that breaks behind SSL-terminating reverse proxies or when a basePath is set.
+-  // Security (Secure flag) is derived from NEXTAUTH_URL so it still works on HTTPS.
+-  useSecureCookies: process.env.NEXTAUTH_URL?.startsWith("https://"),
++  // The short-lived OAuth flow cookies (state, pkce) must NOT have Secure=true
++  // because they are set by the pod over HTTP (Istio terminates SSL), so the
++  // browser would receive them but the Set-Cookie with Secure gets dropped in
++  // some proxy configurations. Session token keeps Secure since it's long-lived.
++  useSecureCookies: false,
+   cookies: {
+     sessionToken: {
+       name: "next-auth.session-token",
+@@ -169,7 +170,7 @@ export const authOptions: NextAuthOptions = {
+         httpOnly: true,
+         sameSite: "lax" as const,
+         path: "/",
+-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
++        secure: false,
+       },
+     },
+     csrfToken: {
+@@ -178,7 +179,7 @@ export const authOptions: NextAuthOptions = {
+         httpOnly: true,
+         sameSite: "lax" as const,
+         path: "/",
+-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
++        secure: false,
+       },
+     },
+     pkceCodeVerifier: {
+@@ -187,7 +188,7 @@ export const authOptions: NextAuthOptions = {
+         httpOnly: true,
+         sameSite: "lax" as const,
+         path: "/",
+-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
++        secure: false,
+       },
+     },
+     state: {
+@@ -196,7 +197,7 @@ export const authOptions: NextAuthOptions = {
+         httpOnly: true,
+         sameSite: "lax" as const,
+         path: "/",
+-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
++        secure: false,
+       },
+     },
+   },
+diff --git a/services/dashboard/src/app/api/auth/admin-verify/route.ts b/services/dashboard/src/app/api/auth/admin-verify/route.ts
+index e61da072..1c4b29d5 100644
+--- a/services/dashboard/src/app/api/auth/admin-verify/route.ts
++++ b/services/dashboard/src/app/api/auth/admin-verify/route.ts
+@@ -6,7 +6,7 @@ const ADMIN_COOKIE_NAME = "vexa-admin-session";
+ const COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours
+ 
+ function getSigningSecret(): string {
+-  const secret = process.env.JWT_SECRET;
++  const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET;
+   if (!secret) {
+     throw new Error("JWT_SECRET is not configured");
+   }
+diff --git a/services/dashboard/src/app/api/health/route.ts b/services/dashboard/src/app/api/health/route.ts
+index b5cd453f..db501418 100644
+--- a/services/dashboard/src/app/api/health/route.ts
++++ b/services/dashboard/src/app/api/health/route.ts
+@@ -5,11 +5,11 @@ export const dynamic = "force-dynamic";
+ 
+ interface HealthStatus {
+   status: "ok" | "degraded" | "error";
+-  authMode: "direct" | "magic-link" | "google" | "oauth";
++  authMode: "direct" | "magic-link" | "google" | "entra-id";
+   checks: {
+     smtp: { configured: boolean; optional: boolean; error?: string };
+     googleOAuth: { configured: boolean; optional: boolean; error?: string };
+-    microsoftOAuth: { configured: boolean; optional: boolean; error?: string };
++    azureAdOAuth: { configured: boolean; optional: boolean; error?: string };
+     adminApi: { configured: boolean; reachable: boolean; error?: string };
+     vexaApi: { configured: boolean; reachable: boolean; error?: string };
+   };
+@@ -26,25 +26,46 @@ export async function GET() {
+     checks: {
+       smtp: { configured: false, optional: true },
+       googleOAuth: { configured: false, optional: true },
+-      microsoftOAuth: { configured: false, optional: true },
++      azureAdOAuth: { configured: false, optional: true },
+       adminApi: { configured: false, reachable: false },
+       vexaApi: { configured: false, reachable: false },
+     },
+     missingConfig: [],
+   };
+ 
++  // Check Azure AD / Entra ID OAuth configuration (optional)
++  const enableAzureAdAuth = process.env.ENABLE_AZURE_AD_AUTH;
++  const azureAdClientId = process.env.AZURE_AD_CLIENT_ID;
++  const azureAdClientSecret = process.env.AZURE_AD_CLIENT_SECRET;
++  const azureAdTenantId = process.env.AZURE_AD_TENANT_ID;
++  const nextAuthUrl = process.env.NEXTAUTH_URL;
++
++  if (enableAzureAdAuth === "false" || enableAzureAdAuth === "0") {
++    status.checks.azureAdOAuth.error = "Azure AD OAuth is disabled";
++  } else if (azureAdClientId && azureAdClientSecret && azureAdTenantId && nextAuthUrl) {
++    status.checks.azureAdOAuth.configured = true;
++    status.authMode = "entra-id";
++  } else {
++    if (enableAzureAdAuth === "true" || enableAzureAdAuth === "1") {
++      status.checks.azureAdOAuth.error = "Azure AD OAuth is enabled but configuration is incomplete";
++    } else {
++      status.checks.azureAdOAuth.error = "Azure AD OAuth not configured";
++    }
++  }
++
+   // Check Google OAuth configuration (optional - enables Google auth)
+   const enableGoogleAuth = process.env.ENABLE_GOOGLE_AUTH;
+   const googleClientId = process.env.GOOGLE_CLIENT_ID;
+   const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+-  const nextAuthUrl = process.env.NEXTAUTH_URL;
+ 
+   // Check if explicitly disabled
+   if (enableGoogleAuth === "false" || enableGoogleAuth === "0") {
+     status.checks.googleOAuth.error = "Google OAuth is disabled";
+   } else if (googleClientId && googleClientSecret && nextAuthUrl) {
+     status.checks.googleOAuth.configured = true;
+-    status.authMode = "google";
++    if (!status.checks.azureAdOAuth.configured) {
++      status.authMode = "google";
++    }
+   } else {
+     // Google OAuth is optional
+     if (enableGoogleAuth === "true" || enableGoogleAuth === "1") {
+@@ -54,29 +75,6 @@ export async function GET() {
+     }
+   }
+ 
+-  // Check Microsoft OAuth configuration (optional - enables Microsoft auth)
+-  const enableMicrosoftAuth = process.env.ENABLE_MICROSOFT_AUTH;
+-  const microsoftClientId = process.env.MICROSOFT_CLIENT_ID;
+-  const microsoftClientSecret = process.env.MICROSOFT_CLIENT_SECRET;
+-
+-  if (enableMicrosoftAuth === "false" || enableMicrosoftAuth === "0") {
+-    status.checks.microsoftOAuth.error = "Microsoft OAuth is disabled";
+-  } else if (microsoftClientId && microsoftClientSecret && nextAuthUrl) {
+-    status.checks.microsoftOAuth.configured = true;
+-    // Use "oauth" when both providers are configured, "google" when only Google
+-    if (status.checks.googleOAuth.configured) {
+-      status.authMode = "oauth";
+-    } else {
+-      status.authMode = "oauth";
+-    }
+-  } else {
+-    if (enableMicrosoftAuth === "true" || enableMicrosoftAuth === "1") {
+-      status.checks.microsoftOAuth.error = "Microsoft OAuth is enabled but configuration is incomplete";
+-    } else {
+-      status.checks.microsoftOAuth.error = "Microsoft OAuth not configured";
+-    }
+-  }
+-
+   // Check SMTP configuration (optional - enables magic link auth)
+   const smtpHost = process.env.SMTP_HOST;
+   const smtpUser = process.env.SMTP_USER;
+@@ -85,7 +83,7 @@ export async function GET() {
+   if (smtpHost && smtpUser && smtpPass) {
+     status.checks.smtp.configured = true;
+     // Only set to magic-link if no OAuth provider is configured (OAuth takes precedence)
+-    if (!status.checks.googleOAuth.configured && !status.checks.microsoftOAuth.configured) {
++    if (!status.checks.googleOAuth.configured && !status.checks.azureAdOAuth.configured) {
+       status.authMode = "magic-link";
+     }
+   } else {
+diff --git a/services/dashboard/src/app/api/vexa/[...path]/route.ts b/services/dashboard/src/app/api/vexa/[...path]/route.ts
+index 467b6b52..9b182322 100644
+--- a/services/dashboard/src/app/api/vexa/[...path]/route.ts
++++ b/services/dashboard/src/app/api/vexa/[...path]/route.ts
+@@ -1,6 +1,9 @@
+ import { NextRequest, NextResponse } from "next/server";
+ import { cookies } from "next/headers";
+ 
++export const dynamic = "force-dynamic";
++export const revalidate = 0;
++
+ async function proxyRequest(
+   request: NextRequest,
+   params: Promise<{ path: string[] }>,
+@@ -51,13 +54,13 @@ async function proxyRequest(
+       }
+     }
+ 
+-    const response = await fetch(url, fetchOptions);
++    const response = await fetch(url, { ...fetchOptions, cache: "no-store", next: { revalidate: 0 } });
+     clearTimeout(timeoutId);
+ 
+     // Handle empty responses
+     const contentType = response.headers.get("content-type");
+     if (response.status === 204) {
+-      return new NextResponse(null, { status: response.status });
++      return new NextResponse(null, { status: response.status, headers: { "Cache-Control": "no-store" } });
+     }
+ 
+     // Stream binary responses (audio, video, octet-stream) directly
+@@ -76,7 +79,7 @@ async function proxyRequest(
+     }
+ 
+     const data = await response.json();
+-    return NextResponse.json(data, { status: response.status });
++    return NextResponse.json(data, { status: response.status, headers: { "Cache-Control": "no-store" } });
+   } catch (error) {
+     const isTimeout = error instanceof DOMException && error.name === "AbortError";
+     console.error(`Proxy ${isTimeout ? "timeout" : "error"} for ${method} ${url}:`, error);
+diff --git a/services/dashboard/src/app/auth/verify/page.tsx b/services/dashboard/src/app/auth/verify/page.tsx
+index 5ef92312..bf0ab691 100644
+--- a/services/dashboard/src/app/auth/verify/page.tsx
++++ b/services/dashboard/src/app/auth/verify/page.tsx
+@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
+ import { Button } from "@/components/ui/button";
+ import { Logo } from "@/components/ui/logo";
+ import { useAuthStore } from "@/stores/auth-store";
++import { withBasePath } from "@/lib/base-path";
+ 
+ type VerifyState = "verifying" | "success" | "error";
+ 
+@@ -57,7 +58,7 @@ function VerifyContent() {
+     }
+ 
+     try {
+-      const response = await fetch("/api/auth/verify", {
++      const response = await fetch(withBasePath("/api/auth/verify"), {
+         method: "POST",
+         headers: {
+           "Content-Type": "application/json",
+diff --git a/services/dashboard/src/app/auth/zoom/callback/page.tsx b/services/dashboard/src/app/auth/zoom/callback/page.tsx
+index c5dff1b0..14cd64a7 100644
+--- a/services/dashboard/src/app/auth/zoom/callback/page.tsx
++++ b/services/dashboard/src/app/auth/zoom/callback/page.tsx
+@@ -1,5 +1,6 @@
+ "use client";
+ 
++import { withBasePath } from "@/lib/base-path";
+ import { Suspense, useEffect, useState } from "react";
+ import { useRouter, useSearchParams } from "next/navigation";
+ import { Loader2, CheckCircle2, XCircle } from "lucide-react";
+@@ -50,7 +51,7 @@ function ZoomCallbackContent() {
+         return;
+       }
+ 
+-      const completeResp = await fetch("/api/zoom/oauth/complete", {
++      const completeResp = await fetch(withBasePath("/api/zoom/oauth/complete"), {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ code, state: stateParam }),
+diff --git a/services/dashboard/src/app/browser/page.tsx b/services/dashboard/src/app/browser/page.tsx
+index fa04c789..5f1e96ff 100644
+--- a/services/dashboard/src/app/browser/page.tsx
++++ b/services/dashboard/src/app/browser/page.tsx
+@@ -2,11 +2,11 @@
+ 
+ import { useState, useEffect } from "react";
+ import { Monitor, Plus, ExternalLink, Trash2, Loader2, Save, Copy } from "lucide-react";
++import { withBasePath } from "@/lib/base-path";
++import { useRuntimeConfig } from "@/hooks/use-runtime-config";
+ import { Button } from "@/components/ui/button";
+ import { toast } from "sonner";
+ 
+-const API_URL = process.env.NEXT_PUBLIC_VEXA_API_URL || "http://localhost:8056";
+-
+ interface BrowserSession {
+   id: number;
+   status: string;
+@@ -18,6 +18,8 @@ interface BrowserSession {
+ }
+ 
+ export default function BrowserPage() {
++  const { config } = useRuntimeConfig();
++  const apiUrl = config?.publicApiUrl ?? config?.apiUrl ?? "http://localhost:18056";
+   const [session, setSession] = useState<BrowserSession | null>(null);
+   const [isCreating, setIsCreating] = useState(false);
+   const [isSaving, setIsSaving] = useState(false);
+@@ -30,7 +32,7 @@ export default function BrowserPage() {
+   async function fetchActiveSession() {
+     setIsLoading(true);
+     try {
+-      const response = await fetch("/api/vexa/bots/status");
++      const response = await fetch(withBasePath("/api/vexa/bots/status"));
+       if (response.ok) {
+         const data = await response.json();
+         const sessions = (Array.isArray(data) ? data : data.bots || [])
+@@ -47,7 +49,7 @@ export default function BrowserPage() {
+   async function createSession() {
+     setIsCreating(true);
+     try {
+-      const response = await fetch("/api/vexa/bots", {
++      const response = await fetch(withBasePath("/api/vexa/bots"), {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ mode: "browser_session" }),
+@@ -68,7 +70,7 @@ export default function BrowserPage() {
+     setIsSaving(true);
+     try {
+       const token = session.data.session_token;
+-      const response = await fetch(`${API_URL}/b/${token}/save`, { method: "POST" });
++      const response = await fetch(`${apiUrl}/b/${token}/save`, { method: "POST" });
+       if (!response.ok) throw new Error(await response.text());
+       toast.success("Storage saved");
+     } catch (error) {
+@@ -81,7 +83,7 @@ export default function BrowserPage() {
+   async function stopSession() {
+     if (!session) return;
+     try {
+-      await fetch(`/api/vexa/bots/browser_session/${session.id}`, { method: "DELETE" });
++      await fetch(withBasePath(`/api/vexa/bots/browser_session/${session.id}`), { method: "DELETE" });
+       setSession(null);
+       toast.success("Session stopped");
+     } catch (error) {
+@@ -90,8 +92,8 @@ export default function BrowserPage() {
+   }
+ 
+   const token = session?.data?.session_token;
+-  const vncUrl = token ? `${API_URL}/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify` : null;
+-  const cdpUrl = token ? `${API_URL}/b/${token}/cdp` : null;
++  const vncUrl = token ? `${apiUrl}/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify` : null;
++  const cdpUrl = token ? `${apiUrl}/b/${token}/cdp` : null;
+ 
+   if (isLoading) {
+     return (
+diff --git a/services/dashboard/src/app/layout.tsx b/services/dashboard/src/app/layout.tsx
+index 4ee3b8db..f0191440 100644
+--- a/services/dashboard/src/app/layout.tsx
++++ b/services/dashboard/src/app/layout.tsx
+@@ -16,19 +16,21 @@ const jetbrainsMono = JetBrains_Mono({
+   subsets: ["latin"],
+ });
+ 
++const basePath = process.env.NEXT_PUBLIC_BASE_PATH || "";
++
+ export const metadata: Metadata = {
+   title: "Vexa Dashboard",
+   description: "Open source meeting transcription dashboard for Vexa",
+   icons: {
+     icon: [
+       {
+-        url: "/icons/vexadark.svg",
++        url: `${basePath}/icons/vexadark.svg`,
+         type: "image/svg+xml",
+       },
+     ],
+     apple: [
+       {
+-        url: "/icons/vexadark.svg",
++        url: `${basePath}/icons/vexadark.svg`,
+         type: "image/svg+xml",
+       },
+     ],
+diff --git a/services/dashboard/src/app/login/page.tsx b/services/dashboard/src/app/login/page.tsx
+index db7079ca..bb56e4e9 100644
+--- a/services/dashboard/src/app/login/page.tsx
++++ b/services/dashboard/src/app/login/page.tsx
+@@ -3,8 +3,8 @@
+ import { useState, useEffect, useMemo } from "react";
+ import { useRouter } from "next/navigation";
+ import Image from "next/image";
+-import { signIn } from "next-auth/react";
+ import { Mail, Loader2, CheckCircle, ArrowLeft, AlertTriangle, XCircle, ArrowRight, Plus } from "lucide-react";
++import { withBasePath } from "@/lib/base-path";
+ import { Logo } from "@/components/ui/logo";
+ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+ import { Button } from "@/components/ui/button";
+@@ -21,11 +21,11 @@ type LoginState = "onboarding" | "email" | "sent";
+ 
+ interface HealthStatus {
+   status: "ok" | "degraded" | "error";
+-  authMode: "direct" | "magic-link" | "google" | "oauth";
++  authMode: "direct" | "magic-link" | "google" | "entra-id";
+   checks: {
+     smtp: { configured: boolean; optional?: boolean; error?: string };
+     googleOAuth: { configured: boolean; optional?: boolean; error?: string };
+-    microsoftOAuth?: { configured: boolean; optional?: boolean; error?: string };
++    azureAdOAuth?: { configured: boolean; optional?: boolean; error?: string };
+     adminApi: { configured: boolean; reachable: boolean; error?: string };
+     vexaApi: { configured: boolean; reachable: boolean; error?: string };
+   };
+@@ -56,7 +56,7 @@ export default function LoginPage() {
+     // Hosted mode: redirect to external auth (webapp) instead of showing dashboard login
+     const checkHostedMode = async () => {
+       try {
+-        const res = await fetch("/api/config");
++        const res = await fetch(withBasePath("/api/config"));
+         const config = await res.json();
+         if (config.hostedMode && config.webappUrl) {
+           const returnUrl = encodeURIComponent(window.location.origin);
+@@ -70,7 +70,7 @@ export default function LoginPage() {
+   useEffect(() => {
+     const checkHealth = async () => {
+       try {
+-        const response = await fetch("/api/health");
++        const response = await fetch(withBasePath("/api/health"));
+         const data = await response.json();
+         setHealthStatus(data);
+       } catch {
+@@ -160,12 +160,29 @@ export default function LoginPage() {
+     setState("email");
+   };
+ 
++  const signInWithProvider = async (providerId: "google" | "azure-ad") => {
++    const callbackUrl = withBasePath("/");
++    const csrfResponse = await fetch(withBasePath("/api/auth/csrf"));
++    const { csrfToken } = await csrfResponse.json();
++    // Use a real form submit so NextAuth sets the state cookie and handles the
++    // redirect to the provider in a single response — avoids fetch cookie timing issues.
++    const form = document.createElement("form");
++    form.method = "POST";
++    form.action = withBasePath(`/api/auth/signin/${providerId}`);
++    for (const [name, value] of Object.entries({ csrfToken, callbackUrl })) {
++      const input = document.createElement("input");
++      input.type = "hidden";
++      input.name = name;
++      input.value = value;
++      form.appendChild(input);
++    }
++    document.body.appendChild(form);
++    form.submit();
++  };
++
+   const handleGoogleSignIn = async () => {
+     try {
+-      await signIn("google", {
+-        callbackUrl: "/",
+-        redirect: true,
+-      });
++      await signInWithProvider("google");
+     } catch (error) {
+       console.error("Google sign-in error:", error);
+       toast.error("Failed to sign in with Google");
+@@ -174,10 +191,7 @@ export default function LoginPage() {
+ 
+   const handleMicrosoftSignIn = async () => {
+     try {
+-      await signIn("microsoft", {
+-        callbackUrl: "/",
+-        redirect: true,
+-      });
++      await signInWithProvider("azure-ad");
+     } catch (error) {
+       console.error("Microsoft sign-in error:", error);
+       toast.error("Failed to sign in with Microsoft");
+@@ -188,7 +202,7 @@ export default function LoginPage() {
+   const hasWarnings = healthStatus?.status === "degraded";
+   const isDirectMode = healthStatus?.authMode === "direct";
+   const isGoogleAuthEnabled = healthStatus?.checks.googleOAuth.configured === true;
+-  const isMicrosoftAuthEnabled = healthStatus?.checks.microsoftOAuth?.configured === true;
++  const isMicrosoftAuthEnabled = healthStatus?.checks.azureAdOAuth?.configured === true;
+   const isOAuthEnabled = isGoogleAuthEnabled || isMicrosoftAuthEnabled;
+   const isEmailAuthEnabled = !isOAuthEnabled && (healthStatus?.authMode === "magic-link" || healthStatus?.authMode === "direct");
+ 
+diff --git a/services/dashboard/src/app/mcp/page.tsx b/services/dashboard/src/app/mcp/page.tsx
+index fce1aac8..940a4d5d 100644
+--- a/services/dashboard/src/app/mcp/page.tsx
++++ b/services/dashboard/src/app/mcp/page.tsx
+@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
+ import { Button } from "@/components/ui/button";
+ import { Textarea } from "@/components/ui/textarea";
+ import { toast } from "sonner";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface RuntimeConfig {
+   wsUrl: string;
+@@ -24,7 +25,7 @@ export default function MCPPage() {
+   useEffect(() => {
+     async function fetchConfig() {
+       try {
+-        const response = await fetch("/api/config");
++        const response = await fetch(withBasePath("/api/config"));
+         const data = await response.json();
+         setConfig(data);
+       } catch (error) {
+@@ -163,7 +164,7 @@ export default function MCPPage() {
+     return (
+       <div className="h-5 w-5 relative flex items-center justify-center">
+         <img
+-          src="/icons/icons8-mcp-96 (1).png"
++          src={withBasePath("/icons/icons8-mcp-96 (1).png")}
+           alt="MCP"
+           width={20}
+           height={20}
+diff --git a/services/dashboard/src/app/meetings/[id]/page.tsx b/services/dashboard/src/app/meetings/[id]/page.tsx
+index 38efb389..fa08ce55 100644
+--- a/services/dashboard/src/app/meetings/[id]/page.tsx
++++ b/services/dashboard/src/app/meetings/[id]/page.tsx
+@@ -85,7 +85,9 @@ import {
+ import { getCookie, setCookie } from "@/lib/cookies";
+ import { DocsLink } from "@/components/docs/docs-link";
+ import { DecisionsPanel } from "@/components/decisions/decisions-panel";
++import { MeetingAnthology } from "@/components/anthology/meeting-anthology";
+ import { WebhookDeliverySection } from "@/components/webhooks/webhook-delivery-section";
++import { withBasePath } from "@/lib/base-path";
+ 
+ const API_BASE_URL = process.env.NEXT_PUBLIC_VEXA_PUBLIC_API_URL || "https://api.vexa.ai";
+ 
+@@ -118,6 +120,7 @@ export default function MeetingDetailPage() {
+ 
+   // Decisions panel state
+   const [decisionsOpen, setDecisionsOpen] = useState(false);
++  const [panelTab, setPanelTab] = useState<"live" | "anthology">("live");
+ 
+   // API view toggle state — default ON when coming from onboarding (?apiView=1)
+   const [apiViewOpen, setApiViewOpen] = useState(() => searchParams?.get("apiView") === "1");
+@@ -1089,8 +1092,7 @@ export default function MeetingDetailPage() {
+             <span className="hidden sm:inline">API</span>
+           </Button>
+ 
+-          {/* Decisions panel toggle */}
+-          {process.env.NEXT_PUBLIC_TRACKER_ENABLED === "true" && (
++          {/* Intelligence panel toggle */}
+           <Button
+             variant={decisionsOpen ? "secondary" : "outline"}
+             size="sm"
+@@ -1098,9 +1100,8 @@ export default function MeetingDetailPage() {
+             onClick={() => setDecisionsOpen((v) => !v)}
+           >
+             <Zap className="h-4 w-4 text-amber-500" />
+-            <span className="hidden sm:inline">Decisions</span>
++            <span className="hidden sm:inline">Intelligence</span>
+           </Button>
+-          )}
+         </div>
+       </div>
+ 
+@@ -1886,34 +1887,70 @@ export default function MeetingDetailPage() {
+       {/* Panel */}
+       <div
+         className={cn(
+-          "fixed inset-y-0 right-0 z-50 flex flex-col w-full sm:w-[420px]",
++          "fixed inset-y-0 right-0 z-50 flex flex-col w-full sm:w-[460px]",
+           "bg-background border-l shadow-2xl",
+           "transform transition-transform duration-300 ease-in-out",
+           decisionsOpen ? "translate-x-0" : "translate-x-full"
+         )}
+       >
+-        {/* Panel header */}
+-        <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
+-          <div className="flex items-center gap-2">
+-            <Zap className="h-4 w-4 text-amber-500" />
+-            <span className="font-semibold text-sm">Decisions</span>
++        {/* Panel header with tabs */}
++        <div className="px-4 pt-3 pb-0 border-b shrink-0">
++          <div className="flex items-center justify-between mb-2">
++            <div className="flex items-center gap-2">
++              <Zap className="h-4 w-4 text-amber-500" />
++              <span className="font-semibold text-sm">Meeting Intelligence</span>
++            </div>
++            <Button
++              variant="ghost"
++              size="icon"
++              className="h-7 w-7"
++              onClick={() => setDecisionsOpen(false)}
++            >
++              <X className="h-4 w-4" />
++            </Button>
++          </div>
++          {/* Tabs */}
++          <div className="flex gap-1">
++            <button
++              onClick={() => setPanelTab("live")}
++              className={cn(
++                "text-xs font-medium px-3 py-1.5 rounded-t-md transition-colors border-b-2",
++                panelTab === "live"
++                  ? "border-b-amber-500 text-foreground bg-muted/50"
++                  : "border-b-transparent text-muted-foreground hover:text-foreground"
++              )}
++            >
++              Live Decisions
++            </button>
++            <button
++              onClick={() => setPanelTab("anthology")}
++              className={cn(
++                "text-xs font-medium px-3 py-1.5 rounded-t-md transition-colors border-b-2",
++                panelTab === "anthology"
++                  ? "border-b-blue-500 text-foreground bg-muted/50"
++                  : "border-b-transparent text-muted-foreground hover:text-foreground"
++              )}
++            >
++              Anthology
++            </button>
+           </div>
+-          <Button
+-            variant="ghost"
+-            size="icon"
+-            className="h-7 w-7"
+-            onClick={() => setDecisionsOpen(false)}
+-          >
+-            <X className="h-4 w-4" />
+-          </Button>
+         </div>
+         {/* Panel content — scrollable */}
+         <div className="flex-1 overflow-y-auto p-4">
+-          <DecisionsPanel
+-            meetingId={meetingId}
+-            isActive={currentMeeting.status === "active"}
+-            embedded
+-          />
++          {panelTab === "live" ? (
++            <DecisionsPanel
++              meetingId={meetingId}
++              isActive={currentMeeting.status === "active"}
++              embedded
++            />
++          ) : (
++            <MeetingAnthology
++              meetingId={meetingId}
++              isActive={currentMeeting.status === "active"}
++              segments={transcripts}
++              participants={currentMeeting.data?.participants}
++            />
++          )}
+         </div>
+       </div>
+     </div>
+diff --git a/services/dashboard/src/app/profile/page.tsx b/services/dashboard/src/app/profile/page.tsx
+index 1bb7dec7..540da17a 100644
+--- a/services/dashboard/src/app/profile/page.tsx
++++ b/services/dashboard/src/app/profile/page.tsx
+@@ -1,5 +1,6 @@
+ "use client";
+ 
++import { withBasePath } from "@/lib/base-path";
+ import { useState, useEffect } from "react";
+ import {
+   User,
+@@ -95,7 +96,7 @@ export default function ProfilePage() {
+     async function fetchKeys() {
+       if (!user?.id) return;
+       try {
+-        const response = await fetch(`/api/profile/keys?userId=${user.id}`);
++        const response = await fetch(withBasePath(`/api/profile/keys?userId=${user.id}`));
+         if (!response.ok) {
+           // Graceful fallback — endpoint may not exist yet
+           setApiKeys([]);
+@@ -125,7 +126,7 @@ export default function ProfilePage() {
+   const handleCreateKey = async () => {
+     setIsCreatingKey(true);
+     try {
+-      const response = await fetch("/api/profile/keys", {
++      const response = await fetch(withBasePath("/api/profile/keys"), {
+         method: "POST",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ name: newKeyName, scope: newKeyScope, userId: user?.id }),
+@@ -155,7 +156,7 @@ export default function ProfilePage() {
+ 
+   const handleRevokeKey = async (keyId: string) => {
+     try {
+-      const response = await fetch(`/api/profile/keys/${keyId}`, { method: "DELETE" });
++      const response = await fetch(withBasePath(`/api/profile/keys/${keyId}`), { method: "DELETE" });
+       if (!response.ok) throw new Error("Failed to revoke key");
+       setApiKeys((prev) => prev.filter((k) => k.id !== keyId));
+       toast.success("API key revoked");
+diff --git a/services/dashboard/src/app/settings/page.tsx b/services/dashboard/src/app/settings/page.tsx
+index 15fbf846..f3601576 100644
+--- a/services/dashboard/src/app/settings/page.tsx
++++ b/services/dashboard/src/app/settings/page.tsx
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+ import { useState, useEffect } from "react";
++import { withBasePath } from "@/lib/base-path";
+ import { Settings, CheckCircle2, XCircle, Loader2, ExternalLink, Sparkles, AlertCircle } from "lucide-react";
+ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+ import { Button } from "@/components/ui/button";
+@@ -38,7 +39,7 @@ function SettingsContent() {
+     async function fetchConfigs() {
+       // Fetch runtime config (WebSocket URL)
+       try {
+-        const configResponse = await fetch("/api/config");
++        const configResponse = await fetch(withBasePath("/api/config"));
+         const config = await configResponse.json();
+         setRuntimeConfig(config);
+       } catch (error) {
+@@ -47,7 +48,7 @@ function SettingsContent() {
+ 
+       // Fetch AI config
+       try {
+-        const response = await fetch("/api/ai/config");
++        const response = await fetch(withBasePath("/api/ai/config"));
+         const config = await response.json();
+         setAIConfig(config);
+       } catch (error) {
+diff --git a/services/dashboard/src/app/tracker/page.tsx b/services/dashboard/src/app/tracker/page.tsx
+index b313c6f1..5e0b8f54 100644
+--- a/services/dashboard/src/app/tracker/page.tsx
++++ b/services/dashboard/src/app/tracker/page.tsx
+@@ -1,7 +1,6 @@
+ "use client";
+ 
+ import { useState, useEffect, useCallback } from "react";
+-import { redirect } from "next/navigation";
+ import {
+   Zap,
+   Plus,
+@@ -17,14 +16,11 @@ import { Button } from "@/components/ui/button";
+ import { Input } from "@/components/ui/input";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Label } from "@/components/ui/label";
+-import { Separator } from "@/components/ui/separator";
+ import { Badge } from "@/components/ui/badge";
+ import { toast } from "sonner";
++import { useRuntimeConfig } from "@/hooks/use-runtime-config";
+ import { cn } from "@/lib/utils";
+ 
+-const DECISION_LISTENER_URL =
+-  process.env.NEXT_PUBLIC_DECISION_LISTENER_URL ?? "http://localhost:8765";
+-
+ // ── Types ──────────────────────────────────────────────────────────────────────
+ 
+ interface TrackerCategory {
+@@ -127,10 +123,8 @@ function CategoryRow({
+ // ── Main page ─────────────────────────────────────────────────────────────────
+ 
+ export default function TrackerPage() {
+-  if (process.env.NEXT_PUBLIC_TRACKER_ENABLED !== "true") {
+-    redirect("/");
+-  }
+-
++  const { config: runtimeConfig, isLoading: isRuntimeConfigLoading } = useRuntimeConfig();
++  const decisionListenerUrl = runtimeConfig?.decisionListenerUrl ?? "http://localhost:8765";
+   const [config, setConfig] = useState<TrackerConfig | null>(null);
+   const [isLoading, setIsLoading] = useState(true);
+   const [isSaving, setIsSaving] = useState(false);
+@@ -140,8 +134,9 @@ export default function TrackerPage() {
+   // ── Fetch current config from listener ──────────────────────────────────────
+ 
+   const fetchConfig = useCallback(async () => {
++    if (isRuntimeConfigLoading) return;
+     try {
+-      const res = await fetch(`${DECISION_LISTENER_URL}/config`);
++      const res = await fetch(`${decisionListenerUrl}/config`);
+       if (!res.ok) throw new Error("fetch failed");
+       const data: TrackerConfig = await res.json();
+       setConfig(data);
+@@ -151,7 +146,7 @@ export default function TrackerPage() {
+     } finally {
+       setIsLoading(false);
+     }
+-  }, []);
++  }, [decisionListenerUrl, isRuntimeConfigLoading]);
+ 
+   useEffect(() => {
+     fetchConfig();
+@@ -163,7 +158,7 @@ export default function TrackerPage() {
+     if (!config) return;
+     setIsSaving(true);
+     try {
+-      const res = await fetch(`${DECISION_LISTENER_URL}/config`, {
++      const res = await fetch(`${decisionListenerUrl}/config`, {
+         method: "PUT",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify(config),
+@@ -184,7 +179,7 @@ export default function TrackerPage() {
+   const handleReset = async () => {
+     setIsResetting(true);
+     try {
+-      const res = await fetch(`${DECISION_LISTENER_URL}/config/reset`, { method: "POST" });
++      const res = await fetch(`${decisionListenerUrl}/config/reset`, { method: "POST" });
+       if (!res.ok) throw new Error(await res.text());
+       const defaults: TrackerConfig = await res.json();
+       setConfig(defaults);
+@@ -238,7 +233,7 @@ export default function TrackerPage() {
+       {/* Header */}
+       <div className="flex items-start justify-between gap-4">
+         <div>
+-          <h1 className="text-2xl font-semibold tracking-[-0.02em] text-foreground flex items-center gap-2">
++          <h1 className="text-3xl font-bold tracking-tight flex items-center gap-2">
+             <Zap className="h-7 w-7 text-amber-500" />
+             Tracker Config
+           </h1>
+@@ -272,7 +267,7 @@ export default function TrackerPage() {
+           <CardContent className="pt-4 flex items-center gap-3 text-sm">
+             <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
+             <span>
+-              Decision listener is offline at <code className="bg-muted px-1 rounded">{DECISION_LISTENER_URL}</code>.
++              Decision listener is offline at <code className="bg-muted px-1 rounded">{decisionListenerUrl}</code>.
+               Start it first, then reload this page.
+             </span>
+           </CardContent>
+diff --git a/services/dashboard/src/components/admin/admin-guard.tsx b/services/dashboard/src/components/admin/admin-guard.tsx
+index 4f8b3326..cda28272 100644
+--- a/services/dashboard/src/components/admin/admin-guard.tsx
++++ b/services/dashboard/src/components/admin/admin-guard.tsx
+@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
+ import { Button } from "@/components/ui/button";
+ import { useAdminAuthStore } from "@/stores/admin-auth-store";
+ import { AdminAuthModal } from "./admin-auth-modal";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface AdminGuardProps {
+   children: React.ReactNode;
+@@ -22,7 +23,7 @@ export function AdminGuard({ children }: AdminGuardProps) {
+   useEffect(() => {
+     const checkSession = async () => {
+       try {
+-        const response = await fetch("/api/auth/admin-verify");
++        const response = await fetch(withBasePath("/api/auth/admin-verify"));
+         const data = await response.json();
+ 
+         if (!data.authenticated && isAdminAuthenticated) {
+diff --git a/services/dashboard/src/components/ai/ai-chat-panel.tsx b/services/dashboard/src/components/ai/ai-chat-panel.tsx
+index 801afd6f..9c7ad18c 100644
+--- a/services/dashboard/src/components/ai/ai-chat-panel.tsx
++++ b/services/dashboard/src/components/ai/ai-chat-panel.tsx
+@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
+ import { Textarea } from "@/components/ui/textarea";
+ import { ScrollArea } from "@/components/ui/scroll-area";
+ import { cn } from "@/lib/utils";
++import { withBasePath } from "@/lib/base-path";
+ import type { Meeting, TranscriptSegment } from "@/types/vexa";
+ 
+ interface AIChatPanelProps {
+@@ -85,7 +86,7 @@ export function AIChatPanel({ meeting, transcripts = [], trigger }: AIChatPanelP
+   useEffect(() => {
+     async function checkAIConfig() {
+       try {
+-        const response = await fetch("/api/ai/config");
++        const response = await fetch(withBasePath("/api/ai/config"));
+         const config = await response.json();
+         setAIConfig(config);
+       } catch (error) {
+@@ -104,7 +105,7 @@ export function AIChatPanel({ meeting, transcripts = [], trigger }: AIChatPanelP
+   // Memoize the transport - no settings needed anymore
+   const transport = useMemo(() => {
+     return new DefaultChatTransport({
+-      api: "/api/ai/chat",
++      api: withBasePath("/api/ai/chat"),
+       body: { context },
+     });
+   }, [context]);
+diff --git a/services/dashboard/src/components/decisions/decisions-panel.tsx b/services/dashboard/src/components/decisions/decisions-panel.tsx
+index 1f15cda0..5e836aa7 100644
+--- a/services/dashboard/src/components/decisions/decisions-panel.tsx
++++ b/services/dashboard/src/components/decisions/decisions-panel.tsx
+@@ -13,6 +13,8 @@ import {
+   Cpu,
+   Check,
+   X,
++  Lightbulb,
++  Timer,
+ } from "lucide-react";
+ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+ import { Button } from "@/components/ui/button";
+@@ -20,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
+ import { Textarea } from "@/components/ui/textarea";
+ import { Separator } from "@/components/ui/separator";
+ import { toast } from "sonner";
++import { useRuntimeConfig } from "@/hooks/use-runtime-config";
+ import { cn } from "@/lib/utils";
+ 
+ // ────────────────────────────────────────────────────────────────────────────
+@@ -29,7 +32,9 @@ import { cn } from "@/lib/utils";
+ export type DecisionItemType =
+   | "decision"
+   | "action_item"
+-  | "architecture_statement";
++  | "architecture_statement"
++  | "key_insight"
++  | "commitment";
+ 
+ export interface DecisionItem {
+   id: string; // client-generated UUID
+@@ -47,9 +52,6 @@ export interface DecisionItem {
+ // Helpers
+ // ────────────────────────────────────────────────────────────────────────────
+ 
+-const DECISION_LISTENER_URL =
+-  process.env.NEXT_PUBLIC_DECISION_LISTENER_URL ?? "http://localhost:8765";
+-
+ function uid() {
+   return Math.random().toString(36).slice(2) + Date.now().toString(36);
+ }
+@@ -96,6 +98,16 @@ const TYPE_META: Record<
+     icon: <Cpu className="h-3.5 w-3.5" />,
+     badgeClass: "bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300",
+   },
++  key_insight: {
++    label: "Key Insight",
++    icon: <Lightbulb className="h-3.5 w-3.5" />,
++    badgeClass: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300",
++  },
++  commitment: {
++    label: "Commitment",
++    icon: <Timer className="h-3.5 w-3.5" />,
++    badgeClass: "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-300",
++  },
+ };
+ 
+ // ────────────────────────────────────────────────────────────────────────────
+@@ -364,6 +376,8 @@ interface DecisionsPanelProps {
+ }
+ 
+ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanelProps) {
++  const { config } = useRuntimeConfig();
++  const decisionListenerUrl = config?.decisionListenerUrl ?? "http://localhost:8765";
+   const [items, setItems] = useState<DecisionItem[]>([]);
+   const [isCollapsed, setIsCollapsed] = useState(false);
+   const [connected, setConnected] = useState(false);
+@@ -376,7 +390,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
+ 
+   const connectSSE = useCallback(() => {
+     if (esRef.current) return; // already connected
+-    const url = `${DECISION_LISTENER_URL}/decisions/${meetingId}`;
++    const url = `${decisionListenerUrl}/decisions/${meetingId}`;
+     const es = new EventSource(url);
+     esRef.current = es;
+ 
+@@ -430,7 +444,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
+         if (isActive) connectSSE();
+       }, 5000);
+     };
+-  }, [meetingId, isActive]);
++  }, [decisionListenerUrl, meetingId, isActive]);
+ 
+   useEffect(() => {
+     if (!isActive) return;
+@@ -447,7 +461,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
+     const load = async () => {
+       try {
+         const res = await fetch(
+-          `${DECISION_LISTENER_URL}/decisions/${meetingId}/all`
++          `${decisionListenerUrl}/decisions/${meetingId}/all`
+         );
+         if (!res.ok) return;
+         const data = await res.json();
+@@ -474,7 +488,7 @@ export function DecisionsPanel({ meetingId, isActive, embedded }: DecisionsPanel
+       }
+     };
+     load();
+-  }, [meetingId]);
++  }, [decisionListenerUrl, meetingId]);
+ 
+   // ── Item actions ─────────────────────────────────────────────────────────
+ 
+diff --git a/services/dashboard/src/components/layout/sidebar.tsx b/services/dashboard/src/components/layout/sidebar.tsx
+index 39ba2921..c684a648 100644
+--- a/services/dashboard/src/components/layout/sidebar.tsx
++++ b/services/dashboard/src/components/layout/sidebar.tsx
+@@ -29,6 +29,7 @@ import { useJoinModalStore } from "@/stores/join-modal-store";
+ import { useAdminAuthStore } from "@/stores/admin-auth-store";
+ import { AdminAuthModal } from "@/components/admin/admin-auth-modal";
+ import { useRuntimeConfig } from "@/hooks/use-runtime-config";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface SidebarProps {
+   isOpen?: boolean;
+@@ -59,7 +60,7 @@ function BillingStatus() {
+   } | null>(null);
+ 
+   useEffect(() => {
+-    fetch("/api/billing/status")
++    fetch(withBasePath("/api/billing/status"))
+       .then((r) => r.json())
+       .then(setStatus)
+       .catch(() => {});
+@@ -253,7 +254,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
+                   <span className="h-5 w-5 flex items-center justify-center">
+                     {/* eslint-disable-next-line @next/next/no-img-element */}
+                     <img
+-                      src="/icons/icons8-mcp-96 (1).png"
++                      src={withBasePath("/icons/icons8-mcp-96 (1).png")}
+                       alt="MCP"
+                       width={20}
+                       height={20}
+diff --git a/services/dashboard/src/components/mcp/mcp-config-button.tsx b/services/dashboard/src/components/mcp/mcp-config-button.tsx
+index 55cf3d3c..6379089c 100644
+--- a/services/dashboard/src/components/mcp/mcp-config-button.tsx
++++ b/services/dashboard/src/components/mcp/mcp-config-button.tsx
+@@ -20,6 +20,7 @@ import {
+ } from "@/components/ui/dialog";
+ import { Textarea } from "@/components/ui/textarea";
+ import { toast } from "sonner";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface RuntimeConfig {
+   wsUrl: string;
+@@ -37,7 +38,7 @@ export function MCPConfigButton() {
+   useEffect(() => {
+     async function fetchConfig() {
+       try {
+-        const response = await fetch("/api/config");
++        const response = await fetch(withBasePath("/api/config"));
+         const data = await response.json();
+         setConfig(data);
+       } catch (error) {
+@@ -271,7 +272,7 @@ export function MCPConfigButton() {
+     return (
+       <div className="mr-2 h-4 w-4 relative flex items-center justify-center">
+         <img
+-          src="/icons/icons8-mcp-96 (1).png"
++          src={withBasePath("/icons/icons8-mcp-96 (1).png")}
+           alt="MCP"
+           width={16}
+           height={16}
+diff --git a/services/dashboard/src/components/notifications/notification-banner.tsx b/services/dashboard/src/components/notifications/notification-banner.tsx
+index e3ca1794..105f5d6a 100644
+--- a/services/dashboard/src/components/notifications/notification-banner.tsx
++++ b/services/dashboard/src/components/notifications/notification-banner.tsx
+@@ -15,8 +15,7 @@ interface Notification {
+ }
+ 
+ const DISMISSED_KEY = "dismissed-notifications";
+-const BLOG_URL =
+-  process.env.NEXT_PUBLIC_BLOG_URL || "https://blog.vexa.ai";
++const BLOG_URL = process.env.NEXT_PUBLIC_BLOG_URL || "";
+ 
+ function getDismissedIds(): string[] {
+   if (typeof window === "undefined") return [];
+@@ -59,6 +58,7 @@ export function NotificationBanner() {
+     setDismissed(getDismissedIds());
+ 
+     async function fetchNotifications() {
++      if (!BLOG_URL) return;
+       try {
+         const resp = await fetch(`${BLOG_URL}/notifications.json`, {
+           cache: "no-store",
+diff --git a/services/dashboard/src/components/ui/logo.tsx b/services/dashboard/src/components/ui/logo.tsx
+index 52fcaafe..f3f200bf 100644
+--- a/services/dashboard/src/components/ui/logo.tsx
++++ b/services/dashboard/src/components/ui/logo.tsx
+@@ -4,6 +4,7 @@ import { useTheme } from "next-themes";
+ import { useEffect, useState } from "react";
+ import Image from "next/image";
+ import { cn } from "@/lib/utils";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface LogoProps {
+   className?: string;
+@@ -34,7 +35,7 @@ export function Logo({ className, size = "md", showText = false }: LogoProps) {
+   // Determine which logo to use based on theme
+   // Use dark logo in light mode, light logo in dark mode (inverse)
+   const currentTheme = theme === "system" ? systemTheme : theme;
+-  const logoSrc = currentTheme === "dark" ? "/icons/vexalight.svg" : "/icons/vexadark.svg";
++  const logoSrc = withBasePath(currentTheme === "dark" ? "/icons/vexalight.svg" : "/icons/vexadark.svg");
+ 
+   if (!mounted) {
+     // Return a placeholder while theme is being determined
+diff --git a/services/dashboard/src/hooks/use-live-transcripts.ts b/services/dashboard/src/hooks/use-live-transcripts.ts
+index d3851c7e..c5a24276 100644
+--- a/services/dashboard/src/hooks/use-live-transcripts.ts
++++ b/services/dashboard/src/hooks/use-live-transcripts.ts
+@@ -12,6 +12,7 @@ import type {
+ import { useMeetingsStore } from "@/stores/meetings-store";
+ import { useAuthStore } from "@/stores/auth-store";
+ import { vexaAPI } from "@/lib/api";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface UseLiveTranscriptsOptions {
+   platform: Platform;
+@@ -164,7 +165,7 @@ export function useLiveTranscripts(
+     // Auth token comes from the client-side auth store (more reliable than httpOnly cookie)
+     let wsUrl: string;
+     try {
+-      const configResponse = await fetch("/api/config");
++      const configResponse = await fetch(withBasePath("/api/config"));
+       const config = await configResponse.json();
+       wsUrl = config.wsUrl;
+     } catch (error) {
+diff --git a/services/dashboard/src/hooks/use-runtime-config.ts b/services/dashboard/src/hooks/use-runtime-config.ts
+index cd413e17..f3677d55 100644
+--- a/services/dashboard/src/hooks/use-runtime-config.ts
++++ b/services/dashboard/src/hooks/use-runtime-config.ts
+@@ -1,10 +1,12 @@
+ "use client";
+ 
+ import { useState, useEffect } from "react";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface RuntimeConfig {
+   wsUrl: string;
+   apiUrl: string;
++  publicApiUrl?: string;
+   defaultBotName: string | null;
+   hostedMode: boolean;
+   webappUrl: string;
+@@ -16,7 +18,7 @@ let cachedConfig: RuntimeConfig | null = null;
+ let configPromise: Promise<RuntimeConfig> | null = null;
+ 
+ async function fetchConfig(): Promise<RuntimeConfig> {
+-  const response = await fetch("/api/config");
++  const response = await fetch(withBasePath("/api/config"));
+   if (!response.ok) {
+     throw new Error("Failed to fetch runtime config");
+   }
+@@ -64,6 +66,17 @@ export function useRuntimeConfig() {
+  * Get the WebSocket URL synchronously (returns cached value or fallback)
+  * For use in non-hook contexts or when you need immediate access
+  */
++/**
++ * Get the decision listener URL synchronously (returns cached value or fallback)
++ * For use in non-hook contexts or when you need immediate access
++ */
++export function getDecisionListenerUrl(): string {
++  if (cachedConfig?.decisionListenerUrl) {
++    return cachedConfig.decisionListenerUrl;
++  }
++  return "http://localhost:8765";
++}
++
+ export function getWsUrl(): string {
+   if (cachedConfig) {
+     return cachedConfig.wsUrl;
+diff --git a/services/dashboard/src/hooks/use-vexa-websocket.ts b/services/dashboard/src/hooks/use-vexa-websocket.ts
+index 95a312da..75af894b 100644
+--- a/services/dashboard/src/hooks/use-vexa-websocket.ts
++++ b/services/dashboard/src/hooks/use-vexa-websocket.ts
+@@ -9,6 +9,7 @@ import type {
+ } from "@/types/vexa";
+ import { useLiveStore } from "@/stores/live-store";
+ import { vexaAPI } from "@/lib/api";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface UseVexaWebSocketOptions {
+   platform: Platform;
+@@ -37,7 +38,7 @@ async function fetchConfig(): Promise<{ wsUrl: string; authToken: string | null
+   if (cachedConfig) return cachedConfig;
+ 
+   try {
+-    const response = await fetch("/api/config");
++    const response = await fetch(withBasePath("/api/config"));
+     const config = await response.json();
+     cachedConfig = { wsUrl: config.wsUrl, authToken: config.authToken };
+     return cachedConfig;
+diff --git a/services/dashboard/src/lib/admin-api.ts b/services/dashboard/src/lib/admin-api.ts
+index bbeaad45..e18abeb2 100644
+--- a/services/dashboard/src/lib/admin-api.ts
++++ b/services/dashboard/src/lib/admin-api.ts
+@@ -1,3 +1,4 @@
++import { withBasePath } from "@/lib/base-path";
+ import type {
+   VexaUser,
+   VexaUserWithTokens,
+@@ -38,24 +39,24 @@ export const adminAPI = {
+   // ==========================================
+ 
+   async getUsers(skip = 0, limit = 100): Promise<VexaUser[]> {
+-    const response = await fetch(`/api/admin/users?skip=${skip}&limit=${limit}`);
++    const response = await fetch(withBasePath(`/api/admin/users?skip=${skip}&limit=${limit}`));
+     const data = await handleResponse<VexaUser[] | { users: VexaUser[] }>(response);
+     // Handle both array and object responses
+     return Array.isArray(data) ? data : data.users || [];
+   },
+ 
+   async getUser(userId: string): Promise<VexaUserWithTokens> {
+-    const response = await fetch(`/api/admin/users/${userId}`);
++    const response = await fetch(withBasePath(`/api/admin/users/${userId}`));
+     return handleResponse<VexaUserWithTokens>(response);
+   },
+ 
+   async getUserByEmail(email: string): Promise<VexaUser> {
+-    const response = await fetch(`/api/admin/users/email/${encodeURIComponent(email)}`);
++    const response = await fetch(withBasePath(`/api/admin/users/email/${encodeURIComponent(email)}`));
+     return handleResponse<VexaUser>(response);
+   },
+ 
+   async createUser(data: CreateUserRequest): Promise<VexaUser> {
+-    const response = await fetch("/api/admin/users", {
++    const response = await fetch(withBasePath("/api/admin/users"), {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(data),
+@@ -64,7 +65,7 @@ export const adminAPI = {
+   },
+ 
+   async updateUser(userId: string, data: UpdateUserRequest): Promise<VexaUser> {
+-    const response = await fetch(`/api/admin/users/${userId}`, {
++    const response = await fetch(withBasePath(`/api/admin/users/${userId}`), {
+       method: "PATCH",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(data),
+@@ -77,7 +78,7 @@ export const adminAPI = {
+   // ==========================================
+ 
+   async createToken(userId: string): Promise<CreateTokenResponse> {
+-    const response = await fetch(`/api/admin/users/${userId}/tokens`, {
++    const response = await fetch(withBasePath(`/api/admin/users/${userId}/tokens`), {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+     });
+@@ -85,7 +86,7 @@ export const adminAPI = {
+   },
+ 
+   async revokeToken(tokenId: string): Promise<void> {
+-    const response = await fetch(`/api/admin/tokens/${tokenId}`, {
++    const response = await fetch(withBasePath(`/api/admin/tokens/${tokenId}`), {
+       method: "DELETE",
+     });
+     if (!response.ok) {
+@@ -100,7 +101,7 @@ export const adminAPI = {
+ 
+   async testConnection(): Promise<{ success: boolean; error?: string }> {
+     try {
+-      const response = await fetch("/api/admin/users?limit=1");
++      const response = await fetch(withBasePath("/api/admin/users?limit=1"));
+       if (response.ok) {
+         return { success: true };
+       }
+diff --git a/services/dashboard/src/lib/api.ts b/services/dashboard/src/lib/api.ts
+index 3a5bef6a..902de045 100644
+--- a/services/dashboard/src/lib/api.ts
++++ b/services/dashboard/src/lib/api.ts
+@@ -89,13 +89,13 @@ function mapMeeting(raw: RawMeeting): Meeting {
+ export const vexaAPI = {
+   // Meetings
+   async getMeetings(): Promise<Meeting[]> {
+-    const response = await fetch("/api/vexa/meetings");
++    const response = await fetch(withBasePath("/api/vexa/meetings"));
+     const data = await handleResponse<{ meetings: RawMeeting[] }>(response);
+     return (data.meetings || []).map(mapMeeting);
+   },
+ 
+   async getMeeting(id: string): Promise<Meeting> {
+-    const response = await fetch(`/api/vexa/meetings/${id}`);
++    const response = await fetch(withBasePath(`/api/vexa/meetings/${id}`));
+     return handleResponse<Meeting>(response);
+   },
+ 
+@@ -115,7 +115,7 @@ export const vexaAPI = {
+     meetingId?: string
+   ): Promise<{ meeting: Meeting; segments: TranscriptSegment[]; recordings: RecordingData[] }> {
+     const params = meetingId ? `?meeting_id=${meetingId}` : "";
+-    const response = await fetch(`/api/vexa/transcripts/${platform}/${nativeId}${params}`);
++    const response = await fetch(withBasePath(`/api/vexa/transcripts/${platform}/${nativeId}${params}`));
+     interface RawSegment {
+       start: number;
+       end: number;
+@@ -194,7 +194,7 @@ export const vexaAPI = {
+     if (ttlSeconds) params.set("ttl_seconds", String(ttlSeconds));
+     const qs = params.toString();
+ 
+-    const response = await fetch(`/api/vexa/transcripts/${platform}/${nativeId}/share${qs ? `?${qs}` : ""}`, {
++    const response = await fetch(withBasePath(`/api/vexa/transcripts/${platform}/${nativeId}/share${qs ? `?${qs}` : ""}`), {
+       method: "POST",
+     });
+     return handleResponse<{ share_id: string; url: string; expires_at: string; expires_in_seconds: number }>(response);
+@@ -202,7 +202,7 @@ export const vexaAPI = {
+ 
+   // Bots
+   async createBot(request: CreateBotRequest): Promise<Meeting> {
+-    const response = await fetch("/api/vexa/bots", {
++    const response = await fetch(withBasePath("/api/vexa/bots"), {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(request),
+@@ -212,7 +212,7 @@ export const vexaAPI = {
+   },
+ 
+   async stopBot(platform: Platform, nativeId: string): Promise<void> {
+-    const response = await fetch(`/api/vexa/bots/${platform}/${nativeId}`, {
++    const response = await fetch(withBasePath(`/api/vexa/bots/${platform}/${nativeId}`), {
+       method: "DELETE",
+     });
+     if (!response.ok) {
+@@ -229,7 +229,7 @@ export const vexaAPI = {
+     nativeId: string,
+     config: BotConfigUpdate
+   ): Promise<void> {
+-    const response = await fetch(`/api/vexa/bots/${platform}/${nativeId}/config`, {
++    const response = await fetch(withBasePath(`/api/vexa/bots/${platform}/${nativeId}/config`), {
+       method: "PUT",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(config),
+@@ -251,7 +251,7 @@ export const vexaAPI = {
+ 
+   // Bot status - check if bots are actually running
+   async getBotStatus(): Promise<{ running_bots: Array<{ container_id: string; meeting_id: number; platform: string; native_meeting_id: string }> }> {
+-    const response = await fetch("/api/vexa/bots/status");
++    const response = await fetch(withBasePath("/api/vexa/bots/status"));
+     return handleResponse<{ running_bots: Array<{ container_id: string; meeting_id: number; platform: string; native_meeting_id: string }> }>(response);
+   },
+ 
+@@ -278,7 +278,7 @@ export const vexaAPI = {
+       languages?: string[];
+     }
+   ): Promise<Meeting> {
+-    const response = await fetch(`/api/vexa/meetings/${platform}/${nativeId}`, {
++    const response = await fetch(withBasePath(`/api/vexa/meetings/${platform}/${nativeId}`), {
+       method: "PATCH",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ data }),
+@@ -327,7 +327,7 @@ export const vexaAPI = {
+   ): Promise<{ status: string; segment_count: number; language: string }> {
+     const body: Record<string, string> = {};
+     if (language) body.language = language;
+-    const response = await fetch(`/api/vexa/meetings/${meetingId}/transcribe`, {
++    const response = await fetch(withBasePath(`/api/vexa/meetings/${meetingId}/transcribe`), {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify(body),
+@@ -338,7 +338,7 @@ export const vexaAPI = {
+   // Connection test
+   async testConnection(): Promise<{ success: boolean; error?: string }> {
+     try {
+-      const response = await fetch("/api/vexa/meetings");
++      const response = await fetch(withBasePath("/api/vexa/meetings"));
+       if (response.ok) {
+         return { success: true };
+       }
+diff --git a/services/dashboard/src/lib/zoom-oauth-client.ts b/services/dashboard/src/lib/zoom-oauth-client.ts
+index 20ac75c1..5145fc0a 100644
+--- a/services/dashboard/src/lib/zoom-oauth-client.ts
++++ b/services/dashboard/src/lib/zoom-oauth-client.ts
+@@ -1,3 +1,4 @@
++import { withBasePath } from "@/lib/base-path";
+ import type { CreateBotRequest } from "@/types/vexa";
+ 
+ const PENDING_ZOOM_BOT_REQUEST_KEY = "vexa.pending_zoom_bot_request";
+@@ -80,7 +81,7 @@ export async function startZoomOAuth({
+     returnTo,
+   };
+ 
+-  const resp = await fetch("/api/zoom/oauth/start", {
++  const resp = await fetch(withBasePath("/api/zoom/oauth/start"), {
+     method: "POST",
+     headers: { "Content-Type": "application/json" },
+     body: JSON.stringify(payload),
+diff --git a/services/dashboard/src/stores/admin-auth-store.ts b/services/dashboard/src/stores/admin-auth-store.ts
+index 93269359..9827dd46 100644
+--- a/services/dashboard/src/stores/admin-auth-store.ts
++++ b/services/dashboard/src/stores/admin-auth-store.ts
+@@ -1,5 +1,6 @@
+ import { create } from "zustand";
+ import { persist } from "zustand/middleware";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface AdminAuthState {
+   isAdminAuthenticated: boolean;
+@@ -23,7 +24,7 @@ export const useAdminAuthStore = create<AdminAuthState>()(
+         set({ isVerifying: true, error: null });
+ 
+         try {
+-          const response = await fetch("/api/auth/admin-verify", {
++          const response = await fetch(withBasePath("/api/auth/admin-verify"), {
+             method: "POST",
+             headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({ token }),
+@@ -58,7 +59,7 @@ export const useAdminAuthStore = create<AdminAuthState>()(
+ 
+       logout: () => {
+         // Clear server-side admin cookie
+-        fetch("/api/auth/admin-logout", { method: "POST" });
++        fetch(withBasePath("/api/auth/admin-logout"), { method: "POST" });
+         set({
+           isAdminAuthenticated: false,
+           error: null
+diff --git a/services/dashboard/src/stores/auth-store.ts b/services/dashboard/src/stores/auth-store.ts
+index 6d9f8602..b054a1c1 100644
+--- a/services/dashboard/src/stores/auth-store.ts
++++ b/services/dashboard/src/stores/auth-store.ts
+@@ -1,6 +1,7 @@
+ import { create } from "zustand";
+ import { persist } from "zustand/middleware";
+ import type { VexaUser } from "@/types/vexa";
++import { withBasePath } from "@/lib/base-path";
+ 
+ interface LoginResult {
+   success: boolean;
+@@ -42,7 +43,7 @@ export const useAuthStore = create<AuthState>()(
+       sendMagicLink: async (email: string): Promise<LoginResult> => {
+         set({ isLoading: true });
+         try {
+-          const response = await fetch("/api/auth/send-magic-link", {
++          const response = await fetch(withBasePath("/api/auth/send-magic-link"), {
+             method: "POST",
+             headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({ email }),
+@@ -101,7 +102,7 @@ export const useAuthStore = create<AuthState>()(
+       login: async (email: string) => {
+         set({ isLoading: true });
+         try {
+-          const response = await fetch("/api/auth/login", {
++          const response = await fetch(withBasePath("/api/auth/login"), {
+             method: "POST",
+             headers: { "Content-Type": "application/json" },
+             body: JSON.stringify({ email }),
+@@ -131,7 +132,7 @@ export const useAuthStore = create<AuthState>()(
+ 
+       logout: () => {
+         // Clear server-side cookie
+-        fetch("/api/auth/logout", { method: "POST" });
++        fetch(withBasePath("/api/auth/logout"), { method: "POST" });
+         // Clear state
+         set({
+           user: null,
+@@ -163,7 +164,7 @@ export const useAuthStore = create<AuthState>()(
+         // Always verify with server — localStorage may be stale (e.g. different
+         // user logged in on the webapp since last dashboard visit).
+         try {
+-          const response = await fetch("/api/auth/me");
++          const response = await fetch(withBasePath("/api/auth/me"));
+           if (response.ok) {
+             const meData = await response.json();
+ 
+@@ -182,7 +183,7 @@ export const useAuthStore = create<AuthState>()(
+             // OAuth callback path (Dashboard's own auth flow)
+             if (!get().user || !get().token) {
+               try {
+-                const oauthResponse = await fetch("/api/auth/oauth-callback");
++                const oauthResponse = await fetch(withBasePath("/api/auth/oauth-callback"));
+                 if (oauthResponse.ok) {
+                   const oauthData = await oauthResponse.json();
+                   if (oauthData.user && oauthData.token) {
+diff --git a/services/dashboard/src/stores/webhook-store.ts b/services/dashboard/src/stores/webhook-store.ts
+index 7f790ad0..145bcb39 100644
+--- a/services/dashboard/src/stores/webhook-store.ts
++++ b/services/dashboard/src/stores/webhook-store.ts
+@@ -1,4 +1,5 @@
+ import { create } from "zustand";
++import { withBasePath } from "@/lib/base-path";
+ 
+ // ==========================================
+ // Webhook Types
+@@ -109,7 +110,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
+       params.set("time_range", timeRange);
+       if (userId) params.set("userId", String(userId));
+ 
+-      const response = await fetch(`/api/webhooks/deliveries?${params}`);
++      const response = await fetch(withBasePath(`/api/webhooks/deliveries?${params}`));
+       if (!response.ok) {
+         // If endpoint doesn't exist yet, use empty state
+         if (response.status === 404) {
+@@ -132,7 +133,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
+   fetchMeetingDeliveries: async (meetingId: string) => {
+     set({ isLoadingMeetingDeliveries: true });
+     try {
+-      const response = await fetch(`/api/webhooks/deliveries/${meetingId}`);
++      const response = await fetch(withBasePath(`/api/webhooks/deliveries/${meetingId}`));
+       if (!response.ok) {
+         if (response.status === 404) {
+           set({ meetingDeliveries: [], isLoadingMeetingDeliveries: false });
+@@ -152,7 +153,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
+     set({ isLoadingConfig: true });
+     try {
+       const params = userId ? `?userId=${userId}` : "";
+-      const response = await fetch(`/api/webhooks/config${params}`);
++      const response = await fetch(withBasePath(`/api/webhooks/config${params}`));
+       if (!response.ok) {
+         if (response.status === 404) {
+           set({ config: null, isLoadingConfig: false });
+@@ -171,7 +172,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
+     const { userId } = get();
+     set({ isSavingConfig: true });
+     try {
+-      const response = await fetch("/api/webhooks/config", {
++      const response = await fetch(withBasePath("/api/webhooks/config"), {
+         method: "PUT",
+         headers: { "Content-Type": "application/json" },
+         body: JSON.stringify({ ...configUpdate, userId }),
+@@ -187,7 +188,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
+ 
+   testWebhook: async (url: string) => {
+     const { userId } = get();
+-    const response = await fetch("/api/webhooks/test", {
++    const response = await fetch(withBasePath("/api/webhooks/test"), {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ url, userId }),
+@@ -197,7 +198,7 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
+ 
+   rotateSecret: async () => {
+     const { userId } = get();
+-    const response = await fetch("/api/webhooks/rotate-secret", {
++    const response = await fetch(withBasePath("/api/webhooks/rotate-secret"), {
+       method: "POST",
+       headers: { "Content-Type": "application/json" },
+       body: JSON.stringify({ userId }),

@@ -129,39 +129,57 @@ export async function leaveMicrosoftTeams(page: Page | null, botConfig?: BotConf
   }
 
   try {
-    // First, try using Playwright's native click method for the most reliable selector
-    log("[leaveMicrosoftTeams] Attempting to click leave button using Playwright's native click...");
-    
-    // Try the most reliable selector first: primary hangup button
+    // Primary: JS click — bypasses overlay/z-index issues that block Playwright's native click.
+    // The #hangup-button may be covered by a ui-dialog__overlay in the Teams light experience,
+    // which causes Playwright's click to time out even though the element is visible.
+    log("[leaveMicrosoftTeams] Attempting JS click on leave button (bypasses overlay)...");
+    const jsResult = await page.evaluate((selectors) => {
+      const candidates = [
+        document.getElementById("hangup-button"),
+        document.querySelector<HTMLElement>('[data-tid="hangup-main-btn"]'),
+        document.querySelector<HTMLElement>('[aria-label="Leave"]'),
+        ...selectors.map((s: string) => document.querySelector<HTMLElement>(s)).filter(Boolean),
+      ];
+      for (const btn of candidates) {
+        if (!btn) continue;
+        const rect = btn.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          btn.click();
+          return btn.getAttribute("aria-label") || btn.id || "leave-btn";
+        }
+      }
+      return null;
+    }, teamsLeaveSelectors).catch(() => null);
+
+    if (jsResult) {
+      log(`[leaveMicrosoftTeams] JS click succeeded on: ${jsResult}`);
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      return true;
+    }
+
+    // Fallback: Playwright force-click (force bypasses overlay interception)
+    log("[leaveMicrosoftTeams] JS click found no button — trying Playwright force-click...");
     try {
       const hangupButton = page.locator(teamsPrimaryHangupButtonSelector);
-      const isVisible = await hangupButton.isVisible({ timeout: 2000 }).catch(() => false);
-      
-      if (isVisible) {
-        log(`[leaveMicrosoftTeams] Found ${teamsPrimaryHangupButtonSelector}, clicking with Playwright...`);
-        await hangupButton.click({ timeout: 5000 });
-        log(`[leaveMicrosoftTeams] Successfully clicked ${teamsPrimaryHangupButtonSelector} using Playwright`);
-        
-        // Wait for Teams to process the leave
-        log("[leaveMicrosoftTeams] Waiting 3 seconds for Teams to process leave...");
+      const exists = await hangupButton.count().then(c => c > 0).catch(() => false);
+      if (exists) {
+        log(`[leaveMicrosoftTeams] Found ${teamsPrimaryHangupButtonSelector}, force-clicking...`);
+        await hangupButton.click({ force: true, timeout: 5000 });
+        log(`[leaveMicrosoftTeams] Force-click succeeded on ${teamsPrimaryHangupButtonSelector}`);
         await new Promise(resolve => setTimeout(resolve, 3000));
-        log("[leaveMicrosoftTeams] Wait complete. Teams should have processed the leave action.");
         return true;
       }
     } catch (hangupError: any) {
-      log(`[leaveMicrosoftTeams] Could not click ${teamsPrimaryHangupButtonSelector} with Playwright: ${hangupError.message}`);
+      log(`[leaveMicrosoftTeams] Force-click failed: ${hangupError.message}`);
     }
-    
-    // Fallback to browser-side click method for other selectors
-    log("[leaveMicrosoftTeams] Falling back to browser-side click method...");
+
+    // Last resort: performLeaveAction registered by prepareForRecording
+    log("[leaveMicrosoftTeams] Falling back to performLeaveAction...");
     const result = await page.evaluate(async () => {
       if (typeof (window as any).performLeaveAction === "function") {
         return await (window as any).performLeaveAction();
-      } else {
-        (window as any).logBot?.("[Node Eval Error] performLeaveAction function not found on window.");
-        console.error("[Node Eval Error] performLeaveAction function not found on window.");
-        return false;
       }
+      return false;
     });
     log(`[leaveMicrosoftTeams] Browser leave action result: ${result}`);
     

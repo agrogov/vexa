@@ -85,7 +85,9 @@ import {
 import { getCookie, setCookie } from "@/lib/cookies";
 import { DocsLink } from "@/components/docs/docs-link";
 import { DecisionsPanel } from "@/components/decisions/decisions-panel";
+import { MeetingAnthology } from "@/components/anthology/meeting-anthology";
 import { WebhookDeliverySection } from "@/components/webhooks/webhook-delivery-section";
+import { withBasePath } from "@/lib/base-path";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_VEXA_PUBLIC_API_URL || "https://api.vexa.ai";
 
@@ -118,6 +120,7 @@ export default function MeetingDetailPage() {
 
   // Decisions panel state
   const [decisionsOpen, setDecisionsOpen] = useState(false);
+  const [panelTab, setPanelTab] = useState<"live" | "anthology">("live");
 
   // API view toggle state — default ON when coming from onboarding (?apiView=1)
   const [apiViewOpen, setApiViewOpen] = useState(() => searchParams?.get("apiView") === "1");
@@ -1089,8 +1092,7 @@ export default function MeetingDetailPage() {
             <span className="hidden sm:inline">API</span>
           </Button>
 
-          {/* Decisions panel toggle */}
-          {process.env.NEXT_PUBLIC_TRACKER_ENABLED === "true" && (
+          {/* Intelligence panel toggle */}
           <Button
             variant={decisionsOpen ? "secondary" : "outline"}
             size="sm"
@@ -1098,9 +1100,8 @@ export default function MeetingDetailPage() {
             onClick={() => setDecisionsOpen((v) => !v)}
           >
             <Zap className="h-4 w-4 text-amber-500" />
-            <span className="hidden sm:inline">Decisions</span>
+            <span className="hidden sm:inline">Intelligence</span>
           </Button>
-          )}
         </div>
       </div>
 
@@ -1886,34 +1887,70 @@ export default function MeetingDetailPage() {
       {/* Panel */}
       <div
         className={cn(
-          "fixed inset-y-0 right-0 z-50 flex flex-col w-full sm:w-[420px]",
+          "fixed inset-y-0 right-0 z-50 flex flex-col w-full sm:w-[460px]",
           "bg-background border-l shadow-2xl",
           "transform transition-transform duration-300 ease-in-out",
           decisionsOpen ? "translate-x-0" : "translate-x-full"
         )}
       >
-        {/* Panel header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
-          <div className="flex items-center gap-2">
-            <Zap className="h-4 w-4 text-amber-500" />
-            <span className="font-semibold text-sm">Decisions</span>
+        {/* Panel header with tabs */}
+        <div className="px-4 pt-3 pb-0 border-b shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-amber-500" />
+              <span className="font-semibold text-sm">Meeting Intelligence</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setDecisionsOpen(false)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setDecisionsOpen(false)}
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          {/* Tabs */}
+          <div className="flex gap-1">
+            <button
+              onClick={() => setPanelTab("live")}
+              className={cn(
+                "text-xs font-medium px-3 py-1.5 rounded-t-md transition-colors border-b-2",
+                panelTab === "live"
+                  ? "border-b-amber-500 text-foreground bg-muted/50"
+                  : "border-b-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              Live Decisions
+            </button>
+            <button
+              onClick={() => setPanelTab("anthology")}
+              className={cn(
+                "text-xs font-medium px-3 py-1.5 rounded-t-md transition-colors border-b-2",
+                panelTab === "anthology"
+                  ? "border-b-blue-500 text-foreground bg-muted/50"
+                  : "border-b-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              Anthology
+            </button>
+          </div>
         </div>
         {/* Panel content — scrollable */}
         <div className="flex-1 overflow-y-auto p-4">
-          <DecisionsPanel
-            meetingId={meetingId}
-            isActive={currentMeeting.status === "active"}
-            embedded
-          />
+          {panelTab === "live" ? (
+            <DecisionsPanel
+              meetingId={meetingId}
+              isActive={currentMeeting.status === "active"}
+              embedded
+            />
+          ) : (
+            <MeetingAnthology
+              meetingId={meetingId}
+              isActive={currentMeeting.status === "active"}
+              segments={transcripts}
+              participants={currentMeeting.data?.participants}
+            />
+          )}
         </div>
       </div>
     </div>

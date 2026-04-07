@@ -125,6 +125,11 @@ botManager:
     # Image name Bot Manager will ask the orchestrator to run (used by docker/kubernetes orchestrators)
     imageName: "vexa-bot:dev"
 
+    # Node selector for bot Pods (kubernetes orchestrator only).
+    # JSON string, e.g. '{"k8s.infobip.com/nodepool":"worker"}'
+    # Empty means no nodeSelector — scheduler decides.
+    nodeSelector: ""
+
     # Only relevant for Docker orchestrator; set if your bot containers must join a specific Docker network.
     dockerNetwork: ""
     resources:
