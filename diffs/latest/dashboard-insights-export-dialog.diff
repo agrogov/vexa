@@ -1,0 +1,450 @@
+diff --git a/services/dashboard/src/app/meetings/[id]/page.tsx b/services/dashboard/src/app/meetings/[id]/page.tsx
+index c600c159..2d4a7bf7 100644
+--- a/services/dashboard/src/app/meetings/[id]/page.tsx
++++ b/services/dashboard/src/app/meetings/[id]/page.tsx
+@@ -81,7 +81,20 @@ import {
+   exportToVtt,
+   downloadFile,
+   generateFilename,
++  exportDecisionsToTxt,
++  exportDecisionsToJson,
++  exportDecisionsToMd,
++  exportAnthologyToTxt,
++  exportAnthologyToJson,
++  exportAnthologyToMd,
++  generateDecisionsFilename,
++  generateAnthologyFilename,
++  type ExportDecisionItem,
++  type ExportAnthologyItem,
++  type ExportSummaryData,
+ } from "@/lib/export";
++import { useRuntimeConfig } from "@/hooks/use-runtime-config";
++import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+ import { getCookie, setCookie } from "@/lib/cookies";
+ import { DocsLink } from "@/components/docs/docs-link";
+ import { DecisionsPanel } from "@/components/decisions/decisions-panel";
+@@ -117,6 +130,13 @@ export default function MeetingDetailPage() {
+     clearCurrentMeeting,
+   } = useMeetingsStore();
+   const authToken = useAuthStore((s) => s.token);
++  const { config } = useRuntimeConfig();
++
++  // Insights export dialog state
++  const [insightsExportOpen, setInsightsExportOpen] = useState(false);
++  const [insightsExportType, setInsightsExportType] = useState<"decisions" | "anthology">("decisions");
++  const [insightsExportFormat, setInsightsExportFormat] = useState<"txt" | "json" | "md">("json");
++  const [insightsExportLoading, setInsightsExportLoading] = useState(false);
+ 
+   // Decisions panel state
+   const [decisionsOpen, setDecisionsOpen] = useState(false);
+@@ -416,6 +436,55 @@ export default function MeetingDetailPage() {
+     downloadFile(content, filename, mimeType);
+   }, [currentMeeting, transcripts]);
+ 
++  const handleExportInsights = useCallback(async () => {
++    if (!currentMeeting) return;
++    const dlUrl = config?.decisionListenerUrl;
++    if (!dlUrl) { toast.error("Decisions service not configured"); return; }
++
++    setInsightsExportLoading(true);
++    try {
++      if (insightsExportType === "decisions") {
++        const res = await fetch(`${dlUrl}/decisions/${meetingId}/all`);
++        if (!res.ok) throw new Error("fetch failed");
++        const data = await res.json();
++        const items: ExportDecisionItem[] = (data.items ?? []).filter(
++          (d: ExportDecisionItem) => d.type && d.type !== "no_match"
++        );
++        if (!items.length) { toast.info("No decisions available yet"); return; }
++        const fns = { txt: exportDecisionsToTxt, json: exportDecisionsToJson, md: exportDecisionsToMd } as const;
++        const mime = { txt: "text/plain", json: "application/json", md: "text/markdown" } as const;
++        downloadFile(
++          fns[insightsExportFormat](currentMeeting, items),
++          generateDecisionsFilename(currentMeeting, insightsExportFormat),
++          mime[insightsExportFormat],
++        );
++      } else {
++        const [ir, sr] = await Promise.all([
++          fetch(`${dlUrl}/decisions/${meetingId}/all`),
++          fetch(`${dlUrl}/summary/${meetingId}`),
++        ]);
++        const items: ExportAnthologyItem[] = ir.ok
++          ? ((await ir.json()).items ?? []).filter((i: ExportAnthologyItem) => i.type && i.type !== "no_match")
++          : [];
++        const summaryData = sr.ok ? await sr.json() : null;
++        const summary: ExportSummaryData | null = summaryData?.summary?.lede ? summaryData.summary : null;
++        if (!items.length && !summary) { toast.info("No anthology data available yet"); return; }
++        const fns = { txt: exportAnthologyToTxt, json: exportAnthologyToJson, md: exportAnthologyToMd } as const;
++        const mime = { txt: "text/plain", json: "application/json", md: "text/markdown" } as const;
++        downloadFile(
++          fns[insightsExportFormat](currentMeeting, items, summary),
++          generateAnthologyFilename(currentMeeting, insightsExportFormat),
++          mime[insightsExportFormat],
++        );
++      }
++      setInsightsExportOpen(false);
++    } catch {
++      toast.error("Failed to fetch insights data");
++    } finally {
++      setInsightsExportLoading(false);
++    }
++  }, [currentMeeting, meetingId, config, insightsExportType, insightsExportFormat]);
++
+   // Format transcript for ChatGPT
+   const formatTranscriptForChatGPT = useCallback((meeting: Meeting, segments: typeof transcripts): string => {
+     let output = "Meeting Transcript\n\n";
+@@ -1001,6 +1070,15 @@ export default function MeetingDetailPage() {
+                       Download audio
+                     </DropdownMenuItem>
+                   )}
++                  {config?.decisionListenerUrl && (
++                    <>
++                      <DropdownMenuSeparator />
++                      <DropdownMenuItem onClick={() => setInsightsExportOpen(true)}>
++                        <Sparkles className="h-4 w-4 mr-2" />
++                        Export insights…
++                      </DropdownMenuItem>
++                    </>
++                  )}
+                 </DropdownMenuContent>
+               </DropdownMenu>
+               <DocsLink href="/docs/cookbook/share-transcript-url" />
+@@ -1351,6 +1429,15 @@ export default function MeetingDetailPage() {
+                         Download audio
+                       </DropdownMenuItem>
+                     )}
++                    {config?.decisionListenerUrl && (
++                      <>
++                        <DropdownMenuSeparator />
++                        <DropdownMenuItem onClick={() => setInsightsExportOpen(true)}>
++                          <Sparkles className="h-4 w-4 mr-2" />
++                          Export insights…
++                        </DropdownMenuItem>
++                      </>
++                    )}
+                 </DropdownMenuContent>
+               </DropdownMenu>
+               <DocsLink href="/docs/cookbook/share-transcript-url" />
+@@ -1953,6 +2040,69 @@ export default function MeetingDetailPage() {
+           )}
+         </div>
+       </div>
++
++      {/* Insights export dialog */}
++      <Dialog open={insightsExportOpen} onOpenChange={setInsightsExportOpen}>
++        <DialogContent>
++          <DialogHeader>
++            <DialogTitle>Export Insights</DialogTitle>
++          </DialogHeader>
++
++          <div className="space-y-4">
++            <div className="space-y-2">
++              <p className="text-sm font-medium">What</p>
++              <div className="flex gap-2">
++                {(["decisions", "anthology"] as const).map((t) => (
++                  <button
++                    key={t}
++                    onClick={() => setInsightsExportType(t)}
++                    className={cn(
++                      "px-3 py-1.5 rounded-md border text-sm capitalize transition-colors",
++                      insightsExportType === t
++                        ? "bg-primary text-primary-foreground border-primary"
++                        : "hover:bg-muted",
++                    )}
++                  >
++                    {t === "decisions" ? "Decisions" : "Anthology"}
++                  </button>
++                ))}
++              </div>
++            </div>
++
++            <div className="space-y-2">
++              <p className="text-sm font-medium">Format</p>
++              <div className="flex gap-2">
++                {(["txt", "json", "md"] as const).map((f) => (
++                  <button
++                    key={f}
++                    onClick={() => setInsightsExportFormat(f)}
++                    className={cn(
++                      "px-3 py-1.5 rounded-md border text-sm uppercase transition-colors",
++                      insightsExportFormat === f
++                        ? "bg-primary text-primary-foreground border-primary"
++                        : "hover:bg-muted",
++                    )}
++                  >
++                    .{f}
++                  </button>
++                ))}
++              </div>
++            </div>
++          </div>
++
++          <DialogFooter>
++            <Button variant="outline" onClick={() => setInsightsExportOpen(false)}>
++              Cancel
++            </Button>
++            <Button onClick={handleExportInsights} disabled={insightsExportLoading}>
++              {insightsExportLoading
++                ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
++                : <Download className="h-4 w-4 mr-2" />}
++              Export
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
+     </div>
+   );
+ }
+diff --git a/services/dashboard/src/lib/export.ts b/services/dashboard/src/lib/export.ts
+index 3be9df43..65eabac6 100644
+--- a/services/dashboard/src/lib/export.ts
++++ b/services/dashboard/src/lib/export.ts
+@@ -149,3 +149,248 @@ export function generateFilename(meeting: Meeting, extension: string): string {
+   const id = meeting.platform_specific_id.replace(/[^a-zA-Z0-9]/g, "-");
+   return `transcript-${date}-${id}.${extension}`;
+ }
++
++// ─── Insights export (Decisions & Anthology) ──────────────────────────────────
++
++export interface ExportDecisionItem {
++  type: string;
++  summary: string;
++  speaker?: string;
++  confidence?: number;
++}
++
++export interface ExportAnthologyItem {
++  type: string;
++  summary: string;
++  speaker?: string;
++  confidence?: number;
++  entities: Array<{ type: string; label: string; id: string }>;
++}
++
++export interface ExportSummaryData {
++  lede: string;
++  theme: string;
++}
++
++const TYPE_LABELS: Record<string, string> = {
++  decision: "Decision",
++  action_item: "Action Item",
++  key_insight: "Key Insight",
++  commitment: "Commitment",
++  architecture_statement: "Architecture Statement",
++};
++
++function typeLabel(t: string): string {
++  return TYPE_LABELS[t] ?? t;
++}
++
++function fmtMeetingMeta(meeting: Meeting): string {
++  let out = `Meeting ID: ${meeting.platform_specific_id}\n`;
++  if (meeting.start_time) {
++    out += `Date: ${format(new Date(meeting.start_time), "PPPp")}\n`;
++  }
++  if (meeting.data?.participants?.length) {
++    out += `Participants: ${meeting.data.participants.join(", ")}\n`;
++  }
++  return out;
++}
++
++export function exportDecisionsToTxt(meeting: Meeting, items: ExportDecisionItem[]): string {
++  let out = "=".repeat(60) + "\n";
++  out += "LIVE DECISIONS\n";
++  out += "=".repeat(60) + "\n\n";
++  out += fmtMeetingMeta(meeting);
++  out += "\n" + "-".repeat(60) + "\n";
++  out += `ITEMS (${items.length})\n`;
++  out += "-".repeat(60) + "\n\n";
++
++  if (items.length === 0) {
++    out += "No items recorded.\n";
++  } else {
++    for (const item of items) {
++      out += `[${typeLabel(item.type)}]\n`;
++      out += `${item.summary}\n`;
++      const meta: string[] = [];
++      if (item.speaker) meta.push(`Speaker: ${item.speaker}`);
++      if (item.confidence !== undefined) meta.push(`Confidence: ${Math.round(item.confidence * 100)}%`);
++      if (meta.length) out += meta.join("   ") + "\n";
++      out += "\n";
++    }
++  }
++
++  out += "=".repeat(60) + "\n";
++  out += `Exported on ${format(new Date(), "PPPp")}\n`;
++  out += "Generated by Vexa Dashboard\n";
++  out += "=".repeat(60) + "\n";
++  return out;
++}
++
++export function exportDecisionsToJson(meeting: Meeting, items: ExportDecisionItem[]): string {
++  return JSON.stringify({
++    meeting: {
++      id: meeting.id,
++      platform: meeting.platform,
++      platform_specific_id: meeting.platform_specific_id,
++      status: meeting.status,
++      start_time: meeting.start_time,
++      end_time: meeting.end_time,
++      participants: meeting.data?.participants || [],
++    },
++    decisions: items.map((i) => ({
++      type: i.type,
++      summary: i.summary,
++      ...(i.speaker !== undefined && { speaker: i.speaker }),
++      ...(i.confidence !== undefined && { confidence: i.confidence }),
++    })),
++    exported_at: new Date().toISOString(),
++  }, null, 2);
++}
++
++export function exportDecisionsToMd(meeting: Meeting, items: ExportDecisionItem[]): string {
++  let out = "# Live Decisions\n\n";
++  out += `**Meeting ID:** ${meeting.platform_specific_id}  \n`;
++  if (meeting.start_time) out += `**Date:** ${format(new Date(meeting.start_time), "PPPp")}  \n`;
++  if (meeting.data?.participants?.length) out += `**Participants:** ${meeting.data.participants.join(", ")}  \n`;
++  out += "\n---\n\n## Items\n\n";
++
++  if (items.length === 0) {
++    out += "*No items recorded.*\n";
++  } else {
++    for (const item of items) {
++      out += `### ${typeLabel(item.type)}\n\n`;
++      out += `${item.summary}\n\n`;
++      const meta: string[] = [];
++      if (item.speaker) meta.push(`Speaker: ${item.speaker}`);
++      if (item.confidence !== undefined) meta.push(`Confidence: ${Math.round(item.confidence * 100)}%`);
++      if (meta.length) out += `*${meta.join(" · ")}*\n\n`;
++    }
++  }
++
++  out += `---\n*Exported on ${format(new Date(), "PPPp")} · Generated by Vexa Dashboard*\n`;
++  return out;
++}
++
++export function exportAnthologyToTxt(
++  meeting: Meeting,
++  items: ExportAnthologyItem[],
++  summary: ExportSummaryData | null,
++): string {
++  let out = "=".repeat(60) + "\n";
++  out += "ANTHOLOGY\n";
++  out += "=".repeat(60) + "\n\n";
++  out += fmtMeetingMeta(meeting);
++
++  if (summary) {
++    out += "\n" + "-".repeat(60) + "\n";
++    out += "SUMMARY\n";
++    out += "-".repeat(60) + "\n\n";
++    out += `Theme: ${summary.theme}\n\n`;
++    out += `${summary.lede}\n`;
++  }
++
++  out += "\n" + "-".repeat(60) + "\n";
++  out += `ITEMS (${items.length})\n`;
++  out += "-".repeat(60) + "\n\n";
++
++  if (items.length === 0) {
++    out += "No items recorded.\n";
++  } else {
++    for (const item of items) {
++      out += `[${typeLabel(item.type)}]\n`;
++      out += `${item.summary}\n`;
++      const meta: string[] = [];
++      if (item.speaker) meta.push(`Speaker: ${item.speaker}`);
++      if (item.confidence !== undefined) meta.push(`Confidence: ${Math.round(item.confidence * 100)}%`);
++      if (meta.length) out += meta.join("   ") + "\n";
++      if (item.entities?.length) {
++        out += `Entities: ${item.entities.map((e) => `${e.label} (${e.type})`).join(", ")}\n`;
++      }
++      out += "\n";
++    }
++  }
++
++  out += "=".repeat(60) + "\n";
++  out += `Exported on ${format(new Date(), "PPPp")}\n`;
++  out += "Generated by Vexa Dashboard\n";
++  out += "=".repeat(60) + "\n";
++  return out;
++}
++
++export function exportAnthologyToJson(
++  meeting: Meeting,
++  items: ExportAnthologyItem[],
++  summary: ExportSummaryData | null,
++): string {
++  return JSON.stringify({
++    meeting: {
++      id: meeting.id,
++      platform: meeting.platform,
++      platform_specific_id: meeting.platform_specific_id,
++      status: meeting.status,
++      start_time: meeting.start_time,
++      end_time: meeting.end_time,
++      participants: meeting.data?.participants || [],
++    },
++    summary: summary ?? null,
++    items: items.map((i) => ({
++      type: i.type,
++      summary: i.summary,
++      ...(i.speaker !== undefined && { speaker: i.speaker }),
++      ...(i.confidence !== undefined && { confidence: i.confidence }),
++      entities: i.entities ?? [],
++    })),
++    exported_at: new Date().toISOString(),
++  }, null, 2);
++}
++
++export function exportAnthologyToMd(
++  meeting: Meeting,
++  items: ExportAnthologyItem[],
++  summary: ExportSummaryData | null,
++): string {
++  let out = "# Anthology\n\n";
++  out += `**Meeting ID:** ${meeting.platform_specific_id}  \n`;
++  if (meeting.start_time) out += `**Date:** ${format(new Date(meeting.start_time), "PPPp")}  \n`;
++  if (meeting.data?.participants?.length) out += `**Participants:** ${meeting.data.participants.join(", ")}  \n`;
++  out += "\n---\n\n";
++
++  if (summary) {
++    out += "## Summary\n\n";
++    out += `**${summary.theme}**\n\n`;
++    out += `${summary.lede}\n\n---\n\n`;
++  }
++
++  out += "## Items\n\n";
++  if (items.length === 0) {
++    out += "*No items recorded.*\n";
++  } else {
++    for (const item of items) {
++      out += `### ${typeLabel(item.type)}\n\n`;
++      out += `${item.summary}\n\n`;
++      if (item.speaker) out += `*Speaker: ${item.speaker}*  \n`;
++      if (item.entities?.length) {
++        out += `**Entities:** ${item.entities.map((e) => `\`${e.label}\` (${e.type})`).join(", ")}  \n`;
++      }
++      out += "\n";
++    }
++  }
++
++  out += `---\n*Exported on ${format(new Date(), "PPPp")} · Generated by Vexa Dashboard*\n`;
++  return out;
++}
++
++export function generateDecisionsFilename(meeting: Meeting, extension: string): string {
++  const date = meeting.start_time
++    ? format(new Date(meeting.start_time), "yyyy-MM-dd")
++    : format(new Date(), "yyyy-MM-dd");
++  const id = meeting.platform_specific_id.replace(/[^a-zA-Z0-9]/g, "-");
++  return `decisions-${date}-${id}.${extension}`;
++}
++
++export function generateAnthologyFilename(meeting: Meeting, extension: string): string {
++  const date = meeting.start_time
++    ? format(new Date(meeting.start_time), "yyyy-MM-dd")
++    : format(new Date(), "yyyy-MM-dd");
++  const id = meeting.platform_specific_id.replace(/[^a-zA-Z0-9]/g, "-");
++  return `anthology-${date}-${id}.${extension}`;
++}

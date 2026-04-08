@@ -81,7 +81,20 @@ import {
   exportToVtt,
   downloadFile,
   generateFilename,
+  exportDecisionsToTxt,
+  exportDecisionsToJson,
+  exportDecisionsToMd,
+  exportAnthologyToTxt,
+  exportAnthologyToJson,
+  exportAnthologyToMd,
+  generateDecisionsFilename,
+  generateAnthologyFilename,
+  type ExportDecisionItem,
+  type ExportAnthologyItem,
+  type ExportSummaryData,
 } from "@/lib/export";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { getCookie, setCookie } from "@/lib/cookies";
 import { DocsLink } from "@/components/docs/docs-link";
 import { DecisionsPanel } from "@/components/decisions/decisions-panel";
@@ -117,6 +130,13 @@ export default function MeetingDetailPage() {
     clearCurrentMeeting,
   } = useMeetingsStore();
   const authToken = useAuthStore((s) => s.token);
+  const { config } = useRuntimeConfig();
+
+  // Insights export dialog state
+  const [insightsExportOpen, setInsightsExportOpen] = useState(false);
+  const [insightsExportType, setInsightsExportType] = useState<"decisions" | "anthology">("decisions");
+  const [insightsExportFormat, setInsightsExportFormat] = useState<"txt" | "json" | "md">("json");
+  const [insightsExportLoading, setInsightsExportLoading] = useState(false);
 
   // Decisions panel state
   const [decisionsOpen, setDecisionsOpen] = useState(false);
@@ -415,6 +435,55 @@ export default function MeetingDetailPage() {
     const filename = generateFilename(currentMeeting, format);
     downloadFile(content, filename, mimeType);
   }, [currentMeeting, transcripts]);
+
+  const handleExportInsights = useCallback(async () => {
+    if (!currentMeeting) return;
+    const dlUrl = config?.decisionListenerUrl;
+    if (!dlUrl) { toast.error("Decisions service not configured"); return; }
+
+    setInsightsExportLoading(true);
+    try {
+      if (insightsExportType === "decisions") {
+        const res = await fetch(`${dlUrl}/decisions/${meetingId}/all`);
+        if (!res.ok) throw new Error("fetch failed");
+        const data = await res.json();
+        const items: ExportDecisionItem[] = (data.items ?? []).filter(
+          (d: ExportDecisionItem) => d.type && d.type !== "no_match"
+        );
+        if (!items.length) { toast.info("No decisions available yet"); return; }
+        const fns = { txt: exportDecisionsToTxt, json: exportDecisionsToJson, md: exportDecisionsToMd } as const;
+        const mime = { txt: "text/plain", json: "application/json", md: "text/markdown" } as const;
+        downloadFile(
+          fns[insightsExportFormat](currentMeeting, items),
+          generateDecisionsFilename(currentMeeting, insightsExportFormat),
+          mime[insightsExportFormat],
+        );
+      } else {
+        const [ir, sr] = await Promise.all([
+          fetch(`${dlUrl}/decisions/${meetingId}/all`),
+          fetch(`${dlUrl}/summary/${meetingId}`),
+        ]);
+        const items: ExportAnthologyItem[] = ir.ok
+          ? ((await ir.json()).items ?? []).filter((i: ExportAnthologyItem) => i.type && i.type !== "no_match")
+          : [];
+        const summaryData = sr.ok ? await sr.json() : null;
+        const summary: ExportSummaryData | null = summaryData?.summary?.lede ? summaryData.summary : null;
+        if (!items.length && !summary) { toast.info("No anthology data available yet"); return; }
+        const fns = { txt: exportAnthologyToTxt, json: exportAnthologyToJson, md: exportAnthologyToMd } as const;
+        const mime = { txt: "text/plain", json: "application/json", md: "text/markdown" } as const;
+        downloadFile(
+          fns[insightsExportFormat](currentMeeting, items, summary),
+          generateAnthologyFilename(currentMeeting, insightsExportFormat),
+          mime[insightsExportFormat],
+        );
+      }
+      setInsightsExportOpen(false);
+    } catch {
+      toast.error("Failed to fetch insights data");
+    } finally {
+      setInsightsExportLoading(false);
+    }
+  }, [currentMeeting, meetingId, config, insightsExportType, insightsExportFormat]);
 
   // Format transcript for ChatGPT
   const formatTranscriptForChatGPT = useCallback((meeting: Meeting, segments: typeof transcripts): string => {
@@ -1001,6 +1070,15 @@ export default function MeetingDetailPage() {
                       Download audio
                     </DropdownMenuItem>
                   )}
+                  {config?.decisionListenerUrl && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem onClick={() => setInsightsExportOpen(true)}>
+                        <Sparkles className="h-4 w-4 mr-2" />
+                        Export insights…
+                      </DropdownMenuItem>
+                    </>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
               <DocsLink href="/docs/cookbook/share-transcript-url" />
@@ -1350,6 +1428,15 @@ export default function MeetingDetailPage() {
                         <Download className="h-4 w-4 mr-2" />
                         Download audio
                       </DropdownMenuItem>
+                    )}
+                    {config?.decisionListenerUrl && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => setInsightsExportOpen(true)}>
+                          <Sparkles className="h-4 w-4 mr-2" />
+                          Export insights…
+                        </DropdownMenuItem>
+                      </>
                     )}
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1953,6 +2040,69 @@ export default function MeetingDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Insights export dialog */}
+      <Dialog open={insightsExportOpen} onOpenChange={setInsightsExportOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Export Insights</DialogTitle>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <p className="text-sm font-medium">What</p>
+              <div className="flex gap-2">
+                {(["decisions", "anthology"] as const).map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setInsightsExportType(t)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-md border text-sm capitalize transition-colors",
+                      insightsExportType === t
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "hover:bg-muted",
+                    )}
+                  >
+                    {t === "decisions" ? "Decisions" : "Anthology"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Format</p>
+              <div className="flex gap-2">
+                {(["txt", "json", "md"] as const).map((f) => (
+                  <button
+                    key={f}
+                    onClick={() => setInsightsExportFormat(f)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-md border text-sm uppercase transition-colors",
+                      insightsExportFormat === f
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "hover:bg-muted",
+                    )}
+                  >
+                    .{f}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setInsightsExportOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleExportInsights} disabled={insightsExportLoading}>
+              {insightsExportLoading
+                ? <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                : <Download className="h-4 w-4 mr-2" />}
+              Export
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
