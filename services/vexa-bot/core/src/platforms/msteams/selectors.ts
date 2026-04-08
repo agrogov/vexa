@@ -22,14 +22,14 @@ export const teamsWaitingRoomIndicators: string[] = [
   'text="Your request to join has been sent"',
   
   // Pre-join screen specific elements
-  'button:has-text("Join now")',
+  // NOTE: do NOT include "Join now" button here — it matches the pre-join button and
+  // causes false-positive "still in waiting room" detection after a successful join click.
   'button:has-text("Cancel")',
   'text="Microsoft Teams meeting"',
-  
+
   // Pre-join screen specific aria labels
   '[aria-label*="waiting"]',
   '[aria-label*="lobby"]',
-  '[aria-label*="Join now"]',
   '[aria-label*="Cancel"]',
   
   // Pre-join screen specific classes/attributes

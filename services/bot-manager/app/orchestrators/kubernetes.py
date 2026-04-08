@@ -45,7 +45,7 @@ BOT_CPU_LIMIT = os.getenv("BOT_POD_CPU_LIMIT", "2000m")
 BOT_MEMORY_LIMIT = os.getenv("BOT_POD_MEMORY_LIMIT", "4Gi")
 
 # Image pull policy and secrets
-IMAGE_PULL_POLICY = os.getenv("IMAGE_PULL_POLICY", "IfNotPresent")
+IMAGE_PULL_POLICY = os.getenv("BOT_IMAGE_PULL_POLICY", "IfNotPresent")
 IMAGE_PULL_SECRET = os.getenv("IMAGE_PULL_SECRET", "")
 
 # Node selector for bot pods (JSON string, e.g. '{"role": "bots"}')

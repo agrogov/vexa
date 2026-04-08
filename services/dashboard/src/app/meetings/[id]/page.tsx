@@ -924,11 +924,11 @@ export default function MeetingDetailPage() {
                   </div>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={() => handleOpenInProvider("chatgpt")}>
-                    <Image src="/icons/icons8-chatgpt-100.png" alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
+                    <Image src={withBasePath("/icons/icons8-chatgpt-100.png")} alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
                     Open in ChatGPT
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => handleOpenInProvider("perplexity")}>
-                    <Image src="/icons/icons8-perplexity-ai-100.png" alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
+                    <Image src={withBasePath("/icons/icons8-perplexity-ai-100.png")} alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
                     Open in Perplexity
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -1274,11 +1274,11 @@ export default function MeetingDetailPage() {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={() => handleOpenInProvider("chatgpt")} disabled={transcripts.length === 0}>
-                      <Image src="/icons/icons8-chatgpt-100.png" alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
+                      <Image src={withBasePath("/icons/icons8-chatgpt-100.png")} alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
                       Open in ChatGPT
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => handleOpenInProvider("perplexity")} disabled={transcripts.length === 0}>
-                      <Image src="/icons/icons8-perplexity-ai-100.png" alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
+                      <Image src={withBasePath("/icons/icons8-perplexity-ai-100.png")} alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
                       Open in Perplexity
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
@@ -1581,11 +1581,11 @@ export default function MeetingDetailPage() {
               <div className="flex items-center gap-3">
                 <div className="h-8 w-8 rounded-lg flex items-center justify-center overflow-hidden bg-background">
                   <Image
-                    src={currentMeeting.platform === "google_meet"
+                    src={withBasePath(currentMeeting.platform === "google_meet"
                       ? "/icons/icons8-google-meet-96.png"
                       : currentMeeting.platform === "teams"
                       ? "/icons/icons8-teams-96.png"
-                      : "/icons/icons8-zoom-96.png"}
+                      : "/icons/icons8-zoom-96.png")}
                     alt={platformConfig.name}
                     width={32}
                     height={32}

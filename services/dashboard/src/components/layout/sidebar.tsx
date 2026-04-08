@@ -36,12 +36,9 @@ interface SidebarProps {
   onClose?: () => void;
 }
 
-const navigation = [
+const baseNavigation = [
   { name: "Meetings", href: "/meetings", icon: Video },
   { name: "Browser", href: "/browser", icon: Monitor },
-  ...(process.env.NEXT_PUBLIC_TRACKER_ENABLED === "true"
-    ? [{ name: "Tracker", href: "/tracker", icon: Zap }]
-    : []),
 ];
 
 const adminNavigation = [
@@ -131,6 +128,10 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
   const [showAdminAuthModal, setShowAdminAuthModal] = useState(false);
   const { config } = useRuntimeConfig();
   const isHosted = config?.hostedMode ?? false;
+  const navigation = [
+    ...baseNavigation,
+    ...(config?.decisionListenerUrl ? [{ name: "Tracker", href: "/tracker", icon: Zap }] : []),
+  ];
 
   const handleJoinClick = () => {
     openJoinModal();

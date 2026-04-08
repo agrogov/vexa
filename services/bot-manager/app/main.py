@@ -1917,7 +1917,11 @@ async def bot_status_change_callback(
 
                 # Schedule post-meeting tasks (including original webhook)
                 background_tasks.add_task(run_all_tasks, meeting.id)
-                
+                # Clean up the pod — completed pods are never auto-deleted by K8s.
+                if meeting.bot_container_id:
+                    logger.info(f"Bot status change callback: Scheduling pod cleanup for container {meeting.bot_container_id} (meeting {meeting.id}, status=completed).")
+                    background_tasks.add_task(_delayed_container_stop, meeting.bot_container_id, meeting.id, 10)
+
         elif new_status == MeetingStatus.FAILED:
             # Handle failure
             success = await update_meeting_status(
@@ -1927,10 +1931,10 @@ async def bot_status_change_callback(
                 failure_stage=payload.failure_stage,
                 error_details=str(payload.error_details) if payload.error_details else None
             )
-            
+
             if success:
                 meeting.end_time = datetime.utcnow()
-                
+
                 # Store detailed error information
                 if payload.error_details or payload.platform_specific_error:
                     if not meeting.data:
@@ -1942,12 +1946,16 @@ async def bot_status_change_callback(
                         "error_details": payload.error_details,
                         "platform_specific_error": payload.platform_specific_error
                     }
-                
+
                 await db.commit()
                 await db.refresh(meeting)
-                
+
                 # Schedule post-meeting tasks (including original webhook)
                 background_tasks.add_task(run_all_tasks, meeting.id)
+                # Clean up the pod on failure too.
+                if meeting.bot_container_id:
+                    logger.info(f"Bot status change callback: Scheduling pod cleanup for container {meeting.bot_container_id} (meeting {meeting.id}, status=failed).")
+                    background_tasks.add_task(_delayed_container_stop, meeting.bot_container_id, meeting.id, 10)
                 
         elif new_status == MeetingStatus.ACTIVE:
             # Handle activation

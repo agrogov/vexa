@@ -412,8 +412,33 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
       await fallbackJoinButton.click({ force: true });
       log("✅ Clicked join button (fallback selector)");
     }
-    log("Waiting for Teams to process join request...");
-    await page.waitForTimeout(8000);
+
+    // Wait for the pre-join screen to disappear, confirming Teams processed the click.
+    // In the light-meetings experience a JS click may silently fail (no navigation),
+    // so we verify by checking that the join button is gone. If it persists, retry once.
+    log("Waiting for pre-join screen to disappear...");
+    const preJoinGone = await page.waitForSelector(
+      '#prejoin-join-button, [data-tid="prejoin-join-button"], [aria-label="Join now"]',
+      { state: 'detached', timeout: 8000 }
+    ).then(() => true).catch(() => false);
+
+    if (!preJoinGone) {
+      log("⚠️ Pre-join button still visible after click — retrying JS click once...");
+      await page.evaluate(() => {
+        const btn = (
+          document.getElementById("prejoin-join-button") ||
+          document.querySelector<HTMLElement>('[data-tid="prejoin-join-button"]') ||
+          document.querySelector<HTMLElement>('[aria-label="Join now"]') ||
+          Array.from(document.querySelectorAll<HTMLElement>("button")).find(
+            (b) => b.innerText?.trim() === "Join now"
+          )
+        );
+        btn?.click();
+      });
+      await page.waitForTimeout(5000);
+    } else {
+      log("✅ Pre-join screen gone — join click confirmed");
+    }
   } catch (error) {
     log("⚠️ Join button not found — bot may not be able to enter the meeting");
     // Dump all visible buttons to help diagnose selector mismatches (especially light experience)

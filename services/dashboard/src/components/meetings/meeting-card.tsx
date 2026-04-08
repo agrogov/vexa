@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
+import { withBasePath } from "@/lib/base-path";
 import { formatDistanceToNow, format } from "date-fns";
 import { Clock, ChevronRight, Calendar, MessageSquare, FileText, Pencil, Check, X } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -22,39 +23,15 @@ interface MeetingCardProps {
 
 // Platform icons using actual icon files from public folder
 function GoogleMeetIcon({ className }: { className?: string }) {
-  return (
-    <Image
-      src="/icons/icons8-google-meet-96.png"
-      alt="Google Meet"
-      width={40}
-      height={40}
-      className={className}
-    />
-  );
+  return <Image src={withBasePath("/icons/icons8-google-meet-96.png")} alt="Google Meet" width={40} height={40} className={className} />;
 }
 
 function TeamsIcon({ className }: { className?: string }) {
-  return (
-    <Image
-      src="/icons/icons8-teams-96.png"
-      alt="Microsoft Teams"
-      width={40}
-      height={40}
-      className={className}
-    />
-  );
+  return <Image src={withBasePath("/icons/icons8-teams-96.png")} alt="Microsoft Teams" width={40} height={40} className={className} />;
 }
 
 function ZoomIcon({ className }: { className?: string }) {
-  return (
-    <Image
-      src="/icons/icons8-zoom-96.png"
-      alt="Zoom"
-      width={40}
-      height={40}
-      className={className}
-    />
-  );
+  return <Image src={withBasePath("/icons/icons8-zoom-96.png")} alt="Zoom" width={40} height={40} className={className} />;
 }
 
 function PlatformIcon({ platform, className }: { platform: string; className?: string }) {

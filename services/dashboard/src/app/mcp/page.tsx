@@ -192,7 +192,7 @@ export default function MCPPage() {
         <Card className="cursor-pointer hover:bg-muted/30 transition-colors" onClick={handleCursorInstall}>
           <CardContent className="pt-6 pb-6 flex items-center gap-4">
             <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-              <Image src="/icons/cursor.svg" alt="Cursor" width={24} height={24} className="dark:invert" />
+              <Image src={withBasePath("/icons/cursor.svg")} alt="Cursor" width={24} height={24} className="dark:invert" />
             </div>
             <div>
               <p className="font-medium">Connect to Cursor</p>
@@ -203,7 +203,7 @@ export default function MCPPage() {
         <Card className="cursor-pointer hover:bg-muted/30 transition-colors" onClick={handleVSCodeInstall}>
           <CardContent className="pt-6 pb-6 flex items-center gap-4">
             <div className="h-10 w-10 rounded-lg bg-muted flex items-center justify-center">
-              <Image src="/icons/vscode.svg" alt="VS Code" width={24} height={24} />
+              <Image src={withBasePath("/icons/vscode.svg")} alt="VS Code" width={24} height={24} />
             </div>
             <div>
               <p className="font-medium">Connect to VS Code</p>

@@ -1,0 +1,210 @@
+diff --git a/services/vexa-bot/core/src/platforms/msteams/join.ts b/services/vexa-bot/core/src/platforms/msteams/join.ts
+index 4dc09c9e..8e255393 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/join.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/join.ts
+@@ -412,8 +412,33 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
+       await fallbackJoinButton.click({ force: true });
+       log("✅ Clicked join button (fallback selector)");
+     }
+-    log("Waiting for Teams to process join request...");
+-    await page.waitForTimeout(8000);
++
++    // Wait for the pre-join screen to disappear, confirming Teams processed the click.
++    // In the light-meetings experience a JS click may silently fail (no navigation),
++    // so we verify by checking that the join button is gone. If it persists, retry once.
++    log("Waiting for pre-join screen to disappear...");
++    const preJoinGone = await page.waitForSelector(
++      '#prejoin-join-button, [data-tid="prejoin-join-button"], [aria-label="Join now"]',
++      { state: 'detached', timeout: 8000 }
++    ).then(() => true).catch(() => false);
++
++    if (!preJoinGone) {
++      log("⚠️ Pre-join button still visible after click — retrying JS click once...");
++      await page.evaluate(() => {
++        const btn = (
++          document.getElementById("prejoin-join-button") ||
++          document.querySelector<HTMLElement>('[data-tid="prejoin-join-button"]') ||
++          document.querySelector<HTMLElement>('[aria-label="Join now"]') ||
++          Array.from(document.querySelectorAll<HTMLElement>("button")).find(
++            (b) => b.innerText?.trim() === "Join now"
++          )
++        );
++        btn?.click();
++      });
++      await page.waitForTimeout(5000);
++    } else {
++      log("✅ Pre-join screen gone — join click confirmed");
++    }
+   } catch (error) {
+     log("⚠️ Join button not found — bot may not be able to enter the meeting");
+     // Dump all visible buttons to help diagnose selector mismatches (especially light experience)
+diff --git a/services/vexa-bot/core/src/platforms/msteams/recording.ts b/services/vexa-bot/core/src/platforms/msteams/recording.ts
+index ee20cd89..c042e92f 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/recording.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/recording.ts
+@@ -302,23 +302,37 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+               class ParticipantRegistry {
+                 private cache = new Map<HTMLElement, ParticipantIdentity>();
+                 private idToElement = new Map<string, HTMLElement>();
++                // Maps canonical name → stable ID, so DOM re-renders don't create
++                // duplicate entries for the same person. Teams frequently destroys and
++                // recreates participant tile elements (grid reflows), which would otherwise
++                // generate new random IDs for an already-known participant.
++                private nameToId = new Map<string, string>();
+ 
+                 getIdentity(element: HTMLElement): ParticipantIdentity {
+                   if (!this.cache.has(element)) {
+-                    const id = this.extractId(element);
++                    const rawId = this.extractId(element);
+                     const name = this.extractName(element);
+-                    
++
++                    // Reuse the existing stable ID if we already know this person by name.
++                    // This prevents duplicate speakingStates entries when Teams re-renders
++                    // a participant's tile into a new DOM element.
++                    const existingId = this.nameToId.get(name);
++                    const id = existingId ?? rawId;
++
+                     const identity: ParticipantIdentity = {
+                       id,
+                       name,
+                       element,
+                       lastSeen: Date.now()
+                     };
+-                    
++
+                     this.cache.set(element, identity);
+                     this.idToElement.set(id, element);
++                    if (!existingId) {
++                      this.nameToId.set(name, id);
++                    }
+                   }
+-                  
++
+                   return this.cache.get(element)!;
+                 }
+ 
+@@ -332,8 +346,15 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+                 invalidate(element: HTMLElement) {
+                   const identity = this.cache.get(element);
+                   if (identity) {
+-                    this.idToElement.delete(identity.id);
++                    // Only remove from idToElement if this element is still the authoritative
++                    // one for this ID. If a new element for the same person already claimed
++                    // the ID (DOM re-render arrived before tile removal), leave it alone.
++                    if (this.idToElement.get(identity.id) === element) {
++                      this.idToElement.delete(identity.id);
++                    }
+                     this.cache.delete(element);
++                    // Keep nameToId entry — the person may rejoin with a new DOM element
++                    // and we want to preserve their stable ID across tile re-renders.
+                   }
+                 }
+ 
+@@ -587,6 +608,9 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+               
+               // State for tracking speaking status (for cleanup)
+               const speakingStates = new Map<string, SpeakingState>();
++              // Tracks when each participant last transitioned to 'speaking'.
++              // Used to pick a single speaker when multiple are active simultaneously.
++              const speakerStartTimes = new Map<string, number>();
+               
+               // Event emission helper
+               function sendTeamsSpeakerEvent(eventType: string, identity: ParticipantIdentity) {
+@@ -678,6 +702,11 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+                   if (detectionResult.hasSignal) {
+                     const newState: SpeakingState = detectionResult.isSpeaking ? 'speaking' : 'silent';
+                     speakingStates.set(identity.id, newState);
++                    if (newState === 'speaking') {
++                      speakerStartTimes.set(identity.id, Date.now());
++                    } else {
++                      speakerStartTimes.delete(identity.id);
++                    }
+                     debouncer.debounce(identity.id, () => {
+                       emitEvent(newState, identity);
+                     });
+@@ -723,6 +752,7 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+ 
+                 stateMachine.remove(identity.id);
+                 speakingStates.delete(identity.id);
++                speakerStartTimes.delete(identity.id);
+                 registry.invalidate(identity.element);
+                 delete (identity.element as any).dataset.vexaObserverAttached;
+ 
+@@ -884,22 +914,30 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+                   }
+                   if (maxVal <= 0.001) return;
+ 
+-                  // Find active speakers from DOM state (exclude bot itself)
++                  // Find active speakers from DOM state (exclude bot itself).
++                  // When multiple speakers are active simultaneously (Teams mixed stream),
++                  // pick only the most recently started one — broadcasting the same mixed
++                  // audio chunk to multiple speaker channels produces garbled transcripts.
+                   const botNameLower = ((botConfigData as any)?.botName || (botConfigData as any)?.name || 'vexa').toLowerCase();
+-                  const activeSpeakerNames: string[] = [];
++                  let activeSpeakerName: string | null = null;
++                  let latestStartTime = -1;
+                   for (const [id, state] of speakingStates) {
+                     if (state === 'speaking') {
+                       const name = registry.getNameById(id);
+                       if (name && !name.toLowerCase().includes(botNameLower)) {
+-                        activeSpeakerNames.push(name);
++                        const t = speakerStartTimes.get(id) ?? 0;
++                        if (t > latestStartTime) {
++                          latestStartTime = t;
++                          activeSpeakerName = name;
++                        }
+                       }
+                     }
+                   }
+ 
+                   const now = Date.now();
+-                  if (activeSpeakerNames.length > 0) {
+-                    // Update last known speaker
+-                    lastSpeakerNames = activeSpeakerNames;
++                  if (activeSpeakerName !== null) {
++                    // Update last known speaker (single name array for grace window compat)
++                    lastSpeakerNames = [activeSpeakerName];
+                     lastSpeakerTs = now;
+                   } else if (lastSpeakerNames.length > 0 && (now - lastSpeakerTs) < SPEAKER_GRACE_MS) {
+                     // No active DOM speaker but within grace window — route to last speaker.
+@@ -908,13 +946,10 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
+                     return;
+                   }
+ 
+-                  // Route audio to active (or grace-window) speakers
+-                  const targets = activeSpeakerNames.length > 0 ? activeSpeakerNames : lastSpeakerNames;
+-                  const audioArray = Array.from(data);
+-                  for (const name of targets) {
+-                    if (typeof (window as any).__vexaTeamsAudioData === 'function') {
+-                      (window as any).__vexaTeamsAudioData(name, audioArray);
+-                    }
++                  // Route audio to single target speaker
++                  const target = activeSpeakerName ?? lastSpeakerNames[0];
++                  if (typeof (window as any).__vexaTeamsAudioData === 'function') {
++                    (window as any).__vexaTeamsAudioData(target, Array.from(data));
+                   }
+                 };
+ 
+diff --git a/services/vexa-bot/core/src/platforms/msteams/selectors.ts b/services/vexa-bot/core/src/platforms/msteams/selectors.ts
+index 7143de7f..4219f036 100644
+--- a/services/vexa-bot/core/src/platforms/msteams/selectors.ts
++++ b/services/vexa-bot/core/src/platforms/msteams/selectors.ts
+@@ -22,14 +22,14 @@ export const teamsWaitingRoomIndicators: string[] = [
+   'text="Your request to join has been sent"',
+   
+   // Pre-join screen specific elements
+-  'button:has-text("Join now")',
++  // NOTE: do NOT include "Join now" button here — it matches the pre-join button and
++  // causes false-positive "still in waiting room" detection after a successful join click.
+   'button:has-text("Cancel")',
+   'text="Microsoft Teams meeting"',
+-  
++
+   // Pre-join screen specific aria labels
+   '[aria-label*="waiting"]',
+   '[aria-label*="lobby"]',
+-  '[aria-label*="Join now"]',
+   '[aria-label*="Cancel"]',
+   
+   // Pre-join screen specific classes/attributes

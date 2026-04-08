@@ -3,6 +3,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { Plus, RefreshCw, CreditCard, Video, Loader2, Search } from "lucide-react";
 import Image from "next/image";
+import { withBasePath } from "@/lib/base-path";
 import { useRouter } from "next/navigation";
 import { format, formatDistanceToNow } from "date-fns";
 import { Card } from "@/components/ui/card";
@@ -27,12 +28,12 @@ import { usePendingMeeting } from "@/hooks/use-pending-meeting";
 
 function PlatformIcon({ platform }: { platform: string }) {
   if (platform === "google_meet") {
-    return <Image src="/icons/icons8-google-meet-96.png" alt="Google Meet" width={20} height={20} className="rounded" />;
+    return <Image src={withBasePath("/icons/icons8-google-meet-96.png")} alt="Google Meet" width={20} height={20} className="rounded" />;
   }
   if (platform === "teams") {
-    return <Image src="/icons/icons8-teams-96.png" alt="Teams" width={20} height={20} className="rounded" />;
+    return <Image src={withBasePath("/icons/icons8-teams-96.png")} alt="Teams" width={20} height={20} className="rounded" />;
   }
-  return <Image src="/icons/icons8-zoom-96.png" alt="Zoom" width={20} height={20} className="rounded" />;
+  return <Image src={withBasePath("/icons/icons8-zoom-96.png")} alt="Zoom" width={20} height={20} className="rounded" />;
 }
 
 function StatusDot({ status }: { status: string }) {
