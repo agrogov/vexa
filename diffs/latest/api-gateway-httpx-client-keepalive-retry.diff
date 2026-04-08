@@ -1,0 +1,37 @@
+diff --git a/services/api-gateway/main.py b/services/api-gateway/main.py
+index 15bff56e..f1314685 100644
+--- a/services/api-gateway/main.py
++++ b/services/api-gateway/main.py
+@@ -152,7 +152,14 @@ app.add_middleware(
+ # Use a single client instance for connection pooling
+ @app.on_event("startup")
+ async def startup_event():
+-    app.state.http_client = httpx.AsyncClient()
++    app.state.http_client = httpx.AsyncClient(
++        timeout=httpx.Timeout(30.0, connect=5.0),
++        limits=httpx.Limits(
++            max_keepalive_connections=20,
++            max_connections=100,
++            keepalive_expiry=30.0,
++        ),
++    )
+     # Initialize Redis for Pub/Sub used by WS
+     redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
+     app.state.redis = await aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+@@ -213,8 +220,14 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
+         # Return downstream response directly (including headers, status code)
+         return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
+     except httpx.RequestError as exc:
+-        print(f"DEBUG: Request error: {exc}")
+-        raise HTTPException(status_code=503, detail=f"Service unavailable: {exc}")
++        print(f"DEBUG: Request error: {exc} — retrying once with fresh connection")
++        try:
++            resp = await client.request(method, url, headers=headers, params=forwarded_params or None, content=content)
++            print(f"DEBUG: Retry succeeded: status={resp.status_code}")
++            return Response(content=resp.content, status_code=resp.status_code, headers=dict(resp.headers))
++        except httpx.RequestError as exc2:
++            print(f"DEBUG: Retry failed: {exc2}")
++            raise HTTPException(status_code=503, detail=f"Service unavailable: {exc2}")
+ 
+ # --- Root Endpoint --- 
+ @app.get("/", tags=["General"], summary="API Gateway Root")
