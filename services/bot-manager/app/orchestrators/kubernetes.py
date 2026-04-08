@@ -298,7 +298,7 @@ async def start_bot_container(
 
 
 def stop_bot_container(container_id: str) -> bool:
-    """Stop a bot by deleting its Kubernetes Pod.
+    """Stop a bot by deleting its Kubernetes Pod and associated headless Service.
 
     Args:
         container_id: The pod name.
@@ -316,17 +316,28 @@ def stop_bot_container(container_id: str) -> bool:
             grace_period_seconds=10,
         )
         logger.info(f"Deleted bot pod {container_id}")
-        return True
-
     except ApiException as e:
         if e.status == 404:
             logger.info(f"Pod {container_id} not found, already deleted")
-            return True
-        logger.error(f"K8s API error deleting pod {container_id}: {e.status} {e.reason}")
-        return False
+        else:
+            logger.error(f"K8s API error deleting pod {container_id}: {e.status} {e.reason}")
+            return False
     except Exception as e:
         logger.error(f"Error deleting pod {container_id}: {e}", exc_info=True)
         return False
+
+    # Best-effort cleanup of the headless Service created for browser session pods.
+    try:
+        core_api = client.CoreV1Api()
+        core_api.delete_namespaced_service(name=container_id, namespace=BOT_NAMESPACE)
+        logger.info(f"Deleted headless Service {container_id}")
+    except ApiException as e:
+        if e.status != 404:
+            logger.warning(f"Failed to delete Service {container_id}: {e.status} {e.reason}")
+    except Exception as e:
+        logger.warning(f"Error deleting Service {container_id}: {e}")
+
+    return True
 
 
 async def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:
@@ -487,13 +498,41 @@ async def start_browser_session_container(
         ),
     )
 
+    # Headless Service so the pod is DNS-resolvable by name within the namespace.
+    svc = client.V1Service(
+        api_version="v1",
+        kind="Service",
+        metadata=client.V1ObjectMeta(
+            name=container_name,
+            namespace=BOT_NAMESPACE,
+            labels={"app.kubernetes.io/managed-by": "vexa-bot-manager"},
+        ),
+        spec=client.V1ServiceSpec(
+            cluster_ip="None",
+            selector={"app.kubernetes.io/name": "vexa-bot", "vexa.meeting-id": str(meeting_id)},
+            ports=[
+                client.V1ServicePort(name="vnc", port=6080, target_port=6080),
+                client.V1ServicePort(name="cdp", port=9223, target_port=9223),
+            ],
+        ),
+    )
+
     try:
         api = _get_k8s_api()
+        core_api = client.CoreV1Api()
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             None,
             lambda: api.create_namespaced_pod(namespace=BOT_NAMESPACE, body=pod),
         )
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: core_api.create_namespaced_service(namespace=BOT_NAMESPACE, body=svc),
+            )
+            logger.info(f"Created headless Service {container_name} for browser session pod")
+        except Exception as svc_err:
+            logger.warning(f"Failed to create Service for browser session pod {container_name}: {svc_err}")
         logger.info(f"Started browser session pod {container_name} for user {user_id}, meeting {meeting_id}")
         return container_name, container_name
     except Exception as e:

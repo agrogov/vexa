@@ -1,0 +1,165 @@
+diff --git a/helm/charts/vexa/templates/bot-manager-rbac.yaml b/helm/charts/vexa/templates/bot-manager-rbac.yaml
+index a2df7e0c..45c6c59a 100644
+--- a/helm/charts/vexa/templates/bot-manager-rbac.yaml
++++ b/helm/charts/vexa/templates/bot-manager-rbac.yaml
+@@ -20,6 +20,10 @@ rules:
+   - apiGroups: [""]
+     resources: ["pods/status"]
+     verbs: ["get", "list", "watch"]
++  # Allow bot-manager to manage headless Services for browser session DNS resolution
++  - apiGroups: [""]
++    resources: ["services"]
++    verbs: ["create", "delete", "get"]
+ ---
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: RoleBinding
+diff --git a/services/api-gateway/main.py b/services/api-gateway/main.py
+index f1314685..a296f6c6 100644
+--- a/services/api-gateway/main.py
++++ b/services/api-gateway/main.py
+@@ -983,10 +983,11 @@ async def resolve_browser_session(token: str) -> Optional[dict]:
+         return None
+ 
+ 
+-def _browser_dashboard_html(token: str, session: dict) -> str:
++def _browser_dashboard_html(token: str, session: dict, prefix: str = "") -> str:
+     """Return the inline HTML for the remote browser dashboard."""
+     meeting_id = session.get("meeting_id", "")
+-    vnc_iframe_url = f"/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify"
++    # prefix is e.g. "/vexa/api-gateway" — needed so noVNC WebSocket path routes correctly
++    vnc_iframe_url = f"{prefix}/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path={prefix.lstrip('/')}/b/{token}/vnc/websockify"
+     return f"""\
+ <!DOCTYPE html>
+ <html>
+@@ -1043,7 +1044,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
+     <h1>Remote Browser</h1>
+     <button class="btn btn-green" onclick="saveStorage()" id="save-btn">Save Storage</button>
+     <button class="btn btn-purple" onclick="toggleAudit()">Storage Audit</button>
+-    <button class="btn btn-blue" onclick="window.open('/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
++    <button class="btn btn-blue" onclick="window.open('{prefix}/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path={prefix.lstrip("/")}/b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
+   </div>
+   <div class="toast hidden" id="toast"></div>
+ 
+@@ -1066,6 +1067,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
+   <script>
+     const TOKEN = "{token}";
+     const MEETING_ID = "{meeting_id}";
++    const PREFIX = "{prefix}";
+     const toast = document.getElementById('toast');
+     let toastTimer;
+ 
+@@ -1082,7 +1084,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
+       btn.textContent = 'Saving...';
+       showToast('Saving browser storage to MinIO...');
+       try {{
+-        const res = await fetch('/b/' + TOKEN + '/save', {{ method: 'POST' }});
++        const res = await fetch(PREFIX + '/b/' + TOKEN + '/save', {{ method: 'POST' }});
+         const data = await res.json();
+         if (res.ok) {{
+           showToast(data.message || 'Storage saved!', 5000);
+@@ -1107,12 +1109,13 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
+ 
+ @app.get("/b/{token}", tags=["Remote Browser"], summary="Browser session dashboard",
+          response_class=HTMLResponse)
+-async def browser_session_page(token: str):
++async def browser_session_page(token: str, request: Request):
+     """Serve the remote browser dashboard UI. Token is the auth."""
+     session = await resolve_browser_session(token)
+     if not session:
+         raise HTTPException(status_code=404, detail="Browser session not found or expired")
+-    return HTMLResponse(content=_browser_dashboard_html(token, session))
++    prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
++    return HTMLResponse(content=_browser_dashboard_html(token, session, prefix=prefix))
+ 
+ 
+ @app.api_route("/b/{token}/vnc/{path:path}", methods=["GET", "POST"],
+diff --git a/services/bot-manager/app/orchestrators/kubernetes.py b/services/bot-manager/app/orchestrators/kubernetes.py
+index c20d9304..17c83a70 100644
+--- a/services/bot-manager/app/orchestrators/kubernetes.py
++++ b/services/bot-manager/app/orchestrators/kubernetes.py
+@@ -298,7 +298,7 @@ async def start_bot_container(
+ 
+ 
+ def stop_bot_container(container_id: str) -> bool:
+-    """Stop a bot by deleting its Kubernetes Pod.
++    """Stop a bot by deleting its Kubernetes Pod and associated headless Service.
+ 
+     Args:
+         container_id: The pod name.
+@@ -316,18 +316,29 @@ def stop_bot_container(container_id: str) -> bool:
+             grace_period_seconds=10,
+         )
+         logger.info(f"Deleted bot pod {container_id}")
+-        return True
+-
+     except ApiException as e:
+         if e.status == 404:
+             logger.info(f"Pod {container_id} not found, already deleted")
+-            return True
+-        logger.error(f"K8s API error deleting pod {container_id}: {e.status} {e.reason}")
+-        return False
++        else:
++            logger.error(f"K8s API error deleting pod {container_id}: {e.status} {e.reason}")
++            return False
+     except Exception as e:
+         logger.error(f"Error deleting pod {container_id}: {e}", exc_info=True)
+         return False
+ 
++    # Best-effort cleanup of the headless Service created for browser session pods.
++    try:
++        core_api = client.CoreV1Api()
++        core_api.delete_namespaced_service(name=container_id, namespace=BOT_NAMESPACE)
++        logger.info(f"Deleted headless Service {container_id}")
++    except ApiException as e:
++        if e.status != 404:
++            logger.warning(f"Failed to delete Service {container_id}: {e.status} {e.reason}")
++    except Exception as e:
++        logger.warning(f"Error deleting Service {container_id}: {e}")
++
++    return True
++
+ 
+ async def get_running_bots_status(user_id: int) -> List[Dict[str, Any]]:
+     """Get status of running bot pods for a user.
+@@ -487,13 +498,41 @@ async def start_browser_session_container(
+         ),
+     )
+ 
++    # Headless Service so the pod is DNS-resolvable by name within the namespace.
++    svc = client.V1Service(
++        api_version="v1",
++        kind="Service",
++        metadata=client.V1ObjectMeta(
++            name=container_name,
++            namespace=BOT_NAMESPACE,
++            labels={"app.kubernetes.io/managed-by": "vexa-bot-manager"},
++        ),
++        spec=client.V1ServiceSpec(
++            cluster_ip="None",
++            selector={"app.kubernetes.io/name": "vexa-bot", "vexa.meeting-id": str(meeting_id)},
++            ports=[
++                client.V1ServicePort(name="vnc", port=6080, target_port=6080),
++                client.V1ServicePort(name="cdp", port=9223, target_port=9223),
++            ],
++        ),
++    )
++
+     try:
+         api = _get_k8s_api()
++        core_api = client.CoreV1Api()
+         loop = asyncio.get_event_loop()
+         await loop.run_in_executor(
+             None,
+             lambda: api.create_namespaced_pod(namespace=BOT_NAMESPACE, body=pod),
+         )
++        try:
++            await loop.run_in_executor(
++                None,
++                lambda: core_api.create_namespaced_service(namespace=BOT_NAMESPACE, body=svc),
++            )
++            logger.info(f"Created headless Service {container_name} for browser session pod")
++        except Exception as svc_err:
++            logger.warning(f"Failed to create Service for browser session pod {container_name}: {svc_err}")
+         logger.info(f"Started browser session pod {container_name} for user {user_id}, meeting {meeting_id}")
+         return container_name, container_name
+     except Exception as e:

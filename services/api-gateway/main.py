@@ -983,10 +983,11 @@ async def resolve_browser_session(token: str) -> Optional[dict]:
         return None
 
 
-def _browser_dashboard_html(token: str, session: dict) -> str:
+def _browser_dashboard_html(token: str, session: dict, prefix: str = "") -> str:
     """Return the inline HTML for the remote browser dashboard."""
     meeting_id = session.get("meeting_id", "")
-    vnc_iframe_url = f"/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify"
+    # prefix is e.g. "/vexa/api-gateway" — needed so noVNC WebSocket path routes correctly
+    vnc_iframe_url = f"{prefix}/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path={prefix.lstrip('/')}/b/{token}/vnc/websockify"
     return f"""\
 <!DOCTYPE html>
 <html>
@@ -1043,7 +1044,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
     <h1>Remote Browser</h1>
     <button class="btn btn-green" onclick="saveStorage()" id="save-btn">Save Storage</button>
     <button class="btn btn-purple" onclick="toggleAudit()">Storage Audit</button>
-    <button class="btn btn-blue" onclick="window.open('/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
+    <button class="btn btn-blue" onclick="window.open('{prefix}/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path={prefix.lstrip("/")}/b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
   </div>
   <div class="toast hidden" id="toast"></div>
 
@@ -1066,6 +1067,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
   <script>
     const TOKEN = "{token}";
     const MEETING_ID = "{meeting_id}";
+    const PREFIX = "{prefix}";
     const toast = document.getElementById('toast');
     let toastTimer;
 
@@ -1082,7 +1084,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
       btn.textContent = 'Saving...';
       showToast('Saving browser storage to MinIO...');
       try {{
-        const res = await fetch('/b/' + TOKEN + '/save', {{ method: 'POST' }});
+        const res = await fetch(PREFIX + '/b/' + TOKEN + '/save', {{ method: 'POST' }});
         const data = await res.json();
         if (res.ok) {{
           showToast(data.message || 'Storage saved!', 5000);
@@ -1107,12 +1109,13 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
 
 @app.get("/b/{token}", tags=["Remote Browser"], summary="Browser session dashboard",
          response_class=HTMLResponse)
-async def browser_session_page(token: str):
+async def browser_session_page(token: str, request: Request):
     """Serve the remote browser dashboard UI. Token is the auth."""
     session = await resolve_browser_session(token)
     if not session:
         raise HTTPException(status_code=404, detail="Browser session not found or expired")
-    return HTMLResponse(content=_browser_dashboard_html(token, session))
+    prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
+    return HTMLResponse(content=_browser_dashboard_html(token, session, prefix=prefix))
 
 
 @app.api_route("/b/{token}/vnc/{path:path}", methods=["GET", "POST"],

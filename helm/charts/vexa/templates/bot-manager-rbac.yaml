@@ -20,6 +20,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods/status"]
     verbs: ["get", "list", "watch"]
+  # Allow bot-manager to manage headless Services for browser session DNS resolution
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "delete", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
