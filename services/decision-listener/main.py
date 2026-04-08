@@ -22,10 +22,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from config import HTTP_PORT, LOG_LEVEL, DECISIONS_KEY_PREFIX
-from listener import start_listener, register_sse_queue, unregister_sse_queue, get_redis
+from listener import start_listener, register_sse_queue, unregister_sse_queue, get_redis, load_decisions_for_meeting
 from tracker_config import get_config, set_config, reset_config
 from narrative import generate_narrative, generate_summary
 from enrichment import enrich_entity_stream
+import db as decision_db
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    decision_db.init_db()
     # Start the pub/sub listener as a background task
     task = asyncio.create_task(start_listener())
     logger.info("decision-listener started")
@@ -133,14 +135,9 @@ async def decisions_sse(meeting_id: str, request: Request):
 
 @app.get("/decisions/{meeting_id}/all")
 async def decisions_all(meeting_id: str):
-    """Snapshot of all stored decisions for a meeting (from Redis list)."""
-    redis = await get_redis()
-    if redis is None:
-        return JSONResponse({"error": "Redis not ready"}, status_code=503)
-    key = DECISIONS_KEY_PREFIX.format(meeting_id=meeting_id)
+    """Snapshot of all stored decisions for a meeting (Redis with DB fallback)."""
     try:
-        raw_items = await redis.lrange(key, 0, -1)
-        items = [json.loads(r) for r in raw_items]
+        items = await load_decisions_for_meeting(meeting_id)
         return {"meeting_id": meeting_id, "count": len(items), "items": items}
     except Exception as e:
         logger.error(f"Failed to fetch decisions for {meeting_id}: {e}")
@@ -158,15 +155,7 @@ async def summary_get(meeting_id: str):
     Returns: {"meeting_id": "...", "summary": {"lede": "...", "theme": "..."}, "item_count": N}
     """
     try:
-        detected_items = []
-        redis = await get_redis()
-        if redis:
-            key = DECISIONS_KEY_PREFIX.format(meeting_id=meeting_id)
-            try:
-                raw_items = await redis.lrange(key, 0, -1)
-                detected_items = [json.loads(r) for r in raw_items]
-            except Exception as e:
-                logger.warning(f"Failed to load items for summary: {e}")
+        detected_items = await load_decisions_for_meeting(meeting_id)
 
         if not detected_items:
             return {
@@ -213,16 +202,8 @@ async def narrative_generate(meeting_id: str, request: Request):
                 status_code=400,
             )
 
-        # Load existing detected items from Redis
-        detected_items = []
-        redis = await get_redis()
-        if redis:
-            key = DECISIONS_KEY_PREFIX.format(meeting_id=meeting_id)
-            try:
-                raw_items = await redis.lrange(key, 0, -1)
-                detected_items = [json.loads(r) for r in raw_items]
-            except Exception as e:
-                logger.warning(f"Failed to load items for narrative: {e}")
+        # Load existing detected items (Redis with DB fallback)
+        detected_items = await load_decisions_for_meeting(meeting_id)
 
         narrative = await generate_narrative(segments, detected_items, participants)
 

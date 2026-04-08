@@ -71,6 +71,35 @@ spec:
                   name: {{ .Values.secrets.existingSecretName | quote }}
                   key: OPENAI_API_KEY
             {{- end }}
+            - name: DB_HOST
+              value: {{ include "vexa.dbHost" . | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: DB_NAME
+              {{- if .Values.postgres.enabled }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
+                  key: POSTGRES_DB
+              {{- else }}
+              value: {{ .Values.database.name | quote }}
+              {{- end }}
+            - name: DB_USER
+              {{- if .Values.postgres.enabled }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
+                  key: POSTGRES_USER
+              {{- else }}
+              value: {{ .Values.database.user | quote }}
+              {{- end }}
+            - name: DB_SSL_MODE
+              value: {{ .Values.database.sslMode | quote }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
+                  key: POSTGRES_PASSWORD
             - name: LOG_LEVEL
               value: {{ .Values.decisionListener.logLevel | quote }}
             {{- with .Values.decisionListener.extraEnv }}

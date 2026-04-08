@@ -51,6 +51,7 @@ class Meeting(Base):
     transcriptions = relationship("Transcription", back_populates="meeting")
     sessions = relationship("MeetingSession", back_populates="meeting", cascade="all, delete-orphan")
     recordings = relationship("Recording", back_populates="meeting", cascade="all, delete-orphan")
+    decisions = relationship("MeetingDecision", back_populates="meeting", cascade="all, delete-orphan")
 
     # Add composite index for efficient lookup by user, platform, and native ID, including created_at for sorting
     __table_args__ = (
@@ -141,6 +142,26 @@ class Recording(Base):
     __table_args__ = (
         Index('ix_recording_meeting_session', 'meeting_id', 'session_uid'),
         Index('ix_recording_user_created', 'user_id', 'created_at'),
+    )
+
+
+class MeetingDecision(Base):
+    """A detected decision, action item, key insight, or commitment from a meeting."""
+    __tablename__ = "meeting_decisions"
+    id = Column(Integer, primary_key=True, index=True)
+    meeting_id = Column(Integer, ForeignKey("meetings.id"), nullable=False, index=True)
+    # Decision fields
+    type = Column(String(50), nullable=False)           # decision, action_item, key_insight, commitment
+    summary = Column(Text, nullable=False)
+    speaker = Column(String(255), nullable=True)
+    confidence = Column(Float, nullable=True)
+    entities = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+    meeting = relationship("Meeting", back_populates="decisions")
+
+    __table_args__ = (
+        Index('ix_meeting_decisions_meeting_created', 'meeting_id', 'created_at'),
     )
 
 

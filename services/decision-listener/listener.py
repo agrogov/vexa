@@ -19,6 +19,7 @@ from config import (
     DECISIONS_KEY_PREFIX, DECISIONS_TTL,
 )
 from llm import analyze_window, is_duplicate_llm
+import db as decision_db
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ def _is_debounced(meeting_id: str) -> bool:
 
 
 async def _store_decision(redis_c: aioredis.Redis, meeting_id: str, item: dict):
-    """Append decision to Redis list and refresh TTL."""
+    """Append decision to Redis list, refresh TTL, and persist to Postgres."""
     key = DECISIONS_KEY_PREFIX.format(meeting_id=meeting_id)
     payload = json.dumps(item)
     try:
@@ -142,7 +143,9 @@ async def _store_decision(redis_c: aioredis.Redis, meeting_id: str, item: dict):
         await redis_c.expire(key, DECISIONS_TTL)
         logger.info(f"[{meeting_id}] Stored {item['type']}: {item['summary'][:80]}")
     except Exception as e:
-        logger.error(f"[{meeting_id}] Failed to store decision: {e}")
+        logger.error(f"[{meeting_id}] Failed to store decision to Redis: {e}")
+    # Persist to Postgres regardless of Redis outcome (fire-and-forget, non-blocking)
+    asyncio.create_task(decision_db.persist_decision(meeting_id, item))
 
 
 # Per-meeting analysis lock — prevents overlapping LLM calls for the same meeting
@@ -254,3 +257,24 @@ async def start_listener():
 async def get_redis() -> aioredis.Redis:
     """Return the shared Redis client (for use by HTTP handlers)."""
     return _redis
+
+
+async def load_decisions_for_meeting(meeting_id: str) -> list:
+    """
+    Load all decisions for a meeting.
+    Tries Redis first (fast, live); falls back to Postgres when Redis key is expired/missing.
+    """
+    redis = _redis
+    if redis:
+        key = DECISIONS_KEY_PREFIX.format(meeting_id=meeting_id)
+        try:
+            raw_items = await redis.lrange(key, 0, -1)
+            if raw_items:
+                return [json.loads(r) for r in raw_items]
+        except Exception as e:
+            logger.warning(f"[{meeting_id}] Redis load failed, falling back to DB: {e}")
+    # Redis cold or empty — try Postgres
+    db_items = await decision_db.load_decisions(meeting_id)
+    if db_items is not None:
+        return db_items
+    return []

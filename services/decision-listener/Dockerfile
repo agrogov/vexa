@@ -19,6 +19,10 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app
 
+# Install shared library
+COPY ./libs/shared-models/ /app/libs/shared-models/
+RUN pip install --no-cache-dir /app/libs/shared-models/
+
 COPY ./services/decision-listener/requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
