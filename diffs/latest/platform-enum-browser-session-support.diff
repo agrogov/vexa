@@ -1,0 +1,36 @@
+diff --git a/libs/shared-models/shared_models/schemas.py b/libs/shared-models/shared_models/schemas.py
+index a5a79233..9861f2f7 100644
+--- a/libs/shared-models/shared_models/schemas.py
++++ b/libs/shared-models/shared_models/schemas.py
+@@ -180,7 +180,8 @@ class Platform(str, Enum):
+     GOOGLE_MEET = "google_meet"
+     ZOOM = "zoom"
+     TEAMS = "teams"
+-    
++    BROWSER_SESSION = "browser_session"
++
+     @property
+     def bot_name(self) -> str:
+         """
+@@ -190,7 +191,8 @@ class Platform(str, Enum):
+         mapping = {
+             Platform.GOOGLE_MEET: "google_meet",
+             Platform.ZOOM: "zoom",
+-            Platform.TEAMS: "teams"
++            Platform.TEAMS: "teams",
++            Platform.BROWSER_SESSION: "browser_session",
+         }
+         return mapping[self]
+     
+diff --git a/services/dashboard/src/types/vexa.ts b/services/dashboard/src/types/vexa.ts
+index c4258099..27a302e2 100644
+--- a/services/dashboard/src/types/vexa.ts
++++ b/services/dashboard/src/types/vexa.ts
+@@ -1,6 +1,6 @@
+ // Vexa API Types
+ 
+-export type Platform = "google_meet" | "teams" | "zoom";
++export type Platform = "google_meet" | "teams" | "zoom" | "browser_session";
+ 
+ export type MeetingStatus =
+   | "requested"

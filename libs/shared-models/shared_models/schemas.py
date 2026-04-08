@@ -180,7 +180,8 @@ class Platform(str, Enum):
     GOOGLE_MEET = "google_meet"
     ZOOM = "zoom"
     TEAMS = "teams"
-    
+    BROWSER_SESSION = "browser_session"
+
     @property
     def bot_name(self) -> str:
         """
@@ -190,7 +191,8 @@ class Platform(str, Enum):
         mapping = {
             Platform.GOOGLE_MEET: "google_meet",
             Platform.ZOOM: "zoom",
-            Platform.TEAMS: "teams"
+            Platform.TEAMS: "teams",
+            Platform.BROWSER_SESSION: "browser_session",
         }
         return mapping[self]
     

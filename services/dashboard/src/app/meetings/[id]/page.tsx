@@ -325,6 +325,7 @@ export default function MeetingDetailPage() {
     if (
       (status === "stopping" || status === "completed") &&
       currentMeeting?.platform &&
+      currentMeeting?.platform !== "browser_session" &&
       currentMeeting?.platform_specific_id
     ) {
       fetchTranscripts(currentMeeting.platform, currentMeeting.platform_specific_id, String(currentMeeting.id));
@@ -340,7 +341,9 @@ export default function MeetingDetailPage() {
       // Optimistic transition to post-meeting UI immediately after stop is accepted.
       setForcePostMeetingMode(true);
       updateMeetingStatus(String(currentMeeting.id), "stopping");
-      fetchTranscripts(currentMeeting.platform, currentMeeting.platform_specific_id, String(currentMeeting.id));
+      if (currentMeeting.platform !== "browser_session") {
+        fetchTranscripts(currentMeeting.platform, currentMeeting.platform_specific_id, String(currentMeeting.id));
+      }
       toast.success("Bot stopped", {
         description: "The transcription has been stopped.",
       });
@@ -683,6 +686,7 @@ export default function MeetingDetailPage() {
   const meetingStatus = currentMeeting?.status;
 
   useEffect(() => {
+    if (meetingPlatform === "browser_session") return;
     // Always refresh transcript/recording artifacts when entering post-meeting flow.
     if ((meetingStatus === "stopping" || meetingStatus === "completed") && meetingPlatform && meetingNativeId) {
       fetchTranscripts(meetingPlatform, meetingNativeId, meetingNumericId);
@@ -699,6 +703,7 @@ export default function MeetingDetailPage() {
 
   // Also fetch chat messages for active meetings (WS handles real-time, REST bootstraps)
   useEffect(() => {
+    if (meetingPlatform === "browser_session") return;
     if (shouldUseWebSocket && meetingPlatform && meetingNativeId) {
       fetchChatMessages(meetingPlatform, meetingNativeId);
     }
@@ -800,7 +805,14 @@ export default function MeetingDetailPage() {
     return <MeetingDetailSkeleton />;
   }
 
-  const platformConfig = PLATFORM_CONFIG[currentMeeting.platform];
+  const isBrowserSession = currentMeeting.platform === "browser_session";
+  const platformConfig = PLATFORM_CONFIG[currentMeeting.platform as keyof typeof PLATFORM_CONFIG] ?? {
+    name: currentMeeting.platform ?? "Unknown",
+    color: "bg-gray-500",
+    textColor: "text-gray-700",
+    bgColor: "bg-gray-50",
+    icon: "video",
+  };
   const statusConfig = getDetailedStatus(currentMeeting.status, currentMeeting.data);
 
   // Safety check: ensure statusConfig is always defined

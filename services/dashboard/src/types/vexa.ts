@@ -1,6 +1,6 @@
 // Vexa API Types
 
-export type Platform = "google_meet" | "teams" | "zoom";
+export type Platform = "google_meet" | "teams" | "zoom" | "browser_session";
 
 export type MeetingStatus =
   | "requested"

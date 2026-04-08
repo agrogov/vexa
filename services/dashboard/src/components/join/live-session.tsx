@@ -65,7 +65,13 @@ export function LiveSession({ platform, nativeId, onEnd }: LiveSessionProps) {
     }
   };
 
-  const platformConfig = PLATFORM_CONFIG[platform];
+  const platformConfig = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG] ?? {
+    name: platform ?? "Unknown",
+    color: "bg-gray-500",
+    textColor: "text-gray-700",
+    bgColor: "bg-gray-50",
+    icon: "video",
+  };
   const statusConfig = botStatus ? MEETING_STATUS_CONFIG[botStatus] : null;
 
   // Check if meeting is still active

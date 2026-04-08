@@ -1,0 +1,19 @@
+diff --git a/services/dashboard/src/app/meetings/[id]/page.tsx b/services/dashboard/src/app/meetings/[id]/page.tsx
+index 2d4a7bf7..aa980e76 100644
+--- a/services/dashboard/src/app/meetings/[id]/page.tsx
++++ b/services/dashboard/src/app/meetings/[id]/page.tsx
+@@ -800,7 +800,13 @@ export default function MeetingDetailPage() {
+     return <MeetingDetailSkeleton />;
+   }
+ 
+-  const platformConfig = PLATFORM_CONFIG[currentMeeting.platform];
++  const platformConfig = PLATFORM_CONFIG[currentMeeting.platform as keyof typeof PLATFORM_CONFIG] ?? {
++    name: currentMeeting.platform ?? "Unknown",
++    color: "bg-gray-500",
++    textColor: "text-gray-700",
++    bgColor: "bg-gray-50",
++    icon: "video",
++  };
+   const statusConfig = getDetailedStatus(currentMeeting.status, currentMeeting.data);
+ 
+   // Safety check: ensure statusConfig is always defined

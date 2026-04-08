@@ -42,7 +42,13 @@ export function JoinForm({ onSuccess }: JoinFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
-  const platformConfig = PLATFORM_CONFIG[platform];
+  const platformConfig = PLATFORM_CONFIG[platform as keyof typeof PLATFORM_CONFIG] ?? {
+    name: platform ?? "Unknown",
+    color: "bg-gray-500",
+    textColor: "text-gray-700",
+    bgColor: "bg-gray-50",
+    icon: "video",
+  };
 
   const validateMeetingId = (id: string): boolean => {
     if (!id.trim()) return false;
