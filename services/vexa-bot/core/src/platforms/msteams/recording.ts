@@ -269,12 +269,6 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
             // Initialize audio processor
             return await audioService.initializeAudioProcessor(combinedStream);
           }).then(async (processor: any) => {
-            // Audio data processor — no-op now; per-speaker pipeline handles transcription
-            audioService.setupAudioDataProcessor(async (_audioData: Float32Array, _sessionStartTime: number | null) => {
-              // Per-speaker pipeline (speaker-streams.ts) handles transcription.
-              // This processor is kept for MediaRecorder / recording only.
-            });
-
             return null;
           }).then(() => {
             // Initialize Teams-specific speaker detection (browser context)
@@ -611,7 +605,21 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               // Tracks when each participant last transitioned to 'speaking'.
               // Used to pick a single speaker when multiple are active simultaneously.
               const speakerStartTimes = new Map<string, number>();
-              
+              // Tracks when each participant last transitioned to 'silent'.
+              // Used to suppress flap re-detections from resetting speakerStartTimes.
+              const speakerLastEndTime = new Map<string, number>();
+              // If SPEAKER_START fires within this window after SPEAKER_END, treat as a flap
+              // and preserve the original start time rather than resetting to now.
+              const FLAP_SUPPRESS_MS = 1000;
+
+              // Grace window for audio routing: bridge DOM flap gaps within one speaker's utterance.
+              // Teams DOM speaking signal flaps between words — without this, audio in the silent
+              // frames between utterances is dropped and the buffer never accumulates enough to confirm.
+              const SPEAKER_GRACE_MS = 4000;
+              const botNameLower = ((botConfigData as any)?.botName || (botConfigData as any)?.name || 'vexa').toLowerCase();
+              let lastSpeakerNames: string[] = [];
+              let lastSpeakerTs = 0;
+
               // Event emission helper
               function sendTeamsSpeakerEvent(eventType: string, identity: ParticipantIdentity) {
                 const eventAbsoluteTimeMs = Date.now();
@@ -703,8 +711,16 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                     const newState: SpeakingState = detectionResult.isSpeaking ? 'speaking' : 'silent';
                     speakingStates.set(identity.id, newState);
                     if (newState === 'speaking') {
-                      speakerStartTimes.set(identity.id, Date.now());
+                      const lastEnd = speakerLastEndTime.get(identity.id) ?? 0;
+                      const isFlap = (Date.now() - lastEnd) < FLAP_SUPPRESS_MS;
+                      if (!isFlap || !speakerStartTimes.has(identity.id)) {
+                        // Genuine new start (not a rapid re-detection flap) — use current time.
+                        // Flap re-detections keep the original start time so this speaker
+                        // doesn't falsely outrank a genuinely active speaker in the routing heuristic.
+                        speakerStartTimes.set(identity.id, Date.now());
+                      }
                     } else {
+                      speakerLastEndTime.set(identity.id, Date.now());
                       speakerStartTimes.delete(identity.id);
                     }
                     debouncer.debounce(identity.id, () => {
@@ -753,6 +769,7 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
                 stateMachine.remove(identity.id);
                 speakingStates.delete(identity.id);
                 speakerStartTimes.delete(identity.id);
+                speakerLastEndTime.delete(identity.id);
                 registry.invalidate(identity.element);
                 delete (identity.element as any).dataset.vexaObserverAttached;
 
@@ -875,91 +892,47 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               // ─── Per-speaker audio routing ──────────────────────────────
               // Teams has ONE mixed audio stream. We route audio chunks to
               // speaker buffers based on who the DOM says is currently speaking.
-              // The speakingStates map (populated by the observer above) tells
-              // us who's active. Registry maps IDs to names.
-              const setupPerSpeakerAudioRouting = () => {
-                const audioEl = document.querySelector('audio') as HTMLAudioElement | null;
-                if (!audioEl || !(audioEl.srcObject instanceof MediaStream)) {
-                  (window as any).logBot?.('[Teams PerSpeaker] No audio element found, skipping per-speaker routing');
-                  return;
-                }
-
-                const stream = audioEl.srcObject as MediaStream;
-                if (stream.getAudioTracks().length === 0) {
-                  (window as any).logBot?.('[Teams PerSpeaker] Audio stream has no tracks');
-                  return;
-                }
-
-                const ctx = new AudioContext({ sampleRate: 16000 });
-                const source = ctx.createMediaStreamSource(stream);
-                const processor = ctx.createScriptProcessor(4096, 1, 1);
-
-                // Grace window: route audio to last known speaker after their
-                // SPEAKER_END event. Teams DOM speaker state flaps rapidly —
-                // SPEAKER_END fires between words, dropping audio for the
-                // silent frames between utterances.
-                // Configured via TEAMS_SPEAKING_KEEPALIVE_MS env var (default 8000ms).
-                const SPEAKER_GRACE_MS = (botConfigData as any)?.teamsSpeakingKeepaliveMs ?? 8000;
-                let lastSpeakerNames: string[] = [];
-                let lastSpeakerTs = 0;
-
-                processor.onaudioprocess = (e: AudioProcessingEvent) => {
-                  const data = e.inputBuffer.getChannelData(0);
-                  // Skip near-silence (Teams sends very low-amplitude silence frames).
-                  // Threshold lowered from 0.005 → 0.001 to catch quieter speech.
-                  let maxVal = 0;
-                  for (let j = 0; j < data.length; j++) {
-                    const abs = data[j] < 0 ? -data[j] : data[j];
-                    if (abs > maxVal) maxVal = abs;
-                  }
-                  if (maxVal <= 0.001) return;
-
-                  // Find active speakers from DOM state (exclude bot itself).
-                  // When multiple speakers are active simultaneously (Teams mixed stream),
-                  // pick only the most recently started one — broadcasting the same mixed
-                  // audio chunk to multiple speaker channels produces garbled transcripts.
-                  const botNameLower = ((botConfigData as any)?.botName || (botConfigData as any)?.name || 'vexa').toLowerCase();
-                  let activeSpeakerName: string | null = null;
-                  let latestStartTime = -1;
-                  for (const [id, state] of speakingStates) {
-                    if (state === 'speaking') {
-                      const name = registry.getNameById(id);
-                      if (name && !name.toLowerCase().includes(botNameLower)) {
-                        const t = speakerStartTimes.get(id) ?? 0;
-                        if (t > latestStartTime) {
-                          latestStartTime = t;
-                          activeSpeakerName = name;
-                        }
-                      }
+              // Uses the existing AudioContext from initializeAudioProcessor (already kept
+              // alive by gainNode → audioContext.destination) via setupAudioDataProcessor.
+              // Audio arrives pre-resampled to 16kHz. No separate AudioContext needed.
+              audioService.setupAudioDataProcessor((audioData: Float32Array, _sessionStartTime: number | null) => {
+                // Find active speaker from DOM state, excluding bot itself.
+                // When multiple are simultaneously active, pick the most recently started
+                // to avoid routing the mixed stream to multiple buffers.
+                let activeSpeakerName: string | null = null;
+                let latestStartTime = -1;
+                for (const [id, state] of speakingStates) {
+                  if (state === 'speaking') {
+                    const name = registry.getNameById(id);
+                    if (name && !name.toLowerCase().includes(botNameLower)) {
+                      const t = speakerStartTimes.get(id) ?? 0;
+                      if (t > latestStartTime) { latestStartTime = t; activeSpeakerName = name; }
                     }
                   }
+                }
 
-                  const now = Date.now();
-                  if (activeSpeakerName !== null) {
-                    // Update last known speaker (single name array for grace window compat)
-                    lastSpeakerNames = [activeSpeakerName];
-                    lastSpeakerTs = now;
-                  } else if (lastSpeakerNames.length > 0 && (now - lastSpeakerTs) < SPEAKER_GRACE_MS) {
-                    // No active DOM speaker but within grace window — route to last speaker.
-                    // This captures audio between DOM speaking events (Teams flaps rapidly).
-                  } else {
-                    return;
+                const now = Date.now();
+                if (activeSpeakerName !== null) {
+                  // Invalidate grace window immediately when speaker switches to prevent
+                  // the previous speaker's buffer from receiving the new speaker's audio.
+                  if (lastSpeakerNames.length > 0 && lastSpeakerNames[0] !== activeSpeakerName) {
+                    lastSpeakerTs = 0;
                   }
+                  lastSpeakerNames = [activeSpeakerName];
+                  lastSpeakerTs = now;
+                } else if (lastSpeakerNames.length > 0 && (now - lastSpeakerTs) < SPEAKER_GRACE_MS) {
+                  // No active DOM speaker but within grace window — route to last known speaker.
+                  // This captures audio in the silent frames between utterances (Teams flaps rapidly).
+                } else {
+                  return;
+                }
 
-                  // Route audio to single target speaker
-                  const target = activeSpeakerName ?? lastSpeakerNames[0];
-                  if (typeof (window as any).__vexaTeamsAudioData === 'function') {
-                    (window as any).__vexaTeamsAudioData(target, Array.from(data));
-                  }
-                };
-
-                source.connect(processor);
-                processor.connect(ctx.destination);
-                (window as any).logBot?.(`[Teams PerSpeaker] Audio routing active on stream ${stream.id}`);
-              };
-
-              // Delay slightly to ensure audio element is ready
-              setTimeout(setupPerSpeakerAudioRouting, 2000);
+                const target = activeSpeakerName ?? lastSpeakerNames[0];
+                if (typeof (window as any).__vexaTeamsAudioData === 'function') {
+                  (window as any).__vexaTeamsAudioData(target, Array.from(audioData));
+                }
+              });
+              (window as any).logBot('[Teams PerSpeaker] Audio routing wired into existing pipeline');
               
               // Expose participant count for meeting monitoring
               // Accessible-roles based participant collection (robust and simple)

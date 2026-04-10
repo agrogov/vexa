@@ -244,8 +244,6 @@ async def start_bot_container(
         "recordingUploadUrl": f"http://bot-manager:8080/internal/recordings/upload",
         "transcriptionServiceUrl": os.getenv("TRANSCRIPTION_SERVICE_URL"),
         "transcriptionServiceToken": os.getenv("TRANSCRIPTION_SERVICE_TOKEN"),
-        "teamsSignalLossGraceMs": int(os.getenv("TEAMS_SIGNAL_LOSS_GRACE_MS", 2000)),
-        "teamsSpeakingKeepaliveMs": int(os.getenv("TEAMS_SPEAKING_KEEPALIVE_MS", 8000)),
     }
     if recording_enabled is not None:
         bot_config_data["recordingEnabled"] = bool(recording_enabled)
