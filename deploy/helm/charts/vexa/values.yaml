@@ -196,6 +196,32 @@ dashboard:
     host: ""
     tls: []
 
+transcriptionService:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: vexaai/transcription-service
+    tag: dev
+  command: []
+  args: []
+  service:
+    type: ClusterIP
+    port: 8000
+  azure:
+    endpoint: ""
+    apiVersion: ""
+    apiKey: ""
+  tolerations: []
+  nodeSelector: {}
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  extraEnv: []
+
 migrations:
   enabled: false
   backoffLimit: 3
@@ -252,8 +278,9 @@ minio:
   image:
     repository: minio/minio
     tag: latest
-  accessKey: vexa-access-key
-  secretKey: vexa-secret-key
+  existingSecretName: ""  # if set, reads MINIO_ROOT_USER/MINIO_ROOT_PASSWORD from this secret
+  accessKey: vexa-access-key  # used only when existingSecretName is empty
+  secretKey: vexa-secret-key  # used only when existingSecretName is empty
   bucket: vexa
   persistence:
     size: 10Gi

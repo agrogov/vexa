@@ -1,7 +1,13 @@
 # Build stage
-FROM node:20-alpine AS builder
+FROM docker.ib-ci.com/node:20-alpine AS builder
 
 WORKDIR /app
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+RUN apk add --no-cache ca-certificates wget \
+    && wget -O /usr/local/share/ca-certificates/infobip-rootca.crt http://ca.infobip.com/crl/RootCA.crt \
+    && update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # Copy transcript-rendering built package
 COPY packages/transcript-rendering/package.json /transcript-rendering/package.json
@@ -22,15 +28,25 @@ COPY services/dashboard/public ./public
 COPY services/dashboard/next.config.ts services/dashboard/tsconfig.json services/dashboard/postcss.config.mjs services/dashboard/eslint.config.mjs ./
 COPY services/dashboard/components.json ./
 
+# Base path for sub-path deployment (e.g. /vexa)
+ARG NEXT_PUBLIC_BASE_PATH=""
+ENV NEXT_PUBLIC_BASE_PATH=${NEXT_PUBLIC_BASE_PATH}
+
 # Build application
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine AS runner
+FROM docker.ib-ci.com/node:20-alpine AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+RUN apk add --no-cache ca-certificates wget \
+    && wget -O /usr/local/share/ca-certificates/infobip-rootca.crt http://ca.infobip.com/crl/RootCA.crt \
+    && update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs

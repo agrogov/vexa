@@ -39,9 +39,23 @@ spec:
               containerPort: 9001
           env:
             - name: MINIO_ROOT_USER
+              {{- if .Values.minio.existingSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.existingSecretName | quote }}
+                  key: MINIO_ROOT_USER
+              {{- else }}
               value: {{ .Values.minio.accessKey | quote }}
+              {{- end }}
             - name: MINIO_ROOT_PASSWORD
+              {{- if .Values.minio.existingSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.existingSecretName | quote }}
+                  key: MINIO_ROOT_PASSWORD
+              {{- else }}
               value: {{ .Values.minio.secretKey | quote }}
+              {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data

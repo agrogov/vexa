@@ -24,7 +24,7 @@ spec:
       {{- end }}
       containers:
         - name: minio-init
-          image: minio/mc:latest
+          image: docker.ib-ci.com/minio/mc:latest
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -36,7 +36,21 @@ spec:
               exit 0
           env:
             - name: MINIO_ROOT_USER
+              {{- if .Values.minio.existingSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.existingSecretName | quote }}
+                  key: MINIO_ROOT_USER
+              {{- else }}
               value: {{ .Values.minio.accessKey | quote }}
+              {{- end }}
             - name: MINIO_ROOT_PASSWORD
+              {{- if .Values.minio.existingSecretName }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minio.existingSecretName | quote }}
+                  key: MINIO_ROOT_PASSWORD
+              {{- else }}
               value: {{ .Values.minio.secretKey | quote }}
+              {{- end }}
 {{- end }}
