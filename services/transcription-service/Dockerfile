@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 
 # Install Python and dependencies
 RUN apt-get update && apt-get install -y \
@@ -7,15 +7,26 @@ RUN apt-get update && apt-get install -y \
     curl \
     libsndfile1 \
     ffmpeg \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR /app
 
-# Copy requirements and install  
+# Copy requirements and install
 COPY requirements.txt .
-# faster-whisper uses CTranslate2 which has built-in CUDA support (no PyTorch needed)
-# CUDA 12.3.2 base image includes all necessary CUDA/cuDNN libraries
 RUN pip3 install --no-cache-dir -r requirements.txt
+
+# Symlink pip-installed nvidia CUDA libs into /usr/local/lib (always in linker search path).
+# This avoids depending on LD_LIBRARY_PATH or ldconfig cache at runtime.
+RUN find /usr/local/lib/python*/site-packages/nvidia/*/lib -name "*.so*" \
+    | xargs -I{} ln -sf {} /usr/local/lib/ \
+    && ldconfig
 
 # Copy application
 COPY main.py .

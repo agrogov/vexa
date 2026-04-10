@@ -1,7 +1,13 @@
 # Build stage
-FROM node:20-alpine AS builder
+FROM docker.ib-ci.com/node:20-alpine AS builder
 
 WORKDIR /app
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+RUN apk add --no-cache ca-certificates wget \
+    && wget -O /usr/local/share/ca-certificates/infobip-rootca.crt http://ca.infobip.com/crl/RootCA.crt \
+    && update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # Copy transcript-rendering built package
 COPY packages/transcript-rendering/package.json /transcript-rendering/package.json
@@ -22,28 +28,30 @@ COPY services/dashboard/scripts ./scripts
 COPY services/dashboard/next.config.ts services/dashboard/tsconfig.json services/dashboard/postcss.config.mjs services/dashboard/eslint.config.mjs ./
 COPY services/dashboard/components.json ./
 
-# Version disclosure (NEXT_PUBLIC_VEXA_OSS_VERSION + RELEASE_DATE).
-#
-# Source of truth lives in deploy/helm/charts/vexa/Chart.yaml appVersion
-# (relative to repo root) but Docker's build context is .. — Chart.yaml
-# isn't accessible from inside the build's WORKDIR. Caller MUST pass these
-# as build-args, extracting from the chart on the host. The generator script
-# (scripts/generate-release-version.js, run via npm prebuild hook) consumes
-# them as its first-priority source.
+# Base path for sub-path deployment (e.g. /vexa)
+ARG NEXT_PUBLIC_BASE_PATH=""
+ENV NEXT_PUBLIC_BASE_PATH=${NEXT_PUBLIC_BASE_PATH}
+
 ARG NEXT_PUBLIC_VEXA_OSS_VERSION
 ARG NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE
 ENV NEXT_PUBLIC_VEXA_OSS_VERSION=$NEXT_PUBLIC_VEXA_OSS_VERSION
 ENV NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE=$NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE
 
-# Build application (npm prebuild → generate-release-version.js → next build)
+# Build application
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine AS runner
+FROM docker.ib-ci.com/node:20-alpine AS runner
 
 WORKDIR /app
 
 ENV NODE_ENV=production
+
+# Add Infobip Root CA (required behind corporate SSL inspection)
+RUN apk add --no-cache ca-certificates wget \
+    && wget -O /usr/local/share/ca-certificates/infobip-rootca.crt http://ca.infobip.com/crl/RootCA.crt \
+    && update-ca-certificates
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
