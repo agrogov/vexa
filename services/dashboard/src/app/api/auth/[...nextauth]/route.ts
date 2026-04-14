@@ -164,7 +164,7 @@ export const authOptions: NextAuthOptions = {
         httpOnly: true,
         sameSite: "lax" as const,
         path: "/",
-        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
+        secure: !!process.env.NEXTAUTH_URL?.startsWith("https://"),
       },
     },
     callbackUrl: {
