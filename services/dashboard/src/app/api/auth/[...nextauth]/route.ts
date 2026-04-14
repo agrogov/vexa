@@ -1,77 +1,28 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
+import { withBasePath } from "@/lib/base-path";
 import GoogleProvider from "next-auth/providers/google";
 import AzureADProvider from "next-auth/providers/azure-ad";
 import { cookies } from "next/headers";
 import { findUserByEmail, createUser, createUserToken } from "@/lib/vexa-admin-api";
-
-function isSecureRequest(): boolean {
-  return process.env.NEXTAUTH_URL?.startsWith("https://") ||
-         process.env.DASHBOARD_URL?.startsWith("https://") ||
-         false;
-}
 import { getRegistrationConfig, validateEmailForRegistration } from "@/lib/registration";
+import { getVexaCookieOptions } from "@/lib/cookie-utils";
 
 // Check if Google OAuth is enabled
 const isGoogleAuthEnabled = () => {
-  // Check if explicitly disabled via flag
   const enableGoogleAuth = process.env.ENABLE_GOOGLE_AUTH;
-  if (enableGoogleAuth === "false" || enableGoogleAuth === "0") {
-    return false;
-  }
-
-  // If flag is set to true, or flag is not set (default), check if config is present
-  const hasConfig = !!(
-    process.env.GOOGLE_CLIENT_ID &&
-    process.env.GOOGLE_CLIENT_SECRET &&
-    process.env.NEXTAUTH_URL
-  );
-
-  // If flag is explicitly "true", require config to be present
-  if (enableGoogleAuth === "true" || enableGoogleAuth === "1") {
-    return hasConfig;
-  }
-
-  // Default: enable if config is present (backward compatible)
+  if (enableGoogleAuth === "false" || enableGoogleAuth === "0") return false;
+  const hasConfig = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.NEXTAUTH_URL);
+  if (enableGoogleAuth === "true" || enableGoogleAuth === "1") return hasConfig;
   return hasConfig;
 };
 
+// Check if Azure AD OAuth is enabled
 const isAzureAdAuthEnabled = () => {
   const enableAzureAdAuth = process.env.ENABLE_AZURE_AD_AUTH;
-  if (enableAzureAdAuth === "false" || enableAzureAdAuth === "0") {
-    return false;
-  }
-
-  const hasConfig = !!(
-    process.env.AZURE_AD_CLIENT_ID &&
-    process.env.AZURE_AD_CLIENT_SECRET &&
-    process.env.AZURE_AD_TENANT_ID &&
-    process.env.NEXTAUTH_URL
-  );
-
-  if (enableAzureAdAuth === "true" || enableAzureAdAuth === "1") {
-    return hasConfig;
-  }
-
+  if (enableAzureAdAuth === "false" || enableAzureAdAuth === "0") return false;
+  const hasConfig = !!(process.env.AZURE_AD_CLIENT_ID && process.env.AZURE_AD_CLIENT_SECRET && process.env.AZURE_AD_TENANT_ID && process.env.NEXTAUTH_URL);
+  if (enableAzureAdAuth === "true" || enableAzureAdAuth === "1") return hasConfig;
   return hasConfig;
-};
-
-const getAppBasePath = (): string => {
-  const rawUrl = process.env.NEXTAUTH_URL;
-  if (!rawUrl) return "";
-  try {
-    const path = new URL(rawUrl).pathname.replace(/\/$/, "");
-    return path.endsWith("/api/auth") ? path.slice(0, -"/api/auth".length) : path;
-  } catch {
-    return "";
-  }
-};
-
-const buildAppPath = (suffix: string): string => {
-  const basePath = getAppBasePath();
-  if (!basePath || basePath === "/") {
-    return suffix;
-  }
-  return `${basePath}${suffix}`;
 };
 
 export const authOptions: NextAuthOptions = {
@@ -89,14 +40,14 @@ export const authOptions: NextAuthOptions = {
           AzureADProvider({
             clientId: process.env.AZURE_AD_CLIENT_ID!,
             clientSecret: process.env.AZURE_AD_CLIENT_SECRET!,
-            tenantId: process.env.AZURE_AD_TENANT_ID!,
+            tenantId: process.env.AZURE_AD_TENANT_ID || "common",
           }),
         ]
       : []),
   ],
   pages: {
-    signIn: buildAppPath("/login"),
-    error: buildAppPath("/login"),
+    signIn: withBasePath("/login"),
+    error: withBasePath("/login"),
   },
   callbacks: {
     async signIn({ user, account, profile }) {
@@ -153,13 +104,7 @@ export const authOptions: NextAuthOptions = {
 
           // Step 3: Set cookie (same as existing auth flow)
           const cookieStore = await cookies();
-          cookieStore.set("vexa-token", apiToken, {
-            httpOnly: true,
-            secure: isSecureRequest(),
-            sameSite: "lax",
-            maxAge: 60 * 60 * 24 * 30, // 30 days
-            path: "/",
-          });
+          cookieStore.set("vexa-token", apiToken, getVexaCookieOptions());
 
           // Store Vexa user info in the user object for the JWT callback
           (user as any).vexaUser = vexaUser;
@@ -198,13 +143,67 @@ export const authOptions: NextAuthOptions = {
       if (url.startsWith(baseUrl)) {
         return url;
       }
-      return `${baseUrl}/`;
+      return `${baseUrl}${withBasePath("/")}`;
     },
   },
   session: {
     strategy: "jwt",
   },
   secret: process.env.NEXTAUTH_SECRET || process.env.VEXA_ADMIN_API_KEY,
+  // Explicit cookie config avoids the __Host- / __Secure- prefix auto-detection
+  // that breaks behind SSL-terminating reverse proxies or when a basePath is set.
+  // The short-lived OAuth flow cookies (state, pkce) must NOT have Secure=true
+  // because they are set by the pod over HTTP (Istio terminates SSL), so the
+  // browser would receive them but the Set-Cookie with Secure gets dropped in
+  // some proxy configurations. Session token keeps Secure since it's long-lived.
+  useSecureCookies: false,
+  cookies: {
+    sessionToken: {
+      name: "next-auth.session-token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: process.env.NEXTAUTH_URL?.startsWith("https://"),
+      },
+    },
+    callbackUrl: {
+      name: "next-auth.callback-url",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: false,
+      },
+    },
+    csrfToken: {
+      name: "next-auth.csrf-token",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: false,
+      },
+    },
+    pkceCodeVerifier: {
+      name: "next-auth.pkce.code_verifier",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: false,
+      },
+    },
+    state: {
+      name: "next-auth.state",
+      options: {
+        httpOnly: true,
+        sameSite: "lax" as const,
+        path: "/",
+        secure: false,
+      },
+    },
+  },
 };
 
 const handler = NextAuth(authOptions);

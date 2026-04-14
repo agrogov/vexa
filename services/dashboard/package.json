@@ -37,7 +37,7 @@
     "@tiptap/react": "^3.20.4",
     "@tiptap/starter-kit": "^3.20.4",
     "@types/turndown": "^5.0.6",
-    "@vexaai/transcript-rendering": "file:../../../packages/transcript-rendering",
+    "@vexaai/transcript-rendering": "file:./vexaai-transcript-rendering-0.2.0.tgz",
     "ai": "^5.0.110",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

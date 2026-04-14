@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 
 /**
@@ -6,31 +6,22 @@ import { cookies } from "next/headers";
  * This solves the Next.js limitation where NEXT_PUBLIC_* vars are only available at build time.
  * Also returns the user's auth token for WebSocket authentication.
  */
-export async function GET(request: NextRequest) {
+export async function GET() {
   const apiUrl = process.env.VEXA_API_URL || "http://localhost:18056";
-  const decisionListenerUrl =
-    process.env.NEXT_PUBLIC_DECISION_LISTENER_URL || "http://localhost:8765";
 
-  // WS goes through the dashboard via Next.js rewrite — derive from request host.
-  // Explicit NEXT_PUBLIC_APP_URL takes precedence, but localhost is ignored for remote access.
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL;
-  const host = request.headers.get('host')!;
-  const proto = request.headers.get('x-forwarded-proto') === 'https' ? 'wss' : 'ws';
-  let wsUrl: string;
-  if (appUrl && !appUrl.includes('localhost')) {
-    const wsProto = appUrl.startsWith('https') ? 'wss' : 'ws';
-    const wsHost = appUrl.replace(/^https?:\/\//, '');
-    wsUrl = `${wsProto}://${wsHost}/ws`;
-  } else {
-    wsUrl = `${proto}://${host}/ws`;
+  // Derive WebSocket URL from API URL (can be overridden with NEXT_PUBLIC_VEXA_WS_URL)
+  let wsUrl = process.env.NEXT_PUBLIC_VEXA_WS_URL;
+
+  if (!wsUrl) {
+    // Convert http(s) to ws(s)
+    wsUrl = apiUrl.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
+    // Append /ws if not already there
+    wsUrl = wsUrl.endsWith('/ws') ? wsUrl : `${wsUrl.replace(/\/$/, '')}/ws`;
   }
 
-  // Auth token for WebSocket: same fallback chain as the HTTP proxy in /api/vexa/[...path].
-  // cookie (logged-in user) → VEXA_API_KEY env var (self-hosted service token)
+  // Get user's auth token from cookie for WebSocket authentication
   const cookieStore = await cookies();
-  const authToken = cookieStore.get("vexa-token")?.value
-    || process.env.VEXA_API_KEY
-    || null;
+  const authToken = cookieStore.get("vexa-token")?.value;
 
   // Get default bot name from environment (optional)
   const defaultBotName = process.env.DEFAULT_BOT_NAME || null;
@@ -39,22 +30,23 @@ export async function GET(request: NextRequest) {
   const hostedMode = process.env.NEXT_PUBLIC_HOSTED_MODE === "true";
   const webappUrl = process.env.NEXT_PUBLIC_WEBAPP_URL || "https://vexa.ai";
 
+  // Decision listener URL for meeting anthology (entity enrichment + live decisions)
+  const decisionListenerUrl = process.env.DECISION_LISTENER_URL || null;
+
   // Public API URL for client-facing configs (MCP, docs, etc.)
-  // Explicit values take precedence, but localhost is ignored for remote access — derive from request host.
-  const gatewayPort = process.env.API_GATEWAY_HOST_PORT || "8056";
-  const explicitPublicApi = process.env.VEXA_PUBLIC_API_URL || process.env.NEXT_PUBLIC_VEXA_API_URL || "";
-  const publicApiUrl = (explicitPublicApi && !explicitPublicApi.includes('localhost'))
-    ? explicitPublicApi
-    : `${request.headers.get('x-forwarded-proto') || 'http'}://${host.replace(/:\d+$/, '')}:${gatewayPort}`;
+  // Falls back to VEXA_PUBLIC_API_URL -> NEXT_PUBLIC_VEXA_API_URL -> apiUrl
+  const publicApiUrl = process.env.VEXA_PUBLIC_API_URL
+    || process.env.NEXT_PUBLIC_VEXA_API_URL
+    || apiUrl;
 
   return NextResponse.json({
     wsUrl,
     apiUrl,
     publicApiUrl,
-    decisionListenerUrl,
     authToken: authToken || null,
     defaultBotName,
     hostedMode,
     webappUrl,
+    decisionListenerUrl,
   });
 }
