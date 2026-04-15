@@ -40,7 +40,8 @@ interface AgentState {
   clearMessages: () => void;
 }
 
-const AGENT_API = "/api/agent";
+import { withBasePath } from "@/lib/base-path";
+const AGENT_API = withBasePath("/api/agent");
 
 export const useAgentStore = create<AgentState>()(
   persist(

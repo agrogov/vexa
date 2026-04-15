@@ -22,14 +22,22 @@ async function safeJsonResponse(resp: globalThis.Response): Promise<Response> {
   }
 }
 
+function unavailable() {
+  return Response.json({ detail: "Agent API is not configured" }, { status: 503 });
+}
+
 export async function GET(req: NextRequest, context: { params: Promise<{ path: string[] }> }) {
   const { path } = await context.params;
   const url = new URL(req.url);
   const target = `${AGENT_API_URL}/api/${path.join("/")}${url.search}`;
-  const resp = await fetch(target, {
-    headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
-  });
-  return safeJsonResponse(resp);
+  try {
+    const resp = await fetch(target, {
+      headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
+    });
+    return safeJsonResponse(resp);
+  } catch {
+    return unavailable();
+  }
 }
 
 export async function POST(req: NextRequest, context: { params: Promise<{ path: string[] }> }) {
@@ -44,28 +52,35 @@ export async function POST(req: NextRequest, context: { params: Promise<{ path: 
     const body = JSON.parse(rawBody);
     body.bot_token = userToken; // Agent API will pass this to the container for vexa CLI calls
 
+    try {
+      const resp = await fetch(target, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
+        body: JSON.stringify(body),
+      });
+      return new Response(resp.body, {
+        status: resp.status,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    } catch {
+      return unavailable();
+    }
+  }
+
+  try {
     const resp = await fetch(target, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
-      body: JSON.stringify(body),
+      body: rawBody,
     });
-
-    return new Response(resp.body, {
-      status: resp.status,
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
-    });
+    return safeJsonResponse(resp);
+  } catch {
+    return unavailable();
   }
-
-  const resp = await fetch(target, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
-    body: rawBody,
-  });
-  return safeJsonResponse(resp);
 }
 
 export async function PUT(req: NextRequest, context: { params: Promise<{ path: string[] }> }) {
@@ -73,12 +88,16 @@ export async function PUT(req: NextRequest, context: { params: Promise<{ path: s
   const url = new URL(req.url);
   const body = await req.text();
   const target = `${AGENT_API_URL}/api/${path.join("/")}${url.search}`;
-  const resp = await fetch(target, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
-    body,
-  });
-  return safeJsonResponse(resp);
+  try {
+    const resp = await fetch(target, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
+      body,
+    });
+    return safeJsonResponse(resp);
+  } catch {
+    return unavailable();
+  }
 }
 
 export async function DELETE(req: NextRequest, context: { params: Promise<{ path: string[] }> }) {
@@ -86,10 +105,14 @@ export async function DELETE(req: NextRequest, context: { params: Promise<{ path
   const url = new URL(req.url);
   const body = await req.text();
   const target = `${AGENT_API_URL}/api/${path.join("/")}${url.search}`;
-  const resp = await fetch(target, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
-    body: body || undefined,
-  });
-  return safeJsonResponse(resp);
+  try {
+    const resp = await fetch(target, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json", "X-API-Key": AGENT_API_TOKEN },
+      body: body || undefined,
+    });
+    return safeJsonResponse(resp);
+  } catch {
+    return unavailable();
+  }
 }

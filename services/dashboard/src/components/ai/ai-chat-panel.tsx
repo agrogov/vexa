@@ -105,7 +105,7 @@ export function AIChatPanel({ meeting, transcripts = [], trigger }: AIChatPanelP
   // Memoize the transport - no settings needed anymore
   const transport = useMemo(() => {
     return new DefaultChatTransport({
-      api: "/api/ai/chat",
+      api: withBasePath("/api/ai/chat"),
       body: { context },
     });
   }, [context]);

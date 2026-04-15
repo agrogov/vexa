@@ -59,7 +59,7 @@ import type { MeetingStatus, Meeting } from "@/types/vexa";
 import { StatusHistory } from "@/components/meetings/status-history";
 import { cn } from "@/lib/utils";
 import { vexaAPI } from "@/lib/api";
-import { withBasePath } from "@/lib/base-path";
+import { withBasePath, vncWsPath } from "@/lib/base-path";
 import { toast } from "sonner";
 import { LanguagePicker } from "@/components/language-picker";
 import { WHISPER_LANGUAGE_CODES, getLanguageDisplayName } from "@/lib/languages";
@@ -837,8 +837,7 @@ export default function MeetingDetailPage() {
 
   const browserViewIframe = hasBrowserView && viewMode === 'browser' ? (() => {
     const meetingId = currentMeeting.id;
-    // VNC loads from same origin — nginx proxies /b/ routes to the gateway
-    const vncUrl = `/b/${meetingId}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${meetingId}/vnc/websockify`;
+    const vncUrl = withBasePath(`/b/${meetingId}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=${vncWsPath(meetingId)}`);
     return (
       <div className="flex-1 overflow-hidden">
         <iframe
@@ -876,7 +875,7 @@ export default function MeetingDetailPage() {
               Browser
             </Button>
           </div>
-          <Button variant="outline" size="sm" className="h-8" onClick={() => { const mid = currentMeeting.id; const url = `/b/${mid}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${mid}/vnc/websockify`; window.open(url, "_blank"); }}>
+          <Button variant="outline" size="sm" className="h-8" onClick={() => { const mid = currentMeeting.id; const url = withBasePath(`/b/${mid}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=${vncWsPath(mid)}`); window.open(url, "_blank"); }}>
             <ExternalLink className="h-3.5 w-3.5 mr-1" />
             Fullscreen
           </Button>
@@ -1048,11 +1047,11 @@ export default function MeetingDetailPage() {
                   </div>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={() => handleOpenInProvider("chatgpt")}>
-                    <Image src="/icons/icons8-chatgpt-100.png" alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
+                    <Image src={withBasePath("/icons/icons8-chatgpt-100.png")} alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
                     Open in ChatGPT
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => handleOpenInProvider("perplexity")}>
-                    <Image src="/icons/icons8-perplexity-ai-100.png" alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
+                    <Image src={withBasePath("/icons/icons8-perplexity-ai-100.png")} alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
                     Open in Perplexity
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -1427,11 +1426,11 @@ export default function MeetingDetailPage() {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem onClick={() => handleOpenInProvider("chatgpt")} disabled={transcripts.length === 0}>
-                      <Image src="/icons/icons8-chatgpt-100.png" alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
+                      <Image src={withBasePath("/icons/icons8-chatgpt-100.png")} alt="ChatGPT" width={16} height={16} className="object-contain mr-2 invert dark:invert-0" />
                       Open in ChatGPT
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => handleOpenInProvider("perplexity")} disabled={transcripts.length === 0}>
-                      <Image src="/icons/icons8-perplexity-ai-100.png" alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
+                      <Image src={withBasePath("/icons/icons8-perplexity-ai-100.png")} alt="Perplexity" width={16} height={16} className="object-contain mr-2" />
                       Open in Perplexity
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
@@ -1677,7 +1676,7 @@ export default function MeetingDetailPage() {
                       const sessionToken = escalation?.session_token as string
                         || currentMeeting.data?.session_token as string;
                       if (!sessionToken) return null;
-                      const vncUrl = withBasePath(`/b/${sessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${sessionToken}/vnc/websockify`);
+                      const vncUrl = withBasePath(`/b/${sessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=${vncWsPath(sessionToken)}`);
                       return (
                         <Button
                           variant="default"
@@ -1825,11 +1824,11 @@ export default function MeetingDetailPage() {
               <div className="flex items-center gap-3">
                 <div className="h-8 w-8 rounded-lg flex items-center justify-center overflow-hidden bg-background">
                   <Image
-                    src={currentMeeting.platform === "google_meet"
+                    src={withBasePath(currentMeeting.platform === "google_meet"
                       ? "/icons/icons8-google-meet-96.png"
                       : currentMeeting.platform === "teams"
                       ? "/icons/icons8-teams-96.png"
-                      : "/icons/icons8-zoom-96.png"}
+                      : "/icons/icons8-zoom-96.png")}
                     alt={platformConfig.name}
                     width={32}
                     height={32}
@@ -2166,7 +2165,7 @@ function TtsSpeakCard({ platform, nativeId }: { platform: string; nativeId: stri
     if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);
     speakTimeoutRef.current = setTimeout(() => setIsSpeaking(false), estimatedMs);
     try {
-      const response = await fetch(`/api/vexa/bots/${platform}/${nativeId}/speak`, {
+      const response = await fetch(withBasePath(`/api/vexa/bots/${platform}/${nativeId}/speak`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: text.trim(), voice: "alloy" }),
@@ -2182,7 +2181,7 @@ function TtsSpeakCard({ platform, nativeId }: { platform: string; nativeId: stri
 
   async function handleStop() {
     try {
-      await fetch(`/api/vexa/bots/${platform}/${nativeId}/speak`, { method: "DELETE" });
+      await fetch(withBasePath(`/api/vexa/bots/${platform}/${nativeId}/speak`), { method: "DELETE" });
     } catch {}
     setIsSpeaking(false);
     if (speakTimeoutRef.current) clearTimeout(speakTimeoutRef.current);

@@ -15,6 +15,16 @@ export function withBasePath(path: string): string {
   return `${normalizedBasePath}${normalizedPath}`;
 }
 
+/**
+ * Build a noVNC-compatible websockify path= parameter that includes the base
+ * path prefix so the WebSocket URL is routed correctly behind a sub-path proxy.
+ * e.g. basePath="/vexa2", token="123" → "vexa2/b/123/vnc/websockify"
+ */
+export function vncWsPath(token: string | number): string {
+  const prefix = normalizedBasePath.replace(/^\//, ""); // strip leading slash
+  return prefix ? `${prefix}/b/${token}/vnc/websockify` : `b/${token}/vnc/websockify`;
+}
+
 export function stripBasePath(path: string): string {
   if (!normalizedBasePath || !path.startsWith(normalizedBasePath)) {
     return path;

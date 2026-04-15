@@ -3,7 +3,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { signIn } from "next-auth/react";
 import { Mail, Loader2, CheckCircle, ArrowLeft, AlertTriangle, XCircle, ArrowRight, Plus } from "lucide-react";
 import { Logo } from "@/components/ui/logo";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -161,12 +160,29 @@ export default function LoginPage() {
     setState("email");
   };
 
+  const signInWithProvider = async (providerId: "google" | "azure-ad") => {
+    const callbackUrl = withBasePath("/");
+    const csrfResponse = await fetch(withBasePath("/api/auth/csrf"));
+    const { csrfToken } = await csrfResponse.json();
+    // Use a real form submit so NextAuth sets the state cookie and handles the
+    // redirect to the provider in a single response — avoids fetch cookie timing issues.
+    const form = document.createElement("form");
+    form.method = "POST";
+    form.action = withBasePath(`/api/auth/signin/${providerId}`);
+    for (const [name, value] of Object.entries({ csrfToken, callbackUrl })) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = name;
+      input.value = value;
+      form.appendChild(input);
+    }
+    document.body.appendChild(form);
+    form.submit();
+  };
+
   const handleGoogleSignIn = async () => {
     try {
-      await signIn("google", {
-        callbackUrl: "/",
-        redirect: true,
-      });
+      await signInWithProvider("google");
     } catch (error) {
       console.error("Google sign-in error:", error);
       toast.error("Failed to sign in with Google");
@@ -175,10 +191,7 @@ export default function LoginPage() {
 
   const handleMicrosoftSignIn = async () => {
     try {
-      await signIn("microsoft", {
-        callbackUrl: "/",
-        redirect: true,
-      });
+      await signInWithProvider("azure-ad");
     } catch (error) {
       console.error("Microsoft sign-in error:", error);
       toast.error("Failed to sign in with Microsoft");
@@ -222,10 +235,10 @@ export default function LoginPage() {
             {parsedInput && isSupportedPlatform && (
               <div className="absolute left-4 top-1/2 -translate-y-1/2 z-10">
                 <Image
-                  src={parsedInput.platform === "google_meet"
+                  src={withBasePath(parsedInput.platform === "google_meet"
                     ? "/icons/icons8-google-meet-96.png"
                     : "/icons/icons8-teams-96.png"
-                  }
+                  )}
                   alt={parsedInput.platform === "google_meet" ? "Google Meet" : "Microsoft Teams"}
                   width={24}
                   height={24}
@@ -273,23 +286,11 @@ export default function LoginPage() {
         {/* Platform chips */}
         <div className="flex flex-wrap items-center justify-center gap-3 mt-8">
           <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-full border border-border bg-card text-sm text-muted-foreground">
-            <Image
-              src="/icons/icons8-google-meet-96.png"
-              alt="Google Meet"
-              width={20}
-              height={20}
-              className="rounded-sm"
-            />
+            <Image src={withBasePath("/icons/icons8-google-meet-96.png")} alt="Google Meet" width={20} height={20} className="rounded-sm" />
             Google Meet
           </div>
           <div className="flex items-center gap-2.5 px-4 py-2.5 rounded-full border border-border bg-card text-sm text-muted-foreground">
-            <Image
-              src="/icons/icons8-teams-96.png"
-              alt="Microsoft Teams"
-              width={20}
-              height={20}
-              className="rounded-sm"
-            />
+            <Image src={withBasePath("/icons/icons8-teams-96.png")} alt="Microsoft Teams" width={20} height={20} className="rounded-sm" />
             Microsoft Teams
           </div>
           <a

@@ -12,7 +12,8 @@ import { toast } from "sonner";
 import { useAuthStore } from "@/stores/auth-store";
 import { MarkdownEditor } from "./markdown-editor";
 
-const AGENT_API = "/api/agent";
+import { withBasePath } from "@/lib/base-path";
+const AGENT_API = withBasePath("/api/agent");
 
 interface FileNode {
   name: string;

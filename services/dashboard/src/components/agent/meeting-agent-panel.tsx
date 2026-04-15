@@ -11,7 +11,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAuthStore } from "@/stores/auth-store";
 
-const AGENT_API = process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+import { withBasePath } from "@/lib/base-path";
+const AGENT_API = process.env.NEXT_PUBLIC_AGENT_API_URL || withBasePath("/api/agent");
 
 interface LocalMessage {
   id: string;

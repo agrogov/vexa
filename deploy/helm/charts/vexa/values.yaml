@@ -177,7 +177,10 @@ dashboard:
     port: 3000
   # env:
   #   ENABLE_AZURE_AD_AUTH: "true"
-  #   NEXTAUTH_URL: ""
+  #   NEXTAUTH_URL: "https://your-domain.com/vexa/api/auth"          # Full auth base URL (include /api/auth)
+  #   NEXTAUTH_URL_INTERNAL: "http://svc.namespace:3000/vexa/api/auth"  # Internal k8s URL (include /api/auth)
+  #   NEXTAUTH_SECRET: ""
+  #   NEXT_PUBLIC_BASE_PATH: "/vexa"
   env: {}
   extraEnv: []
   extraSecretName: ""

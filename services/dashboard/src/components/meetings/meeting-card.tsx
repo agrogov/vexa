@@ -13,6 +13,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import type { Meeting } from "@/types/vexa";
 import { getDetailedStatus } from "@/types/vexa";
 import { cn, parseUTCTimestamp } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import { useMeetingsStore } from "@/stores/meetings-store";
 import { toast } from "sonner";
 
@@ -24,7 +25,7 @@ interface MeetingCardProps {
 function GoogleMeetIcon({ className }: { className?: string }) {
   return (
     <Image
-      src="/icons/icons8-google-meet-96.png"
+      src={withBasePath("/icons/icons8-google-meet-96.png")}
       alt="Google Meet"
       width={40}
       height={40}
@@ -36,7 +37,7 @@ function GoogleMeetIcon({ className }: { className?: string }) {
 function TeamsIcon({ className }: { className?: string }) {
   return (
     <Image
-      src="/icons/icons8-teams-96.png"
+      src={withBasePath("/icons/icons8-teams-96.png")}
       alt="Microsoft Teams"
       width={40}
       height={40}
@@ -48,7 +49,7 @@ function TeamsIcon({ className }: { className?: string }) {
 function ZoomIcon({ className }: { className?: string }) {
   return (
     <Image
-      src="/icons/icons8-zoom-96.png"
+      src={withBasePath("/icons/icons8-zoom-96.png")}
       alt="Zoom"
       width={40}
       height={40}
