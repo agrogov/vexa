@@ -272,7 +272,7 @@ export function MCPConfigButton() {
     return (
       <div className="mr-2 h-4 w-4 relative flex items-center justify-center">
         <img
-          src="/icons/icons8-mcp-96 (1).png"
+          src={withBasePath("/icons/icons8-mcp-96 (1).png")}
           alt="MCP"
           width={16}
           height={16}

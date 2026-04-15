@@ -251,7 +251,7 @@ export function Sidebar({ isOpen, onClose }: SidebarProps) {
                   <span className="h-5 w-5 flex items-center justify-center">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
-                      src="/icons/icons8-mcp-96 (1).png"
+                      src={withBasePath("/icons/icons8-mcp-96 (1).png")}
                       alt="MCP"
                       width={20}
                       height={20}

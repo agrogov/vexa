@@ -10,6 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import Image from "next/image";
 import { AIChatPanel } from "@/components/ai";
 import { getCookie, setCookie } from "@/lib/cookies";
+import { withBasePath } from "@/lib/base-path";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -530,7 +531,7 @@ export function TranscriptViewer({
     // Prefer link-based flow
     try {
       const response = await fetch(
-        `/api/vexa/transcripts/${meeting.platform}/${meeting.platform_specific_id}/share?meeting_id=${encodeURIComponent(meeting.id)}`,
+        withBasePath(`/api/vexa/transcripts/${meeting.platform}/${meeting.platform_specific_id}/share?meeting_id=${encodeURIComponent(meeting.id)}`),
         { method: "POST" }
       );
       if (response.ok) {

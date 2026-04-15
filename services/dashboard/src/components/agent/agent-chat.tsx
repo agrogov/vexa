@@ -13,7 +13,8 @@ import remarkGfm from "remark-gfm";
 import { useAgentStore, AgentMessage } from "@/stores/agent-store";
 import { useAuthStore } from "@/stores/auth-store";
 
-const AGENT_API = process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+import { withBasePath } from "@/lib/base-path";
+const AGENT_API = process.env.NEXT_PUBLIC_AGENT_API_URL || withBasePath("/api/agent");
 
 function ToolChip({ tool, summary }: { tool: string; summary: string }) {
   return (

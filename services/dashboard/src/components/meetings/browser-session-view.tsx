@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import type { Meeting } from "@/types/vexa";
-import { withBasePath } from "@/lib/base-path";
+import { withBasePath, vncWsPath } from "@/lib/base-path";
 
 function CopyBlock({ label, text }: { label: string; text: string }) {
   return (
@@ -87,9 +87,8 @@ export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
     );
   }
 
-  // VNC/CDP use relative URLs — nginx proxies /b/ routes to the gateway (same origin, no CORS)
-  const vncUrl = `/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify`;
-  const cdpUrl = apiUrl ? `${apiUrl}/b/${token}/cdp` : `/b/${token}/cdp`;
+  const vncUrl = withBasePath(`/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=${vncWsPath(token)}`);
+  const cdpUrl = apiUrl ? `${apiUrl}/b/${token}/cdp` : withBasePath(`/b/${token}/cdp`);
   const mcpUrl = apiUrl ? `${apiUrl}/mcp` : null;
   const sshPort = meeting.data?.ssh_port as number | undefined;
   const sshHost = apiUrl ? (() => { try { return new URL(apiUrl).hostname; } catch { return "localhost"; } })() : "localhost";
