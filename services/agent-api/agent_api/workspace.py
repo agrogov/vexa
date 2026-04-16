@@ -1,6 +1,7 @@
 """Workspace sync between agent containers and S3-compatible storage.
 
-Runs `aws s3 sync` inside the container via `docker exec`.
+Runs `aws s3 sync` inside the container via docker exec (process mode)
+or kubectl exec via kubernetes python client (kubernetes mode).
 Supports both S3/MinIO backends and local filesystem fallback.
 """
 
@@ -23,7 +24,12 @@ class ExecProtocol(Protocol):
 # --- Container exec helper ---
 
 async def _exec(container: str, cmd: str, timeout: int = 120) -> tuple[int, str]:
-    """Run a shell command inside a container, return (returncode, output)."""
+    """Run a shell command inside a container, return (returncode, output).
+
+    Routes to docker exec or kubectl exec depending on ORCHESTRATOR_BACKEND.
+    """
+    if config.ORCHESTRATOR_BACKEND == "kubernetes":
+        return await _k8s_exec(container, cmd, timeout)
     proc = await asyncio.create_subprocess_exec(
         "docker", "exec", container, "bash", "-c", cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -35,6 +41,51 @@ async def _exec(container: str, cmd: str, timeout: int = 120) -> tuple[int, str]
     except asyncio.TimeoutError:
         proc.kill()
         return 1, "timeout"
+
+
+async def _k8s_exec(pod_name: str, cmd: str, timeout: int = 120) -> tuple[int, str]:
+    """Run a shell command inside a K8s pod, return (returncode, output)."""
+    from kubernetes.stream import stream as k8s_stream
+    from kubernetes import client, config as k8s_config
+    from agent_api.container_manager import _k8s_wait_running
+    loop = asyncio.get_event_loop()
+    try:
+        await _k8s_wait_running(pod_name, timeout=min(timeout, 60))
+
+        def _run():
+            try:
+                k8s_config.load_incluster_config()
+            except Exception:
+                k8s_config.load_kube_config()
+            api = client.CoreV1Api()
+            ws = k8s_stream(
+                api.connect_get_namespaced_pod_exec,
+                pod_name, config.K8S_NAMESPACE,
+                command=["bash", "-c", cmd],
+                stderr=True, stdin=False, stdout=True, tty=False,
+                _preload_content=False,
+            )
+            out_parts = []
+            err_parts = []
+            while ws.is_open():
+                ws.update(timeout=1)
+                if ws.peek_stdout():
+                    out_parts.append(ws.read_stdout())
+                if ws.peek_stderr():
+                    err_parts.append(ws.read_stderr())
+            rc = ws.returncode if hasattr(ws, "returncode") and ws.returncode is not None else 0
+            ws.close()
+            output = "".join(out_parts + err_parts).strip()
+            return rc, output
+
+        return await asyncio.wait_for(
+            loop.run_in_executor(None, _run),
+            timeout=timeout + 5,
+        )
+    except asyncio.TimeoutError:
+        return 1, "timeout"
+    except Exception as e:
+        return 1, str(e)
 
 
 # --- S3 helpers ---

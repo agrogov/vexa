@@ -113,8 +113,8 @@ async def _workspace_init(cm: ContainerManager, user_id: str, container: str,
     # 2. Check if workspace is still empty after sync
     if await workspace.is_workspace_empty(container):
         # Try git clone if configured (get_user_data is cached per user_id, no extra HTTP)
-        user_data = await cm.get_user_data(user_id)
-        git_config = user_data.get("workspace_git", {})
+        user_obj = await cm.get_user_data(user_id)
+        git_config = (user_obj.get("data") or {}).get("workspace_git", {})
         if git_config and git_config.get("repo"):
             repo = git_config["repo"]
             branch = git_config.get("branch", "main")
@@ -158,8 +158,8 @@ async def run_chat_turn(
         cli_flags: Optional extra flags forwarded verbatim to agent CLI.
     """
     cm._new_container = False
-    effective_session = session_id or "default"
-    container = await cm.ensure_container(user_id, session_id=effective_session)
+    # One container per user — session_id is only used for --resume inside the container
+    container = await cm.ensure_container(user_id, session_id="default")
 
     # Determine workspace name from session metadata
     workspace_name = "default"
@@ -169,7 +169,7 @@ async def run_chat_turn(
             workspace_name = meta["workspace"]
 
     # Store workspace_name on container info for periodic sync
-    key = f"{user_id}:{effective_session}"
+    key = f"{user_id}:default"
     if key in cm._containers:
         cm._containers[key].workspace_name = workspace_name
 
@@ -196,10 +196,10 @@ async def run_chat_turn(
     # Build prompt (with optional context prefix)
     full_prompt = f"{context_prefix}\n\n---\n\n{message}" if context_prefix else message
     encoded = base64.b64encode(full_prompt.encode()).decode()
-    await cm.exec_with_stdin(
+    # Write prompt file inline (avoids stdin channel unreliability in K8s exec)
+    await cm.exec_simple(
         container,
-        ["sh", "-c", "base64 -d > /tmp/.chat-prompt.txt"],
-        stdin_data=encoded.encode(),
+        ["sh", "-c", f"printf '%s' {shlex.quote(encoded)} | base64 -d > /tmp/.chat-prompt.txt"],
     )
 
     # Agent CLI command

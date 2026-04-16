@@ -82,15 +82,11 @@ build vexa-agent \
 
 # ── GPU/CPU transcription service ────────────────────────────────────────────
 if [ "${PROFILE}" == "gpu" ]; then
-  echo "→ ${BASE_REPO}/vexa/transcription-service:${VERSION} (GPU)"
-  docker build \
-    -t "${BASE_REPO}/vexa/transcription-service:${VERSION}" \
+  build transcription-service \
     -f services/transcription-service/Dockerfile \
     services/transcription-service
 else
-  echo "→ ${BASE_REPO}/vexa/transcription-service:${VERSION} (CPU)"
-  docker build \
-    -t "${BASE_REPO}/vexa/transcription-service:${VERSION}" \
+  build transcription-service \
     -f services/transcription-service/Dockerfile.cpu \
     services/transcription-service
 fi

@@ -7,6 +7,8 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
+import tempfile
 import uuid as uuid_lib
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -49,6 +51,74 @@ def get_storage_client():
 
 def _new_recording_numeric_id() -> int:
     return int(uuid_lib.uuid4().int % 900000000000 + 100000000000)
+
+
+# In-memory conversion job tracker: key = (storage_path, target_fmt), value = asyncio.Event
+_conversion_jobs: dict[tuple, asyncio.Event] = {}
+# Failed jobs: key = (storage_path, target_fmt), value = error message
+_failed_jobs: dict[tuple, str] = {}
+
+
+async def _run_ffmpeg_conversion(source_data: bytes, source_fmt: str, target_fmt: str) -> bytes:
+    """Convert audio bytes from source_fmt to target_fmt using ffmpeg. Returns converted bytes."""
+    src_tmp = dst_tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=f".{source_fmt}", delete=False) as f:
+            f.write(source_data)
+            src_tmp = f.name
+        dst_tmp = src_tmp.rsplit(".", 1)[0] + f".{target_fmt}"
+        ffmpeg_args = ["ffmpeg", "-i", src_tmp, "-y"]
+        if target_fmt == "mp3":
+            ffmpeg_args += ["-codec:a", "libmp3lame", "-q:a", "2"]
+        elif target_fmt == "wav":
+            ffmpeg_args += ["-ar", "16000", "-ac", "1"]
+        ffmpeg_args.append(dst_tmp)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(ffmpeg_args, capture_output=True, timeout=600),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()[:300]}")
+        with open(dst_tmp, "rb") as f:
+            return f.read()
+    finally:
+        for p in [src_tmp, dst_tmp]:
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+
+async def _ensure_conversion_job(storage_path: str, source_fmt: str, target_fmt: str) -> None:
+    """Start a background conversion job if one isn't already running for this file+format."""
+    key = (storage_path, target_fmt)
+    if key in _conversion_jobs:
+        return  # already running
+    event = asyncio.Event()
+    _conversion_jobs[key] = event
+    asyncio.create_task(_run_conversion_job(storage_path, source_fmt, target_fmt, key, event))
+
+
+async def _run_conversion_job(storage_path: str, source_fmt: str, target_fmt: str, key: tuple, event: asyncio.Event) -> None:
+    """Background task: download → convert → re-upload, then signal the event."""
+    content_type_map = {"mp3": "audio/mpeg", "wav": "audio/wav"}
+    try:
+        logger.info(f"Conversion job starting: {storage_path} → {target_fmt}")
+        source_data = get_storage_client().download_file(storage_path)
+        logger.info(f"Conversion job downloaded {len(source_data)} bytes, running ffmpeg...")
+        converted = await _run_ffmpeg_conversion(source_data, source_fmt, target_fmt)
+        out_path = storage_path.rsplit(".", 1)[0] + f".{target_fmt}"
+        get_storage_client().upload_file(out_path, converted, content_type=content_type_map.get(target_fmt, "application/octet-stream"))
+        logger.info(f"Conversion job complete: {out_path} ({len(converted)} bytes)")
+        _failed_jobs.pop(key, None)
+    except Exception as e:
+        logger.warning(f"Conversion job failed for {storage_path} → {target_fmt}: {e}")
+        _failed_jobs[key] = str(e)
+    finally:
+        event.set()
+        _conversion_jobs.pop(key, None)
 
 
 def _to_bool(value, default: bool = False) -> bool:
@@ -231,6 +301,7 @@ async def internal_upload_recording(
             recording.error_message = str(e)
             await db.commit()
         raise HTTPException(status_code=500, detail="Failed to upload recording to storage")
+
 
     if use_meeting_data:
         # Media-file materialization policy (Bug C+D fix, 2026-04-21):
@@ -534,7 +605,7 @@ async def download_media_file(
     db: AsyncSession = Depends(get_db),
 ):
     _, user = auth
-    content_type_map = {"wav": "audio/wav", "webm": "video/webm", "opus": "audio/opus", "mp3": "audio/mpeg", "jpg": "image/jpeg", "png": "image/png"}
+    content_type_map = {"wav": "audio/wav", "webm": "audio/webm", "opus": "audio/ogg; codecs=opus", "mp3": "audio/mpeg", "jpg": "image/jpeg", "png": "image/png"}
 
     if get_recording_metadata_mode() == "meeting_data":
         _, rec = await _find_meeting_data_recording(db, user.id, recording_id)
@@ -574,16 +645,18 @@ async def download_media_file(
 async def download_media_file_raw(
     recording_id: int, media_file_id: int,
     request: Request,
+    convert: Optional[str] = Query(None, description="Convert to format before download: mp3, wav"),
     auth: tuple = Depends(get_user_and_token),
     db: AsyncSession = Depends(get_db),
 ):
     _, user = auth
-    content_type_map = {"wav": "audio/wav", "webm": "video/webm", "opus": "audio/opus", "mp3": "audio/mpeg", "jpg": "image/jpeg", "png": "image/png"}
+    content_type_map = {"wav": "audio/wav", "webm": "audio/webm", "opus": "audio/ogg; codecs=opus", "mp3": "audio/mpeg", "jpg": "image/jpeg", "png": "image/png"}
 
-    # Resolve the storage path and content type
+    # Resolve the storage path, source format, and content type
     storage_path = None
     ct = "application/octet-stream"
     filename = ""
+    fmt = "bin"
 
     if get_recording_metadata_mode() == "meeting_data":
         _, rec = await _find_meeting_data_recording(db, user.id, recording_id)
@@ -604,7 +677,8 @@ async def download_media_file_raw(
         mf = (await db.execute(stmt)).scalars().first()
         if mf:
             storage_path = mf.storage_path
-            ct = content_type_map.get(mf.format.lower(), ct)
+            fmt = mf.format.lower()
+            ct = content_type_map.get(fmt, ct)
             filename = f"{mf.recording_id}_{mf.type}.{mf.format}"
 
     if not storage_path:
@@ -618,23 +692,169 @@ async def download_media_file_raw(
         logger.error(f"Failed to download media file {media_file_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to read media file")
 
-    headers = {"Content-Disposition": f'inline; filename="{filename}"', "Accept-Ranges": "bytes"}
+    # On-the-fly format conversion
+    target_fmt = (convert or "").lower().strip()
+    if target_fmt and target_fmt != fmt:
+        allowed = {"mp3", "wav"}
+        if target_fmt not in allowed:
+            raise HTTPException(status_code=400, detail=f"Unsupported convert format '{target_fmt}'. Allowed: {', '.join(sorted(allowed))}")
+        # Check if a pre-converted file already exists in storage (put there by a /prepare job)
+        out_path = storage_path.rsplit(".", 1)[0] + f".{target_fmt}"
+        pre_converted = None
+        try:
+            if get_storage_client().file_exists(out_path):
+                pre_converted = get_storage_client().download_file(out_path)
+        except Exception:
+            pass  # fall through to live conversion
+        if pre_converted is not None:
+            data = pre_converted
+        else:
+            try:
+                data = await _run_ffmpeg_conversion(data, fmt, target_fmt)
+            except RuntimeError as e:
+                logger.error(f"ffmpeg conversion failed: {e}")
+                raise HTTPException(status_code=500, detail="Audio conversion failed")
+        fmt = target_fmt
+        ct = content_type_map.get(target_fmt, "application/octet-stream")
+        filename = filename.rsplit(".", 1)[0] + f".{target_fmt}"
 
-    # Range request support
-    range_header = request.headers.get("range")
-    if range_header and range_header.startswith("bytes="):
-        total = len(data)
-        spec = range_header[6:].strip()
-        start_s, _, end_s = spec.partition("-")
-        start = int(start_s) if start_s else total - int(end_s)
-        end = int(end_s) if end_s and start_s else total - 1
-        end = min(end, total - 1)
-        chunk = data[start:end + 1]
-        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-        headers["Content-Length"] = str(len(chunk))
-        return Response(content=chunk, media_type=ct, status_code=206, headers=headers)
+    # attachment when converting (save dialog), inline for raw streaming (audio player)
+    disposition = "attachment" if target_fmt else "inline"
+    headers = {"Content-Disposition": f'{disposition}; filename="{filename}"', "Accept-Ranges": "bytes"}
+
+    # Range requests only supported for unconverted streaming
+    if not target_fmt:
+        range_header = request.headers.get("range")
+        if range_header and range_header.startswith("bytes="):
+            total = len(data)
+            spec = range_header[6:].strip()
+            start_s, _, end_s = spec.partition("-")
+            start = int(start_s) if start_s else total - int(end_s)
+            end = int(end_s) if end_s and start_s else total - 1
+            end = min(end, total - 1)
+            chunk = data[start:end + 1]
+            headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+            headers["Content-Length"] = str(len(chunk))
+            return Response(content=chunk, media_type=ct, status_code=206, headers=headers)
 
     return Response(content=data, media_type=ct, headers=headers)
+
+
+@router.post("/recordings/{recording_id}/media/{media_file_id}/prepare", summary="Start background conversion, poll until ready")
+async def prepare_media_conversion(
+    recording_id: int,
+    media_file_id: int,
+    format: str = Query(..., description="Target format: mp3 or wav"),
+    auth: tuple = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Start a background ffmpeg conversion job (if not already running) and return immediately.
+    Poll this endpoint until {"ready": true}, then call the /raw?convert=<format> endpoint to download.
+    """
+    _, user = auth
+    target_fmt = format.lower().strip()
+    allowed = {"mp3", "wav"}
+    if target_fmt not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported format. Use: {', '.join(sorted(allowed))}")
+
+    storage_path = None
+    source_fmt = "bin"
+
+    if get_recording_metadata_mode() == "meeting_data":
+        _, rec = await _find_meeting_data_recording(db, user.id, recording_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        for f in rec.get("media_files") or []:
+            if int(f.get("id", -1)) == media_file_id:
+                storage_path = f.get("storage_path")
+                source_fmt = str(f.get("format", "bin")).lower()
+                break
+    else:
+        recording = await db.get(Recording, recording_id)
+        if not recording or recording.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        stmt = select(MediaFile).where(and_(MediaFile.id == media_file_id, MediaFile.recording_id == recording_id))
+        mf = (await db.execute(stmt)).scalars().first()
+        if mf:
+            storage_path = mf.storage_path
+            source_fmt = mf.format.lower()
+
+    if not storage_path:
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    if source_fmt == target_fmt:
+        return {"ready": True}
+
+    key = (storage_path, target_fmt)
+    if key in _conversion_jobs:
+        # Job already running
+        return {"ready": False}
+
+    # Check if already converted (from a previous job)
+    out_path = storage_path.rsplit(".", 1)[0] + f".{target_fmt}"
+    if get_storage_client().file_exists(out_path):
+        return {"ready": True}
+
+    # Start conversion job
+    await _ensure_conversion_job(storage_path, source_fmt, target_fmt)
+    return {"ready": False}
+
+
+@router.get("/recordings/{recording_id}/media/{media_file_id}/prepare", summary="Check if conversion is ready")
+async def check_media_conversion(
+    recording_id: int,
+    media_file_id: int,
+    format: str = Query(..., description="Target format: mp3 or wav"),
+    auth: tuple = Depends(get_user_and_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Poll this endpoint after POST /prepare. Returns {"ready": true} when conversion is done."""
+    _, user = auth
+    target_fmt = format.lower().strip()
+
+    storage_path = None
+    source_fmt = "bin"
+
+    if get_recording_metadata_mode() == "meeting_data":
+        _, rec = await _find_meeting_data_recording(db, user.id, recording_id)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        for f in rec.get("media_files") or []:
+            if int(f.get("id", -1)) == media_file_id:
+                storage_path = f.get("storage_path")
+                source_fmt = str(f.get("format", "bin")).lower()
+                break
+    else:
+        recording = await db.get(Recording, recording_id)
+        if not recording or recording.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Recording not found")
+        stmt = select(MediaFile).where(and_(MediaFile.id == media_file_id, MediaFile.recording_id == recording_id))
+        mf = (await db.execute(stmt)).scalars().first()
+        if mf:
+            storage_path = mf.storage_path
+            source_fmt = mf.format.lower()
+
+    if not storage_path:
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    if source_fmt == target_fmt:
+        return {"ready": True}
+
+    key = (storage_path, target_fmt)
+
+    if key in _failed_jobs:
+        err = _failed_jobs.pop(key)
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {err}")
+
+    if key in _conversion_jobs:
+        return {"ready": False}
+
+    out_path = storage_path.rsplit(".", 1)[0] + f".{target_fmt}"
+    if get_storage_client().file_exists(out_path):
+        return {"ready": True}
+
+    # No job running and no converted file found — job was never started or pod was restarted
+    raise HTTPException(status_code=404, detail="Conversion not running. Click download again to restart.")
 
 
 @router.delete("/recordings/{recording_id}", summary="Delete a recording and its media files")

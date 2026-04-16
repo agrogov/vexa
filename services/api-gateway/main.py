@@ -722,6 +722,26 @@ async def download_media_raw_proxy(recording_id: int, media_file_id: int, reques
     url = f"{MEETING_API_URL}/recordings/{recording_id}/media/{media_file_id}/raw"
     return await forward_request(app.state.http_client, "GET", url, request)
 
+@app.post("/recordings/{recording_id}/media/{media_file_id}/prepare",
+          tags=["Recordings"],
+          summary="Start background audio conversion",
+          description="Starts ffmpeg conversion to the requested format in the background. Returns {ready: bool} immediately.",
+          dependencies=[Depends(api_key_scheme)])
+async def prepare_media_conversion_proxy(recording_id: int, media_file_id: int, request: Request):
+    """Forward to meeting-api to start background conversion."""
+    url = f"{MEETING_API_URL}/recordings/{recording_id}/media/{media_file_id}/prepare"
+    return await forward_request(app.state.http_client, "POST", url, request)
+
+@app.get("/recordings/{recording_id}/media/{media_file_id}/prepare",
+         tags=["Recordings"],
+         summary="Check audio conversion status",
+         description="Poll this endpoint after POST /prepare. Returns {ready: bool}.",
+         dependencies=[Depends(api_key_scheme)])
+async def check_media_conversion_proxy(recording_id: int, media_file_id: int, request: Request):
+    """Forward to meeting-api to check conversion status."""
+    url = f"{MEETING_API_URL}/recordings/{recording_id}/media/{media_file_id}/prepare"
+    return await forward_request(app.state.http_client, "GET", url, request)
+
 @app.delete("/recordings/{recording_id}",
             tags=["Recordings"],
             summary="Delete a recording",
@@ -1578,10 +1598,12 @@ async def resolve_browser_session(token: str) -> Optional[dict]:
     return session
 
 
-def _browser_dashboard_html(token: str, session: dict) -> str:
+def _browser_dashboard_html(token: str, session: dict, prefix: str = "") -> str:
     """Return the inline HTML for the remote browser dashboard."""
     meeting_id = session.get("meeting_id", "")
-    vnc_iframe_url = f"/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify"
+    # prefix is e.g. "/vexa2" — strip trailing slash, prepend to paths
+    p = prefix.rstrip("/")
+    vnc_iframe_url = f"{p}/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path={p.lstrip('/')}/b/{token}/vnc/websockify"
     return f"""\
 <!DOCTYPE html>
 <html>
@@ -1638,7 +1660,7 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
     <h1>Remote Browser</h1>
     <button class="btn btn-green" onclick="saveStorage()" id="save-btn">Save Storage</button>
     <button class="btn btn-purple" onclick="toggleAudit()">Storage Audit</button>
-    <button class="btn btn-blue" onclick="window.open('/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
+    <button class="btn btn-blue" onclick="window.open('{p}/b/{token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path={p.lstrip("/")}/b/{token}/vnc/websockify', '_blank')">Fullscreen</button>
   </div>
   <div class="toast hidden" id="toast"></div>
 
@@ -1702,12 +1724,16 @@ def _browser_dashboard_html(token: str, session: dict) -> str:
 
 @app.get("/b/{token}", tags=["Remote Browser"], summary="Browser session dashboard",
          response_class=HTMLResponse)
-async def browser_session_page(token: str):
+async def browser_session_page(token: str, request: Request):
     """Serve the remote browser dashboard UI. Token is the auth."""
     session = await resolve_browser_session(token)
     if not session:
         raise HTTPException(status_code=404, detail="Browser session not found or expired")
-    return HTMLResponse(content=_browser_dashboard_html(token, session))
+    prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
+    # Strip the /api-gateway suffix if present (that prefix is for api-gateway routes, not /b/)
+    if prefix.endswith("/api-gateway"):
+        prefix = prefix[: -len("/api-gateway")]
+    return HTMLResponse(content=_browser_dashboard_html(token, session, prefix=prefix))
 
 
 @app.api_route("/b/{token}/vnc/{path:path}", methods=["GET", "POST"],
