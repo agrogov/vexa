@@ -409,12 +409,40 @@ if data:
         ;;
 
       transcript)
-        MEETING_ID="${3:-}"
-        if [ -z "$MEETING_ID" ]; then
-          echo "Usage: vexa meeting transcript <meeting_id>"
+        NATIVE_ID="" DB_ID=""
+        shift 2
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --id)    NATIVE_ID="$2"; shift 2 ;;
+            --db-id) DB_ID="$2"; shift 2 ;;
+            *)       [ -z "$NATIVE_ID" ] && NATIVE_ID="$1"; shift ;;
+          esac
+        done
+        if [ -z "$NATIVE_ID" ] && [ -z "$DB_ID" ]; then
+          echo "Usage: vexa meeting transcript <native_meeting_id>"
+          echo "       vexa meeting transcript --db-id <integer_meeting_id>"
           exit 1
         fi
-        _curl "$TC/internal/transcripts/$MEETING_ID" \
+        # Resolve native ID → DB integer ID via /meetings list
+        if [ -z "$DB_ID" ] && [ -n "$NATIVE_ID" ]; then
+          DB_ID=$(_curl "$BOT_MGR/bots?limit=1000" \
+            -H "X-API-Key: $BOT_TOKEN" 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+# /bots returns meetings sorted by created_at DESC — most recent first
+meetings = data if isinstance(data, list) else data.get('meetings', data.get('items', []))
+target = '$NATIVE_ID'
+matches = [m for m in meetings if str(m.get('native_meeting_id', m.get('platform_specific_id',''))) == target]
+# Prefer most recent completed; fall back to most recent overall
+m = next((m for m in matches if m.get('status') == 'completed'), None) or (matches[0] if matches else None)
+print(m['id'] if m else '')
+" 2>/dev/null) || true
+        fi
+        if [ -z "$DB_ID" ]; then
+          echo "[vexa] ERROR: Could not resolve meeting ID for '$NATIVE_ID'. Is the bot active?"
+          exit 1
+        fi
+        _curl "$TC/internal/transcripts/$DB_ID" \
           -H "X-API-Key: $BOT_TOKEN" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -423,7 +451,7 @@ if not segments:
     print('[vexa] No transcript segments found.')
 else:
     for s in segments:
-        speaker = s.get('speaker', 'Unknown')
+        speaker = s.get('speaker', s.get('mapped_speaker_name', 'Unknown'))
         text = s.get('text', '')
         print(f'{speaker}: {text}')
 "

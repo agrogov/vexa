@@ -14,13 +14,21 @@ RUNTIME_API_URL = os.getenv("RUNTIME_API_URL", "http://runtime-api:8090")
 
 # Admin API (user data, config)
 ADMIN_API_URL = os.getenv("ADMIN_API_URL", "http://admin-api:8001")
+MEETING_API_URL = os.getenv("MEETING_API_URL", "http://meeting-api:8080")
 ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
+
+# Orchestrator backend: "process" (local docker) or "kubernetes"
+ORCHESTRATOR_BACKEND = os.getenv("ORCHESTRATOR_BACKEND", "process")
 
 # Container defaults
 AGENT_IMAGE = os.getenv("AGENT_IMAGE", "vexaai/vexa-agent:latest")
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "")
 CONTAINER_PREFIX = os.getenv("CONTAINER_PREFIX", "agent-")
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", "300"))
+
+# Kubernetes settings (used when ORCHESTRATOR_BACKEND=kubernetes)
+K8S_NAMESPACE = os.getenv("K8S_NAMESPACE", os.getenv("POD_NAMESPACE", "default"))
+K8S_SERVICE_ACCOUNT = os.getenv("K8S_SERVICE_ACCOUNT", "")
 
 # Auth
 API_KEY = os.getenv("API_KEY", "")
@@ -29,8 +37,9 @@ INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 # Self-reference URL (for scheduler callback targets)
 AGENT_API_INTERNAL_URL = os.getenv("AGENT_API_INTERNAL_URL", "http://agent-api:8100")
 
-# Anthropic API key (passed to agent containers for Claude CLI auth)
+# Anthropic API key and base URL (passed to agent containers for Claude CLI auth)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
 
 # Claude credential files (mounted into agent containers for OAuth auth)
 CLAUDE_CREDENTIALS_PATH = os.getenv("CLAUDE_CREDENTIALS_PATH", "")

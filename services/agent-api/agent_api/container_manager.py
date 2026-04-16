@@ -1,8 +1,9 @@
 """Container manager — delegates lifecycle to Runtime API, keeps exec local.
 
 Container lifecycle (create/stop/list) goes through Runtime API.
-Container exec (docker exec for agent CLI streaming) stays as local Docker CLI
-subprocess — streaming exec through HTTP would add latency for no benefit.
+Container exec stays local:
+  - process/docker mode: docker exec subprocess
+  - kubernetes mode: kubectl exec via kubernetes python client
 """
 
 import asyncio
@@ -38,6 +39,7 @@ class ContainerManager:
         self._admin_http: Optional[httpx.AsyncClient] = None
         self._new_container: bool = False
         self._last_user_data: dict[str, dict] = {}  # user_id -> user.data, per-user cache
+        self._ensure_locks: dict[str, asyncio.Lock] = {}  # per-user lock to prevent double-spawn
 
     async def startup(self):
         """Initialize HTTP clients for Runtime API and Admin API, discover existing containers."""
@@ -74,8 +76,9 @@ class ContainerManager:
     # --- User data ---
 
     async def get_user_data(self, user_id: str) -> dict:
-        """Fetch user.data from admin-api. Returns empty dict on failure.
+        """Fetch full user object from admin-api. Returns empty dict on failure.
 
+        Returns the full response (includes api_tokens, data, etc).
         Admin-api expects integer user IDs. Non-numeric user_ids skip the lookup.
         Result is cached per user_id for the container's lifetime.
         """
@@ -93,9 +96,9 @@ class ContainerManager:
         try:
             resp = await self._admin_http.get(f"/admin/users/{int_id}")
             if resp.status_code == 200:
-                data = resp.json().get("data", {}) or {}
-                self._last_user_data[user_id] = data
-                return data
+                user_obj = resp.json() or {}
+                self._last_user_data[user_id] = user_obj
+                return user_obj
             elif resp.status_code == 404:
                 logger.debug(f"User {int_id} not found in admin-api")
             else:
@@ -107,7 +110,9 @@ class ContainerManager:
     # --- Container operations ---
 
     async def _is_alive(self, name: str) -> bool:
-        """Check if container is actually running via docker inspect."""
+        """Check if container/pod is actually running."""
+        if config.ORCHESTRATOR_BACKEND == "kubernetes":
+            return await _k8s_is_alive(name)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "inspect", "--format", "{{.State.Status}}", name,
@@ -127,6 +132,15 @@ class ContainerManager:
         self._new_container = False
         key = f"{user_id}:{session_id}"
 
+        # Per-user lock prevents race: two concurrent requests for the same user
+        # would both miss the cache and spawn duplicate pods.
+        if key not in self._ensure_locks:
+            self._ensure_locks[key] = asyncio.Lock()
+        async with self._ensure_locks[key]:
+            return await self._ensure_container_locked(user_id, session_id, key, **create_kwargs)
+
+    async def _ensure_container_locked(self, user_id: str, session_id: str, key: str, **create_kwargs) -> str:
+        """Inner ensure_container body, called while holding the per-user lock."""
         # Check local cache
         info = self._containers.get(key)
         if info:
@@ -146,9 +160,17 @@ class ContainerManager:
         agent_env = agent_config.setdefault("env", {})
         agent_mounts = agent_config.setdefault("mounts", [])
 
-        # Pass ANTHROPIC_API_KEY if available
+        # Pass Anthropic credentials if available
         if config.ANTHROPIC_API_KEY:
             agent_env["ANTHROPIC_API_KEY"] = config.ANTHROPIC_API_KEY
+        if config.ANTHROPIC_BASE_URL:
+            agent_env["ANTHROPIC_BASE_URL"] = config.ANTHROPIC_BASE_URL
+
+        # Wire vexa CLI to the correct in-cluster services
+        # VEXA_TC: transcript endpoint (meeting-api replaced transcription-collector)
+        # VEXA_MEETING_API: bot manager endpoint
+        agent_env["VEXA_TC"] = config.MEETING_API_URL
+        agent_env["VEXA_MEETING_API"] = config.MEETING_API_URL
 
         # S3/MinIO credentials for workspace sync (aws s3 sync) inside container
         if config.S3_ACCESS_KEY:
@@ -169,11 +191,21 @@ class ContainerManager:
             )
 
         # Inject per-user env vars from admin-api user.data['env']
-        user_data = await self.get_user_data(user_id)
-        user_env = user_data.get("env", {})
+        user_obj = await self.get_user_data(user_id)
+        user_env = (user_obj.get("data") or {}).get("env", {})
         if user_env and isinstance(user_env, dict):
             agent_env.update(user_env)
             logger.info(f"Injected {len(user_env)} user env vars for {user_id}")
+
+        # Inject user's bot API token so vexa CLI can authenticate to meeting-api
+        user_tokens = user_obj.get("api_tokens", [])
+        bot_token = next(
+            (t["token"] for t in user_tokens if "bot" in t.get("scopes", [])),
+            None,
+        )
+        if bot_token:
+            agent_env["VEXA_BOT_API_TOKEN"] = bot_token
+            logger.info(f"Injected VEXA_BOT_API_TOKEN for user {user_id}")
 
         resp = await self._http.post("/containers", json=body)
         if resp.status_code not in (200, 201):
@@ -238,11 +270,13 @@ class ContainerManager:
         except Exception:
             pass
 
-    # --- Exec operations (local docker CLI) ---
+    # --- Exec operations (docker or kubernetes) ---
 
     async def exec_stream(self, container: str, cmd: str) -> asyncio.subprocess.Process:
         """Run a shell command in the container, return subprocess for streaming."""
         await self._touch(container)
+        if config.ORCHESTRATOR_BACKEND == "kubernetes":
+            return await _k8s_exec_stream(container, cmd)
         proc = await asyncio.create_subprocess_exec(
             "docker", "exec", "-i", container, "bash", "-c", cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -253,6 +287,8 @@ class ContainerManager:
 
     async def exec_simple(self, container: str, cmd: list[str]) -> Optional[str]:
         """Run a command in the container, return stdout or None."""
+        if config.ORCHESTRATOR_BACKEND == "kubernetes":
+            return await _k8s_exec_simple(container, cmd)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "exec", container, *cmd,
@@ -269,6 +305,8 @@ class ContainerManager:
     async def exec_with_stdin(self, container: str, cmd: list[str],
                               stdin_data: bytes) -> Optional[str]:
         """Run a command in the container with stdin piped. Returns stdout or None."""
+        if config.ORCHESTRATOR_BACKEND == "kubernetes":
+            return await _k8s_exec_with_stdin(container, cmd, stdin_data)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "docker", "exec", "-i", container, *cmd,
@@ -311,3 +349,180 @@ class ContainerManager:
         key = f"{user_id}:{session_id}"
         info = self._containers.get(key)
         return info.name if info else None
+
+
+# ---------------------------------------------------------------------------
+# Kubernetes exec helpers
+# ---------------------------------------------------------------------------
+
+def _get_k8s_api():
+    """Load in-cluster or kubeconfig and return CoreV1Api (cached module-level)."""
+    from kubernetes import client, config as k8s_config
+    try:
+        k8s_config.load_incluster_config()
+    except Exception:
+        k8s_config.load_kube_config()
+    return client.CoreV1Api()
+
+
+async def _k8s_wait_running(pod_name: str, timeout: int = 60) -> bool:
+    """Wait until pod phase is Running and all containers are ready. Returns False on timeout."""
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        try:
+            api = _get_k8s_api()
+            pod = await loop.run_in_executor(
+                None,
+                lambda: api.read_namespaced_pod(name=pod_name, namespace=config.K8S_NAMESPACE),
+            )
+            phase = pod.status.phase if pod.status else None
+            if phase == "Running":
+                # All containers ready
+                statuses = pod.status.container_statuses or []
+                if statuses and all(cs.ready for cs in statuses):
+                    return True
+            elif phase in ("Failed", "Succeeded", "Unknown"):
+                return False
+        except Exception:
+            pass
+        await asyncio.sleep(1)
+    logger.warning(f"Timed out waiting for pod {pod_name} to be Running")
+    return False
+
+
+async def _k8s_is_alive(pod_name: str) -> bool:
+    """Return True if the pod exists and is Running or Pending (still starting)."""
+    loop = asyncio.get_event_loop()
+    try:
+        api = _get_k8s_api()
+        pod = await loop.run_in_executor(
+            None,
+            lambda: api.read_namespaced_pod(name=pod_name, namespace=config.K8S_NAMESPACE),
+        )
+        return pod.status.phase in ("Running", "Pending")
+    except Exception:
+        return False
+
+
+async def _k8s_exec_simple(pod_name: str, cmd: list[str], timeout: int = 30) -> Optional[str]:
+    """Run a command in a K8s pod, return stdout or None."""
+    from kubernetes.stream import stream as k8s_stream
+    loop = asyncio.get_event_loop()
+    try:
+        await _k8s_wait_running(pod_name)
+        api = _get_k8s_api()
+        resp = await loop.run_in_executor(
+            None,
+            lambda: k8s_stream(
+                api.connect_get_namespaced_pod_exec,
+                pod_name, config.K8S_NAMESPACE,
+                command=cmd,
+                stderr=True, stdin=False, stdout=True, tty=False,
+                _preload_content=True,
+            ),
+        )
+        output = resp.strip() if resp else ""
+        return output or None
+    except Exception as e:
+        logger.debug(f"k8s exec_simple failed for {pod_name}: {e}")
+        return None
+
+
+async def _k8s_exec_with_stdin(pod_name: str, cmd: list[str],
+                                stdin_data: bytes, timeout: int = 30) -> Optional[str]:
+    """Run a command in a K8s pod with stdin data. Returns stdout or None."""
+    from kubernetes.stream import stream as k8s_stream
+    loop = asyncio.get_event_loop()
+    try:
+        await _k8s_wait_running(pod_name)
+        api = _get_k8s_api()
+
+        def _run():
+            ws = k8s_stream(
+                api.connect_get_namespaced_pod_exec,
+                pod_name, config.K8S_NAMESPACE,
+                command=cmd,
+                stderr=True, stdin=True, stdout=True, tty=False,
+                _preload_content=False,
+            )
+            ws.write_stdin(stdin_data.decode(errors="replace"))
+            # Closing the websocket signals EOF to the remote process
+            ws.close()
+            return None
+
+        resp = await asyncio.wait_for(
+            loop.run_in_executor(None, _run),
+            timeout=timeout + 5,
+        )
+        return resp.strip() if resp else None
+    except Exception as e:
+        logger.debug(f"k8s exec_with_stdin failed for {pod_name}: {e}")
+        return None
+
+
+class _K8sStreamProcess:
+    """Mimics asyncio.subprocess.Process stdout interface for K8s exec streaming."""
+
+    def __init__(self):
+        self._queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+        self.stdout = self
+        self.returncode = 0
+
+    async def __aiter__(self):
+        while True:
+            chunk = await self._queue.get()
+            if chunk is None:
+                break
+            yield chunk
+
+    async def wait(self):
+        pass
+
+
+async def _k8s_exec_stream(pod_name: str, cmd: str) -> _K8sStreamProcess:
+    """Start a streaming exec in a K8s pod. Returns a process-like object."""
+    from kubernetes.stream import stream as k8s_stream
+
+    proc = _K8sStreamProcess()
+    loop = asyncio.get_event_loop()
+
+    async def _stream():
+        try:
+            if not await _k8s_wait_running(pod_name):
+                logger.error(f"Pod {pod_name} not ready for exec_stream")
+                await proc._queue.put(None)
+                return
+            api = _get_k8s_api()
+            full_cmd = ["bash", "-c", cmd]
+
+            def _open_ws():
+                return k8s_stream(
+                    api.connect_get_namespaced_pod_exec,
+                    pod_name, config.K8S_NAMESPACE,
+                    command=full_cmd,
+                    stderr=True, stdin=False, stdout=True, tty=False,
+                    _preload_content=False,
+                )
+
+            ws = await loop.run_in_executor(None, _open_ws)
+            try:
+                while True:
+                    def _read():
+                        ws.update(timeout=1)
+                        return ws.read_stdout()
+
+                    data = await loop.run_in_executor(None, _read)
+                    if data:
+                        await proc._queue.put(data.encode() if isinstance(data, str) else data)
+                    elif not ws.is_open():
+                        break
+            finally:
+                ws.close()
+        except Exception as e:
+            logger.error(f"k8s exec_stream failed for {pod_name}: {e}")
+        finally:
+            await proc._queue.put(None)
+
+    asyncio.create_task(_stream())
+    return proc

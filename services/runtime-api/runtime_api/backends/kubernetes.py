@@ -116,9 +116,10 @@ class KubernetesBackend(Backend):
 
         # Image pull secrets
         image_pull_secrets = None
-        if config.K8S_IMAGE_PULL_SECRET:
+        if config.K8S_IMAGE_PULL_SECRETS:
             image_pull_secrets = [
-                client.V1LocalObjectReference(name=config.K8S_IMAGE_PULL_SECRET)
+                client.V1LocalObjectReference(name=s["name"])
+                for s in config.K8S_IMAGE_PULL_SECRETS
             ]
 
         # K8s-specific overrides (tolerations, affinity, annotations, etc.)
@@ -277,6 +278,8 @@ class KubernetesBackend(Backend):
 
         loop = asyncio.get_event_loop()
         ns = config.K8S_NAMESPACE
+        # Guard against duplicate cleanup for the same pod
+        _cleaning_up: set[str] = set()
 
         while True:
             try:
@@ -296,16 +299,53 @@ class KubernetesBackend(Backend):
                         if not pod or not pod.status:
                             continue
                         phase = pod.status.phase
+                        name = pod.metadata.name
+
+                        # Terminal phases: Succeeded or Failed
                         if etype in ("MODIFIED", "DELETED") and phase in ("Succeeded", "Failed"):
-                            name = pod.metadata.name
-                            exit_code = 0
-                            if pod.status.container_statuses:
-                                cs = pod.status.container_statuses[0]
-                                if cs.state and cs.state.terminated:
-                                    exit_code = cs.state.terminated.exit_code or 0
-                            asyncio.run_coroutine_threadsafe(
-                                on_exit(name, exit_code), loop,
-                            )
+                            if name not in _cleaning_up:
+                                _cleaning_up.add(name)
+                                exit_code = 0
+                                if pod.status.container_statuses:
+                                    cs = pod.status.container_statuses[0]
+                                    if cs.state and cs.state.terminated:
+                                        exit_code = cs.state.terminated.exit_code or 0
+                                asyncio.run_coroutine_threadsafe(
+                                    on_exit(name, exit_code), loop,
+                                )
+                            continue
+
+                        # Detect unrecoverable waiting states (ImagePullBackOff,
+                        # ErrImagePull, CrashLoopBackOff, CreateContainerConfigError, etc.)
+                        if etype == "MODIFIED" and phase in ("Pending", "Running"):
+                            waiting_reason = None
+                            if pod.status.init_container_statuses:
+                                for cs in pod.status.init_container_statuses:
+                                    if cs.state and cs.state.waiting:
+                                        waiting_reason = cs.state.waiting.reason
+                                        break
+                            if not waiting_reason and pod.status.container_statuses:
+                                for cs in pod.status.container_statuses:
+                                    if cs.state and cs.state.waiting:
+                                        waiting_reason = cs.state.waiting.reason
+                                        break
+                            fatal_reasons = {
+                                "ImagePullBackOff",
+                                "ErrImagePull",
+                                "CreateContainerConfigError",
+                                "InvalidImageName",
+                                "ImageInspectError",
+                                "CrashLoopBackOff",
+                            }
+                            if waiting_reason in fatal_reasons and name not in _cleaning_up:
+                                _cleaning_up.add(name)
+                                logger.warning(
+                                    f"Pod {name} stuck in {waiting_reason}, deleting and reporting as failed"
+                                )
+                                asyncio.run_coroutine_threadsafe(
+                                    _delete_and_report(api, ns, name, exit_code=1, on_exit=on_exit),
+                                    loop,
+                                )
 
                 await loop.run_in_executor(None, _iterate)
             except asyncio.CancelledError:
@@ -313,6 +353,21 @@ class KubernetesBackend(Backend):
             except Exception:
                 logger.debug("K8s watch reconnecting...", exc_info=True)
                 await asyncio.sleep(5)
+
+
+async def _delete_and_report(api, ns: str, name: str, exit_code: int, on_exit: callable) -> None:
+    """Delete a stuck pod and fire the on_exit callback."""
+    from kubernetes.client.rest import ApiException
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: api.delete_namespaced_pod(name=name, namespace=ns, grace_period_seconds=0),
+        )
+        logger.info(f"Deleted stuck pod {name}")
+    except ApiException as e:
+        if e.status != 404:
+            logger.error(f"Failed to delete stuck pod {name}: {e.status}")
+    await on_exit(name, exit_code)
 
 
 def _pod_to_info(pod) -> Optional[ContainerInfo]:
