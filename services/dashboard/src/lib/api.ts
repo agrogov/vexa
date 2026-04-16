@@ -335,9 +335,32 @@ export const vexaAPI = {
     return handleResponse(response);
   },
 
+  // Recordings - start background conversion (returns {ready: bool} immediately)
+  async prepareRecordingConversion(recordingId: number, mediaFileId: number, format: string): Promise<{ ready: boolean }> {
+    const response = await fetch(
+      withBasePath(`/api/vexa/recordings/${recordingId}/media/${mediaFileId}/prepare?format=${format}`),
+      { method: "POST" }
+    );
+    return handleResponse<{ ready: boolean }>(response);
+  },
+
+  // Recordings - poll conversion status
+  async checkRecordingConversion(recordingId: number, mediaFileId: number, format: string): Promise<{ ready: boolean }> {
+    const response = await fetch(
+      withBasePath(`/api/vexa/recordings/${recordingId}/media/${mediaFileId}/prepare?format=${format}`)
+    );
+    return handleResponse<{ ready: boolean }>(response);
+  },
+
   // Recordings - get the proxied URL for streaming audio via /raw endpoint
   getRecordingAudioUrl(recordingId: number, mediaFileId: number): string {
     return withBasePath(`/api/vexa/recordings/${recordingId}/media/${mediaFileId}/raw`);
+  },
+
+  // Recordings - get download URL, optionally converting to mp3 or wav on the fly
+  getRecordingDownloadUrl(recordingId: number, mediaFileId: number, convertTo?: string): string {
+    const base = withBasePath(`/api/vexa/recordings/${recordingId}/media/${mediaFileId}/raw`);
+    return convertTo ? `${base}?convert=${convertTo}` : base;
   },
 
   // Recordings - get the proxied URL for streaming video via /raw endpoint

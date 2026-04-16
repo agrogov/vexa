@@ -18,6 +18,12 @@ export interface AudioFragment {
   sessionUid: string;
   /** ISO timestamp when this recording started (from recordings[].created_at) */
   createdAt: string;
+  /** File format (e.g. "webm", "opus", "wav", "mp3") */
+  format?: string;
+  /** DB recording ID (for constructing download URLs with format conversion) */
+  recordingId?: number;
+  /** DB media file ID (for constructing download URLs with format conversion) */
+  mediaFileId?: number;
 }
 
 export interface AudioPlayerHandle {

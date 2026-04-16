@@ -77,10 +77,11 @@ function MessageBubble({ msg }: { msg: LocalMessage }) {
 
 interface MeetingAgentPanelProps {
   meetingId: string;
+  meetingDbId: string | number;
   platform: string;
 }
 
-export function MeetingAgentPanel({ meetingId, platform }: MeetingAgentPanelProps) {
+export function MeetingAgentPanel({ meetingId, meetingDbId, platform }: MeetingAgentPanelProps) {
   const { user } = useAuthStore();
   const userId = user?.id?.toString() || user?.email || "default";
 
@@ -123,7 +124,7 @@ export function MeetingAgentPanel({ meetingId, platform }: MeetingAgentPanelProp
     setInput("");
 
     // Prepend meeting context so the agent knows which meeting to help with
-    const contextPrefix = `[Meeting context: ${platform} meeting ${meetingId}. Use \`vexa meeting transcript ${meetingId}\` to read the transcript.]\n\n`;
+    const contextPrefix = `[Meeting context: ${platform} meeting ${meetingId} (DB id: ${meetingDbId}). Use \`vexa meeting transcript --db-id ${meetingDbId}\` to read the transcript.]\n\n`;
     const fullMsg = contextPrefix + rawMsg;
 
     addMessage({
@@ -231,7 +232,7 @@ export function MeetingAgentPanel({ meetingId, platform }: MeetingAgentPanelProp
       setIsStreaming(false);
       abortRef.current = null;
     }
-  }, [input, isStreaming, userId, meetingId, platform, addMessage, updateLastAssistant]);
+  }, [input, isStreaming, userId, meetingId, meetingDbId, platform, addMessage, updateLastAssistant]);
 
   const handleStop = useCallback(async () => {
     abortRef.current?.abort();

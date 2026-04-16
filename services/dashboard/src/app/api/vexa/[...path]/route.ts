@@ -98,7 +98,9 @@ async function proxyRequest(
 
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    // Use longer timeout for media endpoints (ffmpeg conversion can take time for large files)
+    const isMediaEndpoint = pathString.includes("/media/") || pathString.includes("/raw");
+    const timeoutId = setTimeout(() => controller.abort(), isMediaEndpoint ? 180000 : 30000);
 
     const fetchOptions: RequestInit = {
       method,

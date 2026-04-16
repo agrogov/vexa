@@ -75,11 +75,21 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
   exportToTxt,
@@ -162,6 +172,17 @@ export default function MeetingDetailPage() {
 
   // Bot control state
   const [isStoppingBot, setIsStoppingBot] = useState(false);
+
+  // Audio conversion modal state
+  const [convertModal, setConvertModal] = useState<{
+    open: boolean;
+    format: string;
+    recordingId: number;
+    mediaFileId: number;
+    filename: string;
+    progress: number;
+  } | null>(null);
+  const convertPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [isDeletingMeeting, setIsDeletingMeeting] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [forcePostMeetingMode, setForcePostMeetingMode] = useState(false);
@@ -197,6 +218,9 @@ export default function MeetingDetailPage() {
         duration: audioMedia.duration_seconds || 0,
         sessionUid: rec.session_uid,
         createdAt: rec.created_at,
+        format: audioMedia.format as string | undefined,
+        recordingId: rec.id,
+        mediaFileId: audioMedia.id,
       };
     });
   }, [recordings]);
@@ -305,6 +329,15 @@ export default function MeetingDetailPage() {
     setPlaybackTime(virtualOffset + startTimeSeconds);
     setIsPlaybackActive(true);
   }, [hasRecordingAudio, recordingFragments, transcripts, sessionStartMsBySessionUid]);
+
+  // Cleanup conversion poll on unmount
+  useEffect(() => {
+    return () => {
+      if (convertPollRef.current) {
+        clearInterval(convertPollRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!hasRecordingAudio || pendingSeekTime == null) return;
@@ -440,6 +473,97 @@ export default function MeetingDetailPage() {
     const filename = generateFilename(currentMeeting, format);
     downloadFile(content, filename, mimeType);
   }, [currentMeeting, transcripts]);
+
+  // Trigger download of a blob URL
+  const triggerBlobDownload = useCallback((url: string, filename: string) => {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+  }, []);
+
+  // Cancel the conversion modal and stop polling
+  const cancelConvertModal = useCallback(() => {
+    if (convertPollRef.current) {
+      clearInterval(convertPollRef.current);
+      convertPollRef.current = null;
+    }
+    setConvertModal(null);
+  }, []);
+
+  // Download audio — original: direct link; converted: show modal + poll backend
+  const handleAudioDownload = useCallback(async (recordingId: number, mediaFileId: number, fmt?: string, srcFmt?: string) => {
+    const ext = fmt || srcFmt || "webm";
+    const filename = currentMeeting
+      ? generateFilename(currentMeeting, ext).replace(/^transcript-/, "recording-")
+      : `recording-${recordingId}.${ext}`;
+
+    if (!fmt) {
+      // Original format — direct download, no conversion needed
+      triggerBlobDownload(vexaAPI.getRecordingDownloadUrl(recordingId, mediaFileId), filename);
+      return;
+    }
+
+    // Start conversion on the backend (returns immediately)
+    let ready = false;
+    try {
+      const result = await vexaAPI.prepareRecordingConversion(recordingId, mediaFileId, fmt);
+      ready = result.ready;
+    } catch (err) {
+      toast.error(`Failed to start conversion: ${(err as Error).message}`);
+      return;
+    }
+
+    if (ready) {
+      // Already converted — fetch and download immediately
+      try {
+        const resp = await fetch(vexaAPI.getRecordingDownloadUrl(recordingId, mediaFileId, fmt));
+        if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+        const blobUrl = URL.createObjectURL(await resp.blob());
+        triggerBlobDownload(blobUrl, filename);
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+      } catch (err) {
+        toast.error(`Download failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+
+    // Not ready yet — show modal and start polling
+    setConvertModal({ open: true, format: fmt, recordingId, mediaFileId, filename, progress: 0 });
+    const startTime = Date.now();
+    const estimatedMs = 300000; // 5min estimate for progress bar (large files)
+
+    convertPollRef.current = setInterval(async () => {
+      try {
+        const elapsed = Date.now() - startTime;
+        // Progress: animate to 90% over estimatedMs, hold there until done
+        const progress = Math.min(90, Math.round((elapsed / estimatedMs) * 90));
+        setConvertModal(prev => prev ? { ...prev, progress } : null);
+
+        const status = await vexaAPI.checkRecordingConversion(recordingId, mediaFileId, fmt);
+        if (status.ready) {
+          clearInterval(convertPollRef.current!);
+          convertPollRef.current = null;
+          setConvertModal(prev => prev ? { ...prev, progress: 100 } : null);
+
+          // Small delay so user sees 100%
+          await new Promise(r => setTimeout(r, 400));
+          setConvertModal(null);
+
+          const resp = await fetch(vexaAPI.getRecordingDownloadUrl(recordingId, mediaFileId, fmt));
+          if (!resp.ok) throw new Error(`Server error ${resp.status}`);
+          const blobUrl = URL.createObjectURL(await resp.blob());
+          triggerBlobDownload(blobUrl, filename);
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+        }
+      } catch (err) {
+        clearInterval(convertPollRef.current!);
+        convertPollRef.current = null;
+        setConvertModal(null);
+        toast.error(`Conversion failed: ${(err as Error).message}`);
+      }
+    }, 2000);
+  }, [currentMeeting, triggerBlobDownload]);
 
   // Format transcript for ChatGPT
   const formatTranscriptForChatGPT = useCallback((meeting: Meeting, segments: typeof transcripts): string => {
@@ -853,6 +977,29 @@ export default function MeetingDetailPage() {
   if (browserViewIframe) {
     return (
       <div className="flex flex-col h-[calc(100vh-64px)] -m-4 md:-m-6 relative z-10">
+        {/* Audio conversion modal */}
+        {convertModal && (
+          <Dialog open={convertModal.open} onOpenChange={(open) => { if (!open) cancelConvertModal(); }}>
+            <DialogContent className="sm:max-w-sm">
+              <DialogHeader>
+                <DialogTitle>Converting to {convertModal.format.toUpperCase()}</DialogTitle>
+              </DialogHeader>
+              <div className="py-4 space-y-3">
+                <p className="text-sm text-muted-foreground">Please wait while the audio is being converted…</p>
+                <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary rounded-full transition-all duration-700"
+                    style={{ width: `${convertModal.progress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground text-right">{convertModal.progress}%</p>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={cancelConvertModal}>Cancel</Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )}
         {/* Minimal toolbar */}
         <div className="flex items-center gap-2 px-3 py-1.5 border-b bg-background">
           <Button variant="ghost" size="sm" asChild className="h-8 px-2 text-muted-foreground hover:text-foreground">
@@ -887,6 +1034,29 @@ export default function MeetingDetailPage() {
 
   return (
     <div className="space-y-2 lg:space-y-6 h-full flex flex-col">
+      {/* Audio conversion modal */}
+      {convertModal && (
+        <Dialog open={convertModal.open} onOpenChange={(open) => { if (!open) cancelConvertModal(); }}>
+          <DialogContent className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Converting to {convertModal.format.toUpperCase()}</DialogTitle>
+            </DialogHeader>
+            <div className="py-4 space-y-3">
+              <p className="text-sm text-muted-foreground">Please wait while the audio is being converted…</p>
+              <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all duration-700"
+                  style={{ width: `${convertModal.progress}%` }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground text-right">{convertModal.progress}%</p>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={cancelConvertModal}>Cancel</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
       {/* Desktop Header */}
       <div className="hidden lg:flex items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-4 flex-1 min-w-0">
@@ -1110,19 +1280,29 @@ export default function MeetingDetailPage() {
                     Copy to clipboard
                   </DropdownMenuItem>
                   {hasRecordingAudio && (
-                    <DropdownMenuItem
-                      onClick={() => {
-                        if (recordingFragments.length > 0) {
-                          const link = document.createElement("a");
-                          link.href = recordingFragments[0].src;
-                          link.download = `${currentMeeting?.data?.name || currentMeeting?.data?.title || "recording"}.webm`;
-                          link.click();
-                        }
-                      }}
-                    >
-                      <Download className="h-4 w-4 mr-2" />
-                      Download audio
-                    </DropdownMenuItem>
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger>
+                        <Download className="h-4 w-4 mr-2" />
+                        Download audio
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        {([
+                          { label: `Original (${(recordingFragments[0].format || "webm").toUpperCase()})`, fmt: undefined },
+                          { label: "MP3", fmt: "mp3" },
+                          { label: "WAV", fmt: "wav" },
+                        ] as { label: string; fmt?: string }[]).map(({ label, fmt }) => (
+                          <DropdownMenuItem
+                            key={label}
+                            onClick={() => {
+                              const frag = recordingFragments[0];
+                              handleAudioDownload(frag.recordingId!, frag.mediaFileId!, fmt, frag.format);
+                            }}
+                          >
+                            {label}
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1489,19 +1669,29 @@ export default function MeetingDetailPage() {
                       Copy to clipboard
                     </DropdownMenuItem>
                     {hasRecordingAudio && (
-                      <DropdownMenuItem
-                        onClick={() => {
-                          if (recordingFragments.length > 0) {
-                            const link = document.createElement("a");
-                            link.href = recordingFragments[0].src;
-                            link.download = `${currentMeeting?.data?.name || currentMeeting?.data?.title || "recording"}.webm`;
-                            link.click();
-                          }
-                        }}
-                      >
-                        <Download className="h-4 w-4 mr-2" />
-                        Download audio
-                      </DropdownMenuItem>
+                      <DropdownMenuSub>
+                        <DropdownMenuSubTrigger>
+                          <Download className="h-4 w-4 mr-2" />
+                          Download audio
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent>
+                          {([
+                            { label: `Original (${(recordingFragments[0].format || "webm").toUpperCase()})`, fmt: undefined },
+                            { label: "MP3", fmt: "mp3" },
+                            { label: "WAV", fmt: "wav" },
+                          ] as { label: string; fmt?: string }[]).map(({ label, fmt }) => (
+                            <DropdownMenuItem
+                              key={label}
+                              onClick={() => {
+                                const frag = recordingFragments[0];
+                                handleAudioDownload(frag.recordingId!, frag.mediaFileId!, fmt, frag.format);
+                              }}
+                            >
+                              {label}
+                            </DropdownMenuItem>
+                          ))}
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
                     )}
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1784,6 +1974,7 @@ export default function MeetingDetailPage() {
             <div className="rounded-lg border bg-card shadow-sm overflow-hidden" style={{ height: "calc(100vh - 10rem)" }}>
               <MeetingAgentPanel
                 meetingId={currentMeeting.platform_specific_id}
+                meetingDbId={currentMeeting.id}
                 platform={currentMeeting.platform}
               />
             </div>
