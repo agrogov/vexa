@@ -90,8 +90,18 @@ async function waitForTeamsPreJoinReadiness(page: Page, timeoutMs: number): Prom
       .catch(() => false);
     const computerAudioVisible = await page.locator(teamsComputerAudioRadioSelectors.join(", ")).first().isVisible().catch(() => false);
 
-    if (joinNowVisible || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
-      log("✅ Teams pre-join controls are ready");
+    const joinNowInDom = await page
+      .evaluate(() =>
+        !!(
+          document.getElementById("prejoin-join-button") ||
+          document.querySelector('[data-tid="prejoin-join-button"]') ||
+          document.querySelector('[aria-label="Join now"]')
+        )
+      )
+      .catch(() => false);
+
+    if (joinNowVisible || joinNowInDom || (cancelVisible && (nameInputVisible || cameraControlVisible || computerAudioVisible))) {
+      log(`✅ Teams pre-join controls are ready (joinNowVisible=${joinNowVisible}, joinNowInDom=${joinNowInDom})`);
       return true;
     }
 
@@ -463,24 +473,56 @@ export async function joinMicrosoftTeams(page: Page, botConfig: BotConfig): Prom
 
   log("Step 6: Clicking 'Join now' to enter the meeting...");
   try {
-    // Use the more specific "Join now" selector first to avoid ambiguity
-    const joinNowButton = page.locator('button:has-text("Join now")').first();
-    const joinNowVisible = await joinNowButton.isVisible().catch(() => false);
+    const jsClicked = await page.evaluate(() => {
+      const btn = (
+        document.getElementById("prejoin-join-button") ||
+        document.querySelector<HTMLElement>('[data-tid="prejoin-join-button"]') ||
+        document.querySelector<HTMLElement>('[aria-label="Join now"]') ||
+        Array.from(document.querySelectorAll<HTMLElement>("button")).find(
+          (b) => b.innerText?.trim() === "Join now"
+        )
+      );
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
 
-    if (joinNowVisible) {
-      await joinNowButton.click();
-      log("✅ Clicked 'Join now' button");
+    if (jsClicked) {
+      log("✅ Clicked 'Join now' button (JS click)");
     } else {
-      // Fall back to generic join selectors
       const fallbackJoinButton = page.locator(teamsJoinButtonSelectors.join(', ')).first();
       await fallbackJoinButton.waitFor({ timeout: 10000 });
-      await fallbackJoinButton.click();
+      await fallbackJoinButton.click({ force: true });
       log("✅ Clicked join button (fallback selector)");
     }
-    // Brief wait for Teams to start processing the join request
-    await page.waitForTimeout(1000);
-  } catch (error) {
+    log("Waiting for Teams to process join request...");
+    await page.waitForTimeout(8000);
+  } catch (error: any) {
     log("⚠️ Join button not found — bot may not be able to enter the meeting");
+    try {
+      const visibleButtons = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("button, [role='button'], input[type='button']"))
+          .filter((el) => {
+            const r = (el as HTMLElement).getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          })
+          .map((el) => ({
+            tag: el.tagName,
+            text: ((el as HTMLElement).innerText || "").trim().slice(0, 60),
+            ariaLabel: el.getAttribute("aria-label"),
+            dataTid: el.getAttribute("data-tid"),
+            id: el.id || null,
+          }))
+      );
+      log(`[Join Debug] Visible buttons on page (url=${page.url()}):`);
+      for (const b of visibleButtons) {
+        log(`  [Join Debug] <${b.tag}> text="${b.text}" aria-label="${b.ariaLabel}" data-tid="${b.dataTid}" id="${b.id}"`);
+      }
+    } catch (dumpErr: any) {
+      log(`[Join Debug] Could not dump buttons: ${dumpErr?.message}`);
+    }
   }
 
   // Mute mic for all bots after join. TTS bots unmute only when speaking
