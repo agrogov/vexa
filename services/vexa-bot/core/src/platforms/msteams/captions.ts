@@ -29,11 +29,42 @@ export async function enableTeamsLiveCaptions(page: Page): Promise<void> {
 
   try {
     // Step 1: Click "More" button in the meeting toolbar.
-    const moreButton = page.locator(
-      '#callingButtons-showMoreBtn, button[aria-label="More"], button[aria-label="More options"]'
-    ).first();
-    await moreButton.click({ timeout: 8000 });
-    log("[Captions] Clicked More menu");
+    // Use JS click first to bypass the ui-dialog__overlay that intercepts pointer
+    // events in the Teams light experience (same pattern as leave.ts).
+    const jsMoreResult = await page.evaluate(() => {
+      const overlays = document.querySelectorAll<HTMLElement>('.ui-dialog__overlay, [data-slot-name\\:rj\\:="root"].ui-box');
+      const overlayCount = overlays.length;
+      for (const ov of overlays) {
+        ov.style.pointerEvents = 'none';
+      }
+      const btn =
+        document.getElementById('callingButtons-showMoreBtn') ||
+        document.querySelector<HTMLElement>('button[aria-label="More"]') ||
+        document.querySelector<HTMLElement>('button[aria-label="More options"]');
+      if (btn) {
+        const rect = btn.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          btn.click();
+          return { clicked: true, overlayCount };
+        }
+      }
+      return { clicked: false, overlayCount };
+    });
+
+    if (jsMoreResult.overlayCount > 0) {
+      log(`[Captions] ⚠️ Detected ${jsMoreResult.overlayCount} blocking overlay(s) (Teams light experience) — neutralized pointer-events`);
+    }
+
+    if (jsMoreResult.clicked) {
+      log("[Captions] Clicked More menu (JS click)");
+    } else {
+      // Fallback: Playwright force-click
+      const moreButton = page.locator(
+        '#callingButtons-showMoreBtn, button[aria-label="More"], button[aria-label="More options"]'
+      ).first();
+      await moreButton.click({ force: true, timeout: 8000 });
+      log("[Captions] Clicked More menu (force-click fallback)");
+    }
     await page.waitForTimeout(1000);
 
     // Step 2: Click "Language and speech" — use broad text matching.
@@ -110,21 +141,27 @@ export async function enableTeamsLiveCaptions(page: Page): Promise<void> {
       await page.waitForTimeout(1500);
     }
 
-    // Verify captions are now enabled
-    const captionsEnabled = await page.evaluate(() => {
-      return !!document.querySelector('[data-tid="closed-caption-renderer-wrapper"]');
-    });
+    // Verify captions are now enabled (poll for up to 5s — wrapper may appear with delay)
+    let captionsEnabled = false;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      captionsEnabled = await page.evaluate(() => {
+        return !!document.querySelector('[data-tid="closed-caption-renderer-wrapper"]');
+      });
+      if (captionsEnabled) break;
+      await page.waitForTimeout(500);
+    }
 
     if (captionsEnabled) {
-      log("[Captions] ✅ Live captions enabled successfully");
+      log("[Captions] ✅ Live captions enabled successfully — caption-driven transcription pipeline active");
     } else {
-      log("[Captions] ⚠️ Captions menu clicked but wrapper not found yet — caption observer will detect when it appears");
+      log("[Captions] ❌ Live captions could NOT be enabled — caption wrapper not found after menu interaction. Transcription will rely on DOM speaker signals (degraded quality).");
     }
   } catch (err: any) {
     // Close any open menu before re-throwing
     try {
       await page.keyboard.press('Escape');
     } catch {}
+    log(`[Captions] ❌ Caption enablement failed: ${err?.message || err}`);
     throw err;
   }
 }
