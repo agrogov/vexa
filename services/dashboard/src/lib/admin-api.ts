@@ -78,7 +78,7 @@ export const adminAPI = {
   // ==========================================
 
   async createToken(userId: string): Promise<CreateTokenResponse> {
-    const response = await fetch(withBasePath(`/api/admin/users/${userId}/tokens`), {
+    const response = await fetch(withBasePath(`/api/admin/users/${userId}/tokens?scopes=bot,tx,browser`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
