@@ -102,9 +102,10 @@ export const authOptions: NextAuthOptions = {
 
           const apiToken = tokenResult.data.token;
 
-          // Step 3: Set cookie (same as existing auth flow)
+          // Step 3: Set cookies (same as existing auth flow)
           const cookieStore = await cookies();
           cookieStore.set("vexa-token", apiToken, getVexaCookieOptions());
+          cookieStore.set("vexa-user-info", JSON.stringify({ email: user.email, name: user.name }), getVexaCookieOptions());
 
           // Store Vexa user info in the user object for the JWT callback
           (user as any).vexaUser = vexaUser;

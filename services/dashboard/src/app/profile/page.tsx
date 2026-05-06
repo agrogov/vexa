@@ -515,11 +515,6 @@ function GitWorkspaceCard() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    // Load from server
-    fetch(withBasePath("/api/vexa/user/workspace-git")).then(async (r) => {
-      // GET doesn't exist — load from user profile data instead
-    }).catch(() => {});
-    // Also check localStorage as fallback
     try {
       const git = JSON.parse(localStorage.getItem("vexa-browser-git") || "{}");
       if (git.repo) {
