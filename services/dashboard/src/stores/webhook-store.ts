@@ -22,14 +22,6 @@ export interface WebhookDelivery {
   last_attempt_at: string;
 }
 
-export interface WebhookDeliveryAttempt {
-  attempt: number;
-  timestamp: string;
-  endpoint_url: string;
-  response_status: number | null;
-  response_time_ms: number | null;
-  success: boolean;
-}
 
 export interface WebhookStats {
   total: number;
@@ -51,10 +43,6 @@ interface WebhookState {
   isLoading: boolean;
   error: string | null;
 
-  // Meeting-specific deliveries
-  meetingDeliveries: WebhookDeliveryAttempt[];
-  isLoadingMeetingDeliveries: boolean;
-
   // Webhook config
   config: WebhookConfig | null;
   isLoadingConfig: boolean;
@@ -70,7 +58,6 @@ interface WebhookState {
 
   // Actions
   fetchDeliveries: () => Promise<void>;
-  fetchMeetingDeliveries: (meetingId: string) => Promise<void>;
   fetchConfig: () => Promise<void>;
   saveConfig: (config: Partial<WebhookConfig>) => Promise<void>;
   testWebhook: (url: string) => Promise<{ success: boolean; status?: number; time_ms?: number; error?: string }>;
@@ -90,8 +77,6 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
   stats: { total: 0, delivered: 0, retrying: 0, failed: 0 },
   isLoading: false,
   error: null,
-  meetingDeliveries: [],
-  isLoadingMeetingDeliveries: false,
   config: null,
   isLoadingConfig: false,
   isSavingConfig: false,
@@ -127,24 +112,6 @@ export const useWebhookStore = create<WebhookState>((set, get) => ({
       });
     } catch (error) {
       set({ error: (error as Error).message, isLoading: false });
-    }
-  },
-
-  fetchMeetingDeliveries: async (meetingId: string) => {
-    set({ isLoadingMeetingDeliveries: true });
-    try {
-      const response = await fetch(withBasePath(`/api/webhooks/deliveries/${meetingId}`));
-      if (!response.ok) {
-        if (response.status === 404) {
-          set({ meetingDeliveries: [], isLoadingMeetingDeliveries: false });
-          return;
-        }
-        throw new Error("Failed to fetch meeting webhook deliveries");
-      }
-      const data = await response.json();
-      set({ meetingDeliveries: data.attempts || [], isLoadingMeetingDeliveries: false });
-    } catch {
-      set({ meetingDeliveries: [], isLoadingMeetingDeliveries: false });
     }
   },
 

@@ -52,6 +52,16 @@ export interface MeetingData {
   completion_reason?: string;
   // Status history
   status_transition?: StatusTransition[];
+  // Webhook delivery result
+  webhook_delivery?: {
+    url?: string;
+    status?: string;
+    attempts?: number;
+    status_code?: number;
+    delivered_at?: string;
+    failed_at?: string;
+    queued_at?: string;
+  };
   [key: string]: unknown;
 }
 
