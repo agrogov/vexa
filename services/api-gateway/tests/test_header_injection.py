@@ -229,3 +229,102 @@ class TestTokenCache:
         # Verify TTL is 60 seconds
         call_args = mock_redis.set.call_args
         assert call_args.kwargs.get("ex") == 60 or (len(call_args.args) >= 3 and call_args.args[2] == 60) or call_args[1].get("ex") == 60
+
+
+class TestWebhookHeaderInjection:
+    """POST /bots injects X-User-Webhook-* headers from validate response."""
+
+    @pytest.mark.asyncio
+    async def test_webhook_headers_injected(self):
+        """When user_data has webhook_url, extra_headers are merged into forwarded request."""
+        captured_headers = {}
+        user_data = {
+            "user_id": 5, "scopes": ["bot"], "max_concurrent": 3, "email": "test@x.com",
+            "webhook_url": "https://example.com/hook",
+            "webhook_secret": "whsec_abc",
+            "webhook_events": {"meeting.completed": True, "bot.failed": True},
+        }
+
+        async def mock_request(method, url, headers=None, params=None, content=None):
+            captured_headers.update(headers or {})
+            resp = MagicMock()
+            resp.content = b'{"id":1}'
+            resp.status_code = 201
+            resp.headers = {}
+            return resp
+
+        client = AsyncMock()
+        client.request = mock_request
+        client.post = AsyncMock(return_value=_make_validate_response(200, user_data))
+
+        app.state.redis = None
+
+        req = _make_request(headers={"x-api-key": "vxa_bot_abc123"})
+        await forward_request(client, "POST", "http://meeting-api:8000/bots", req,
+                              extra_headers={
+                                  "x-user-webhook-url": "https://example.com/hook",
+                                  "x-user-webhook-secret": "whsec_abc",
+                                  "x-user-webhook-events": "meeting.completed,bot.failed",
+                              })
+
+        assert captured_headers.get("x-user-webhook-url") == "https://example.com/hook"
+        assert captured_headers.get("x-user-webhook-secret") == "whsec_abc"
+        assert captured_headers.get("x-user-webhook-events") == "meeting.completed,bot.failed"
+
+    @pytest.mark.asyncio
+    async def test_no_webhook_headers_when_not_configured(self):
+        """When extra_headers is None, no webhook headers are injected."""
+        captured_headers = {}
+        user_data = {"user_id": 5, "scopes": ["bot"], "max_concurrent": 3, "email": "test@x.com"}
+
+        async def mock_request(method, url, headers=None, params=None, content=None):
+            captured_headers.update(headers or {})
+            resp = MagicMock()
+            resp.content = b'{"id":1}'
+            resp.status_code = 201
+            resp.headers = {}
+            return resp
+
+        client = AsyncMock()
+        client.request = mock_request
+        client.post = AsyncMock(return_value=_make_validate_response(200, user_data))
+
+        app.state.redis = None
+
+        req = _make_request(headers={"x-api-key": "vxa_bot_abc123"})
+        await forward_request(client, "POST", "http://meeting-api:8000/bots", req)
+
+        assert "x-user-webhook-url" not in captured_headers
+        assert "x-user-webhook-secret" not in captured_headers
+
+    @pytest.mark.asyncio
+    async def test_spoofed_webhook_headers_stripped(self):
+        """Client-supplied X-User-Webhook-* headers are removed."""
+        captured_headers = {}
+        user_data = {"user_id": 5, "scopes": ["bot"], "max_concurrent": 3, "email": "test@x.com"}
+
+        async def mock_request(method, url, headers=None, params=None, content=None):
+            captured_headers.update(headers or {})
+            resp = MagicMock()
+            resp.content = b"{}"
+            resp.status_code = 200
+            resp.headers = {}
+            return resp
+
+        client = AsyncMock()
+        client.request = mock_request
+        client.post = AsyncMock(return_value=_make_validate_response(200, user_data))
+
+        app.state.redis = None
+
+        req = _make_request(headers={
+            "x-api-key": "vxa_bot_abc123",
+            "x-user-webhook-url": "https://evil.com/steal",
+            "x-user-webhook-secret": "spoofed_secret",
+            "x-user-webhook-events": "meeting.completed",
+        })
+        await forward_request(client, "GET", "http://meeting-api:8000/bots", req)
+
+        assert "x-user-webhook-url" not in captured_headers
+        assert "x-user-webhook-secret" not in captured_headers
+        assert "x-user-webhook-events" not in captured_headers

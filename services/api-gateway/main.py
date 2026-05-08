@@ -269,14 +269,15 @@ logger = logging.getLogger("api_gateway")
 
 
 # --- Helper for Forwarding ---
-async def forward_request(client: httpx.AsyncClient, method: str, url: str, request: Request, *, require_auth: bool = True) -> Response:
+async def forward_request(client: httpx.AsyncClient, method: str, url: str, request: Request, *, require_auth: bool = True, extra_headers: dict = None) -> Response:
     # Copy original headers, converting to a standard dict
     # Exclude host, content-length, transfer-encoding as they are handled by httpx/server
     excluded_headers = {"host", "content-length", "transfer-encoding"}
     headers = {k.lower(): v for k, v in request.headers.items() if k.lower() not in excluded_headers}
 
     # Security: strip any client-supplied identity headers (prevent spoofing)
-    for h in ["x-user-id", "x-user-scopes", "x-user-limits"]:
+    for h in ["x-user-id", "x-user-scopes", "x-user-limits",
+              "x-user-webhook-url", "x-user-webhook-secret", "x-user-webhook-events"]:
         headers.pop(h, None)
 
     # Determine target service based on URL path prefix
@@ -326,6 +327,10 @@ async def forward_request(client: httpx.AsyncClient, method: str, url: str, requ
                     status_code=401,
                     media_type="application/json",
                 )
+
+    # Inject route-specific extra headers (e.g. webhook config for POST /bots)
+    if extra_headers:
+        headers.update(extra_headers)
 
     # Forward query parameters
     forwarded_params = dict(request.query_params)
@@ -412,12 +417,31 @@ async def root():
                  "description": "Specify the meeting platform, native ID, and optional bot name."
              },
          })
-# Function signature remains generic for forwarding
-async def request_bot_proxy(request: Request): 
-    """Forward request to Bot Manager to start a bot."""
+async def request_bot_proxy(request: Request):
+    """Forward request to Bot Manager to start a bot, injecting user webhook config."""
     url = f"{MEETING_API_URL}/bots"
-    # forward_request handles reading and passing the body from the original request
-    return await forward_request(app.state.http_client, "POST", url, request)
+
+    # Resolve webhook config to inject into meeting creation
+    extra = {}
+    client_key = request.headers.get("x-api-key")
+    if client_key:
+        user_data = await _resolve_token(app.state.http_client, client_key)
+        if user_data and user_data.get("webhook_url"):
+            extra["x-user-webhook-url"] = user_data["webhook_url"]
+            if user_data.get("webhook_secret"):
+                extra["x-user-webhook-secret"] = user_data["webhook_secret"]
+            if user_data.get("webhook_events"):
+                events = user_data["webhook_events"]
+                if isinstance(events, dict):
+                    events_str = ",".join(k for k, v in events.items() if v)
+                    if events_str:
+                        extra["x-user-webhook-events"] = events_str
+                elif isinstance(events, list):
+                    extra["x-user-webhook-events"] = ",".join(str(e) for e in events)
+                elif isinstance(events, str):
+                    extra["x-user-webhook-events"] = events
+
+    return await forward_request(app.state.http_client, "POST", url, request, extra_headers=extra or None)
 
 @app.delete("/bots/{platform}/{native_meeting_id}",
            tags=["Bot Management"],
