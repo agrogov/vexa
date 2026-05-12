@@ -10,7 +10,7 @@ ENV NEXT_PUBLIC_BASE_PATH=$NEXT_PUBLIC_BASE_PATH
 # Install dependencies
 COPY services/dashboard/package*.json ./
 COPY services/dashboard/vexaai-transcript-rendering-0.2.0.tgz ./
-RUN npm ci
+RUN npm install
 
 # Copy source code
 COPY services/dashboard/src ./src
