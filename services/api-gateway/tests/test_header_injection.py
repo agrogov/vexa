@@ -328,11 +328,11 @@ class TestTokenCache:
 
 
 class TestWebhookHeaderInjection:
-    """POST /bots injects X-User-Webhook-* headers from validate response."""
+    """forward_request injects X-User-Webhook-* headers from validate response."""
 
     @pytest.mark.asyncio
     async def test_webhook_headers_injected(self):
-        """When user_data has webhook_url, extra_headers are merged into forwarded request."""
+        """When validate returns webhook config, forward_request injects webhook headers."""
         captured_headers = {}
         user_data = {
             "user_id": 5, "scopes": ["bot"], "max_concurrent": 3, "email": "test@x.com",
@@ -356,20 +356,16 @@ class TestWebhookHeaderInjection:
         app.state.redis = None
 
         req = _make_request(headers={"x-api-key": "vxa_bot_abc123"})
-        await forward_request(client, "POST", "http://meeting-api:8000/bots", req,
-                              extra_headers={
-                                  "x-user-webhook-url": "https://example.com/hook",
-                                  "x-user-webhook-secret": "whsec_abc",
-                                  "x-user-webhook-events": "meeting.completed,bot.failed",
-                              })
+        await forward_request(client, "POST", "http://meeting-api:8000/bots", req)
 
         assert captured_headers.get("x-user-webhook-url") == "https://example.com/hook"
         assert captured_headers.get("x-user-webhook-secret") == "whsec_abc"
-        assert captured_headers.get("x-user-webhook-events") == "meeting.completed,bot.failed"
+        assert "meeting.completed" in captured_headers.get("x-user-webhook-events", "")
+        assert "bot.failed" in captured_headers.get("x-user-webhook-events", "")
 
     @pytest.mark.asyncio
     async def test_no_webhook_headers_when_not_configured(self):
-        """When extra_headers is None, no webhook headers are injected."""
+        """When validate response has no webhook config, no webhook headers are injected."""
         captured_headers = {}
         user_data = {"user_id": 5, "scopes": ["bot"], "max_concurrent": 3, "email": "test@x.com"}
 

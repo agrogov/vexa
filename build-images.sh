@@ -9,10 +9,10 @@ set -euo pipefail
 # Examples:
 #   ./build-images.sh           # gpu, default version
 #   ./build-images.sh cpu       # cpu transcription-service variant
-#   ./build-images.sh gpu v0.9.1
+#   ./build-images.sh gpu v0.10.5.2
 
 PROFILE="${1:-gpu}"
-VERSION="${2:-v0.9.0}"
+VERSION="${2:-v0.10.5.2}"
 BASE_REPO="docker.ib-ci.com"
 
 echo "Building Vexa images (PROFILE=${PROFILE}, VERSION=${VERSION})"
