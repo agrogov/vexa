@@ -34,7 +34,7 @@ import { cn } from "@/lib/utils";
 import { vexaAPI } from "@/lib/api";
 import { toast } from "sonner";
 import { LanguagePicker } from "@/components/language-picker";
-import { type SegmentGroup, deduplicateByIdentity, sortByStartTime } from "@vexaai/transcript-rendering";
+import { type SegmentGroup, deduplicateSegments, sortSegments } from "@vexaai/transcript-rendering";
 import { format } from "date-fns";
 
 // Linkify URLs in chat message text — splits text into plain strings and clickable <a> elements
@@ -223,7 +223,7 @@ export function TranscriptViewer({
   // Dedup by segment_id when available, otherwise by absolute_start_time.
   const groupedSegments = useMemo(() => {
     const cleaned = segments.filter((seg) => !seg.text?.trimStart().startsWith("[Chat]") && seg.text?.trim());
-    const deduped = sortByStartTime(deduplicateByIdentity(cleaned));
+    const deduped = deduplicateSegments(sortSegments(cleaned));
 
     // Wrap each segment as its own group (1 segment per group)
     return deduped.map((seg): SegmentGroup<typeof seg> => ({

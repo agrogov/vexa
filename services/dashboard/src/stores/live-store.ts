@@ -1,9 +1,9 @@
 import { create } from "zustand";
 import type { Meeting, TranscriptSegment, Platform, MeetingStatus } from "@/types/vexa";
 import {
-  sortByStartTime,
-  addSegment,
-  bootstrapSegments,
+  sortSegments,
+  upsertSegments,
+  deduplicateSegments,
 } from "@vexaai/transcript-rendering";
 
 interface LiveMeetingState {
@@ -47,16 +47,22 @@ export const useLiveStore = create<LiveMeetingState>((set, get) => ({
 
   addLiveTranscript: (segment: TranscriptSegment) => {
     const { liveTranscripts } = get();
-    set({ liveTranscripts: sortByStartTime(addSegment(liveTranscripts, segment)) });
+    const map = new Map(liveTranscripts.map(s => [s.segment_id || s.absolute_start_time, s]));
+    upsertSegments(map, [segment]);
+    set({ liveTranscripts: deduplicateSegments(sortSegments([...map.values()])) });
   },
 
   updateLiveTranscript: (segment: TranscriptSegment) => {
     const { liveTranscripts } = get();
-    set({ liveTranscripts: sortByStartTime(addSegment(liveTranscripts, segment)) });
+    const map = new Map(liveTranscripts.map(s => [s.segment_id || s.absolute_start_time, s]));
+    upsertSegments(map, [segment]);
+    set({ liveTranscripts: deduplicateSegments(sortSegments([...map.values()])) });
   },
 
   bootstrapLiveTranscripts: (segments: TranscriptSegment[]) => {
-    set({ liveTranscripts: sortByStartTime(bootstrapSegments(segments)) });
+    const map = new Map<string, TranscriptSegment>();
+    upsertSegments(map, segments);
+    set({ liveTranscripts: deduplicateSegments(sortSegments([...map.values()])) });
   },
 
   setBotStatus: (status: MeetingStatus) => {

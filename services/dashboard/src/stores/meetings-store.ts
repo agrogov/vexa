@@ -2,9 +2,36 @@ import { create } from "zustand";
 import type { Meeting, TranscriptSegment, Platform, MeetingStatus, RecordingData, ChatMessage } from "@/types/vexa";
 import { VexaAPIError, vexaAPI } from "@/lib/api";
 import {
-  type TranscriptManager,
-  createTranscriptManager,
+  sortSegments,
+  upsertSegments,
+  deduplicateSegments,
 } from "@vexaai/transcript-rendering";
+
+interface TranscriptManager {
+  bootstrap(segments: TranscriptSegment[]): TranscriptSegment[];
+  handleMessage(msg: { type: string; speaker?: string; confirmed: TranscriptSegment[]; pending?: TranscriptSegment[] }): TranscriptSegment[] | null;
+}
+
+function createTranscriptManager(): TranscriptManager {
+  const segments = new Map<string, TranscriptSegment>();
+
+  const toSortedArray = (): TranscriptSegment[] =>
+    deduplicateSegments(sortSegments([...segments.values()]));
+
+  return {
+    bootstrap(incoming: TranscriptSegment[]): TranscriptSegment[] {
+      segments.clear();
+      upsertSegments(segments, incoming);
+      return toSortedArray();
+    },
+    handleMessage(msg): TranscriptSegment[] | null {
+      const all = [...(msg.confirmed || []), ...(msg.pending || [])];
+      if (all.length === 0) return null;
+      upsertSegments(segments, all);
+      return toSortedArray();
+    },
+  };
+}
 
 interface MeetingDataUpdate {
   name?: string;
@@ -29,7 +56,7 @@ interface MeetingsState {
   chatMessages: ChatMessage[];
 
   // Internal state for best-known-transcript model
-  _manager: TranscriptManager<TranscriptSegment>;
+  _manager: TranscriptManager;
 
   // Pagination
   hasMore: boolean;
