@@ -17,6 +17,7 @@ COPY services/dashboard/src ./src
 COPY services/dashboard/public ./public
 COPY services/dashboard/next.config.ts services/dashboard/tsconfig.json services/dashboard/postcss.config.mjs services/dashboard/eslint.config.mjs ./
 COPY services/dashboard/components.json ./
+COPY services/dashboard/scripts ./scripts
 
 ARG NEXT_PUBLIC_VEXA_OSS_VERSION
 ARG NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE
