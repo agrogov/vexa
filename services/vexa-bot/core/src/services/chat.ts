@@ -668,7 +668,7 @@ export class MeetingChatService {
 
             // Try to find sender name
             let sender = 'Unknown';
-            const parentMsg = el.closest('[data-tid*="chat-pane-message"]') || el.parentElement;
+            const parentMsg = el.closest('[data-tid*="chat-pane-item"]') || el.closest('[data-tid*="chat-pane-message"]') || el.parentElement;
             if (parentMsg) {
               const senderEl = parentMsg.querySelector('[data-tid*="message-author"]') ||
                               parentMsg.querySelector('.ui-chat__messageheader__author');
