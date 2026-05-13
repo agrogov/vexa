@@ -1,0 +1,98 @@
+{{- if .Values.runtimeApi.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vexa.componentName" (list . "runtime-api-profiles") }}
+  labels:
+    {{- include "vexa.labels" . | nindent 4 }}
+data:
+  profiles.yaml: |
+    profiles:
+      meeting:
+        image: "${BROWSER_IMAGE}"
+        command: ["/app/vexa-bot/entrypoint.sh"]
+        working_dir: "/app/vexa-bot"
+        idle_timeout: 0
+        auto_remove: false
+        resources:
+          shm_size: 2147483648
+          {{- if .Values.runtimeApi.browser.resources }}
+          cpu_request: {{ .Values.runtimeApi.browser.resources.requests.cpu | quote }}
+          cpu_limit: {{ .Values.runtimeApi.browser.resources.limits.cpu | quote }}
+          memory_request: {{ .Values.runtimeApi.browser.resources.requests.memory | quote }}
+          memory_limit: {{ .Values.runtimeApi.browser.resources.limits.memory | quote }}
+          {{- end }}
+        {{- if .Values.runtimeApi.browser.nodeSelector }}
+        node_selector: {{ .Values.runtimeApi.browser.nodeSelector | fromJson | toYaml | nindent 10 }}
+        {{- end }}
+        k8s_overrides:
+          tolerations: []
+        env:
+          DISPLAY: "${DISPLAY:-:99}"
+          NODE_ENV: "production"
+          REDIS_URL: "${REDIS_URL}"
+          TRANSCRIPTION_SERVICE_URL: "${TRANSCRIPTION_SERVICE_URL}"
+          TRANSCRIPTION_SERVICE_TOKEN: "${TRANSCRIPTION_SERVICE_TOKEN}"
+          MEETING_API_URL: "${MEETING_API_URL}"
+          RECORDING_ENABLED: "${RECORDING_ENABLED:-true}"
+          STORAGE_BACKEND: "${STORAGE_BACKEND:-minio}"
+          MINIO_ENDPOINT: "${MINIO_ENDPOINT}"
+          MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY}"
+          MINIO_SECRET_KEY: "${MINIO_SECRET_KEY}"
+          MINIO_BUCKET: "${MINIO_BUCKET:-vexa}"
+          MINIO_SECURE: "${MINIO_SECURE:-false}"
+        ports:
+          "9222/tcp": {}
+
+      browser-session:
+        image: "${BROWSER_IMAGE}"
+        command: ["/app/vexa-bot/entrypoint.sh"]
+        working_dir: "/app/vexa-bot"
+        idle_timeout: 3600
+        auto_remove: false
+        resources:
+          shm_size: 2147483648
+          {{- if .Values.runtimeApi.browser.resources }}
+          cpu_request: {{ .Values.runtimeApi.browser.resources.requests.cpu | quote }}
+          cpu_limit: {{ .Values.runtimeApi.browser.resources.limits.cpu | quote }}
+          memory_request: {{ .Values.runtimeApi.browser.resources.requests.memory | quote }}
+          memory_limit: {{ .Values.runtimeApi.browser.resources.limits.memory | quote }}
+          {{- end }}
+        {{- if .Values.runtimeApi.browser.nodeSelector }}
+        node_selector: {{ .Values.runtimeApi.browser.nodeSelector | fromJson | toYaml | nindent 10 }}
+        {{- end }}
+        k8s_overrides:
+          tolerations: []
+        env:
+          DISPLAY: "${DISPLAY:-:99}"
+          NODE_ENV: "production"
+          REDIS_URL: "${REDIS_URL}"
+          MEETING_API_URL: "${MEETING_API_URL}"
+          RECORDING_ENABLED: "${RECORDING_ENABLED:-true}"
+          STORAGE_BACKEND: "${STORAGE_BACKEND:-minio}"
+          MINIO_ENDPOINT: "${MINIO_ENDPOINT}"
+          MINIO_ACCESS_KEY: "${MINIO_ACCESS_KEY}"
+          MINIO_SECRET_KEY: "${MINIO_SECRET_KEY}"
+          MINIO_BUCKET: "${MINIO_BUCKET:-vexa}"
+          MINIO_SECURE: "${MINIO_SECURE:-false}"
+        ports:
+          "6080/tcp": {}
+          "9222/tcp": {}
+          "9223/tcp": {}
+
+      agent:
+        image: "${AGENT_IMAGE}"
+        command: ["sleep", "infinity"]
+        idle_timeout: {{ .Values.agentApi.idleTimeout | default "300" }}
+        auto_remove: false
+        resources:
+          {{- if .Values.agentApi.agent.resources }}
+          cpu_request: {{ .Values.agentApi.agent.resources.requests.cpu | quote }}
+          cpu_limit: {{ .Values.agentApi.agent.resources.limits.cpu | quote }}
+          memory_request: {{ .Values.agentApi.agent.resources.requests.memory | quote }}
+          memory_limit: {{ .Values.agentApi.agent.resources.limits.memory | quote }}
+          {{- end }}
+        {{- if .Values.agentApi.agent.nodeSelector }}
+        node_selector: {{ .Values.agentApi.agent.nodeSelector | fromJson | toYaml | nindent 10 }}
+        {{- end }}
+{{- end }}

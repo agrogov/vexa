@@ -7,9 +7,6 @@ metadata:
     {{- include "vexa.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.ttsService.replicaCount }}
-  # TTS uses Recreate (not the default RollingUpdate) because its PVC for
-  # voice models cannot be mounted by two pods; a maxSurge > 0 rollout
-  # would stall.
   strategy:
     type: Recreate
   selector:
@@ -26,8 +23,6 @@ spec:
     spec:
       securityContext:
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
-      # v0.10.5 Pack I.s — stateful-pod anti-affinity (#272 iter-5).
-      # See deployment-minio.yaml header for the full rationale.
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -51,36 +46,60 @@ spec:
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           ports:
             - name: http
-              containerPort: 8002
+              containerPort: {{ .Values.ttsService.service.port }}
           env:
+            {{- with .Values.ttsService.config.piperVoicesDir }}
+            - name: PIPER_VOICES_DIR
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.ttsService.config.defaultVoices }}
+            - name: PIPER_DEFAULT_VOICES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.ttsService.config.outputSampleRate }}
+            - name: TTS_OUTPUT_SAMPLE_RATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.ttsService.auth.apiToken }}
             - name: TTS_API_TOKEN
-              value: {{ .Values.ttsService.apiToken | default "" | quote }}
+              value: {{ .Values.ttsService.auth.apiToken | quote }}
+            {{- else if .Values.ttsService.auth.existingSecretName }}
+            - name: TTS_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ttsService.auth.existingSecretName | quote }}
+                  key: {{ .Values.ttsService.auth.secretKey | default "TTS_API_TOKEN" | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.ttsService.logLevel | default "INFO" | quote }}
             {{- with .Values.ttsService.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- if .Values.ttsService.persistence.enabled }}
           volumeMounts:
             - name: voices
-              mountPath: /app/voices
+              mountPath: {{ .Values.ttsService.config.piperVoicesDir | default "/app/voices" }}
+          {{- end }}
           readinessProbe:
             httpGet:
-              path: /docs
+              path: /health
               port: http
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /docs
+              path: /health
               port: http
-            initialDelaySeconds: 45
+            initialDelaySeconds: 30
             periodSeconds: 20
           resources:
             {{- toYaml .Values.ttsService.resources | nindent 12 }}
+      {{- if .Values.ttsService.persistence.enabled }}
       volumes:
         - name: voices
           persistentVolumeClaim:
             claimName: {{ include "vexa.componentName" (list . "tts-voices") }}
+      {{- end }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

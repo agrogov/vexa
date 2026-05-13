@@ -1,25 +1,25 @@
-{{- if .Values.migrations.enabled }}
-apiVersion: batch/v1
-kind: Job
+{{- if .Values.calendarService.enabled }}
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: {{ include "vexa.componentName" (list . "migrations") }}-{{ .Chart.AppVersion | replace "." "-" }}
+  name: {{ include "vexa.componentName" (list . "calendar-service") }}
   labels:
     {{- include "vexa.labels" . | nindent 4 }}
-  annotations:
-    "helm.sh/hook": pre-upgrade
-    "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation
-    argocd.argoproj.io/hook: PreSync
-    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
-  backoffLimit: {{ .Values.migrations.backoffLimit }}
+  replicas: {{ .Values.calendarService.replicaCount }}
+  {{- include "vexa.deploymentStrategy" . | nindent 2 }}
+  selector:
+    matchLabels:
+      {{- include "vexa.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: calendar-service
   template:
     metadata:
       labels:
         {{- include "vexa.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: migrations
+        app.kubernetes.io/component: calendar-service
+      annotations:
+        {{- toYaml .Values.global.podAnnotations | nindent 8 }}
     spec:
-      restartPolicy: Never
       securityContext:
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
       {{- with .Values.global.imagePullSecrets }}
@@ -27,18 +27,14 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
-        - name: migrations
+        - name: calendar-service
           securityContext:
             {{- toYaml .Values.global.securityContext | nindent 12 }}
-          image: "{{ default .Values.meetingApi.image.repository .Values.migrations.image.repository }}:{{ default .Values.meetingApi.image.tag .Values.migrations.image.tag }}"
+          image: "{{ .Values.calendarService.image.repository }}:{{ .Values.global.imageTag | default .Values.calendarService.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -e
-              echo "Running idempotent schema sync..."
-              python -c "import asyncio; from meeting_api.database import init_db; asyncio.run(init_db()); print('Schema sync complete.')"
+          ports:
+            - name: http
+              containerPort: 8050
           env:
             - name: DB_HOST
               value: {{ include "vexa.dbHostEffective" . | quote }}
@@ -73,8 +69,41 @@ spec:
               {{- else }}
               value: {{ .Values.database.password | quote }}
               {{- end }}
+            - name: MEETING_API_URL
+              value: {{ printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "meeting-api")) .Release.Namespace .Values.global.clusterDomain (.Values.meetingApi.service.port | int) | quote }}
+            - name: BOT_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.adminTokenSecretName" . }}
+                  key: ADMIN_API_TOKEN
+            - name: LOG_LEVEL
+              value: {{ .Values.calendarService.logLevel | default "INFO" | quote }}
+            {{- with .Values.calendarService.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if and .Values.calendarService.extraSecretName .Values.calendarService.extraSecretEnv }}
+            {{- range $name, $key := .Values.calendarService.extraSecretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.calendarService.extraSecretName | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
           resources:
-            {{- toYaml .Values.migrations.resources | nindent 12 }}
+            {{- toYaml .Values.calendarService.resources | nindent 12 }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

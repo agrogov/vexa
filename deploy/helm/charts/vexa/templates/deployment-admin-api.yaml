@@ -41,22 +41,34 @@ spec:
             - name: DB_PORT
               value: {{ include "vexa.dbPortEffective" . | quote }}
             - name: DB_NAME
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_DB
+              {{- else }}
+              value: {{ .Values.database.name | quote }}
+              {{- end }}
             - name: DB_USER
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_USER
+              {{- else }}
+              value: {{ .Values.database.user | quote }}
+              {{- end }}
             - name: DB_SSL_MODE
               value: {{ .Values.database.sslMode | quote }}
             - name: DB_PASSWORD
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_PASSWORD
+              {{- else }}
+              value: {{ .Values.database.password | quote }}
+              {{- end }}
             - name: ADMIN_API_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -67,8 +79,19 @@ spec:
                 secretKeyRef:
                   name: {{ include "vexa.adminTokenSecretName" . }}
                   key: INTERNAL_API_SECRET
+            - name: LOG_LEVEL
+              value: {{ .Values.adminApi.logLevel | default "INFO" | quote }}
             {{- with .Values.adminApi.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if and .Values.adminApi.extraSecretName .Values.adminApi.extraSecretEnv }}
+            {{- range $name, $key := .Values.adminApi.extraSecretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.adminApi.extraSecretName | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
             {{- end }}
           readinessProbe:
             httpGet:

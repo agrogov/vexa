@@ -1,0 +1,17 @@
+{{- if .Values.calendarService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "vexa.componentName" (list . "calendar-service") }}
+  labels:
+    {{- include "vexa.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.calendarService.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.calendarService.service.port }}
+      targetPort: http
+  selector:
+    {{- include "vexa.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: calendar-service
+{{- end }}

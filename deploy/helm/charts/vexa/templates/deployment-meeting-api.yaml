@@ -41,22 +41,34 @@ spec:
             - name: DB_PORT
               value: {{ include "vexa.dbPortEffective" . | quote }}
             - name: DB_NAME
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_DB
+              {{- else }}
+              value: {{ .Values.database.name | quote }}
+              {{- end }}
             - name: DB_USER
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_USER
+              {{- else }}
+              value: {{ .Values.database.user | quote }}
+              {{- end }}
             - name: DB_SSL_MODE
               value: {{ .Values.database.sslMode | quote }}
             - name: DB_PASSWORD
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_PASSWORD
+              {{- else }}
+              value: {{ .Values.database.password | quote }}
+              {{- end }}
             - name: REDIS_URL
               value: {{ include "vexa.redisUrl" . | quote }}
             - name: REDIS_HOST
@@ -75,32 +87,82 @@ spec:
                   key: INTERNAL_API_SECRET
             - name: RUNTIME_API_URL
               value: "http://{{ include "vexa.componentName" (list . "runtime-api") }}:{{ .Values.runtimeApi.service.port }}"
+            {{- if .Values.meetingApi.runtimeApiToken }}
+            - name: RUNTIME_API_TOKEN
+              value: {{ .Values.meetingApi.runtimeApiToken | quote }}
+            {{- else if .Values.secrets.existingSecretName }}
+            - name: RUNTIME_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.adminTokenSecretName" . }}
+                  key: TRANSCRIBER_API_KEY
+            {{- end }}
             - name: MEETING_API_URL
               value: "http://{{ include "vexa.componentName" (list . "meeting-api") }}:{{ .Values.meetingApi.service.port }}"
             - name: TRANSCRIPTION_COLLECTOR_URL
               value: "http://{{ include "vexa.componentName" (list . "meeting-api") }}:{{ .Values.meetingApi.service.port }}"
             - name: BOT_IMAGE_NAME
-              value: {{ .Values.meetingApi.botImageName | default "vexaai/vexa-bot:latest" | quote }}
+              value: {{ .Values.meetingApi.bot.image | default "vexaai/vexa-bot:latest" | quote }}
+            - name: BOT_IMAGE_PULL_POLICY
+              value: {{ .Values.global.imagePullPolicy | quote }}
+            {{- $pullSecrets := default .Values.global.imagePullSecrets .Values.meetingApi.bot.imagePullSecrets }}
+            {{- if $pullSecrets }}
+            - name: BOT_IMAGE_PULL_SECRETS
+              value: {{ $pullSecrets | toJson | quote }}
+            {{- end }}
+            {{- if .Values.meetingApi.bot.nodeSelector }}
+            - name: BOT_NODE_SELECTOR
+              value: {{ .Values.meetingApi.bot.nodeSelector | quote }}
+            {{- end }}
+            {{- with .Values.meetingApi.bot.resources }}
+            - name: BOT_POD_CPU_REQUEST
+              value: {{ .requests.cpu | quote }}
+            - name: BOT_POD_MEMORY_REQUEST
+              value: {{ .requests.memory | quote }}
+            - name: BOT_POD_CPU_LIMIT
+              value: {{ .limits.cpu | quote }}
+            - name: BOT_POD_MEMORY_LIMIT
+              value: {{ .limits.memory | quote }}
+            {{- end }}
             - name: TTS_SERVICE_URL
               value: "http://{{ include "vexa.componentName" (list . "tts-service") }}:{{ .Values.ttsService.service.port }}"
             - name: TRANSCRIPTION_SERVICE_URL
-              value: {{ .Values.meetingApi.transcriptionServiceUrl | default "" | quote }}
+              value: {{ default (printf "http://%s.%s.svc.%s:%d/v1/audio/transcriptions" (include "vexa.componentName" (list . "transcription-service")) .Release.Namespace .Values.global.clusterDomain (.Values.transcriptionService.service.port | int)) .Values.meetingApi.transcriptionServiceUrl | quote }}
+            {{- if .Values.meetingApi.transcriptionServiceToken }}
+            - name: TRANSCRIPTION_SERVICE_TOKEN
+              value: {{ .Values.meetingApi.transcriptionServiceToken | quote }}
+            {{- else if .Values.secrets.existingSecretName }}
             - name: TRANSCRIPTION_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "vexa.adminTokenSecretName" . }}
-                  key: TRANSCRIPTION_SERVICE_TOKEN
+                  key: TRANSCRIBER_API_KEY
+            {{- end }}
             - name: RECORDING_ENABLED
               value: {{ required "meetingApi.recordingEnabled must be set" .Values.meetingApi.recordingEnabled | quote }}
+            {{- with .Values.meetingApi.captureModes }}
+            - name: CAPTURE_MODES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.meetingApi.postMeetingHooks }}
+            - name: POST_MEETING_HOOKS
+              value: {{ . | quote }}
+            {{- end }}
             - name: STORAGE_BACKEND
               value: {{ .Values.meetingApi.storageBackend | default "minio" | quote }}
             {{- if .Values.minio.enabled }}
             - name: MINIO_ENDPOINT
               value: "{{ include "vexa.componentName" (list . "minio") }}:{{ .Values.minio.service.port }}"
             - name: MINIO_ACCESS_KEY
-              value: {{ .Values.minio.accessKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.minioSecretName" . }}
+                  key: MINIO_ROOT_USER
             - name: MINIO_SECRET_KEY
-              value: {{ .Values.minio.secretKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.minioSecretName" . }}
+                  key: MINIO_ROOT_PASSWORD
             - name: MINIO_BUCKET
               value: {{ .Values.minio.bucket | quote }}
             {{- else }}
@@ -115,16 +177,24 @@ spec:
             {{- end }}
             - name: MINIO_SECURE
               value: {{ .Values.meetingApi.minioSecure | default "false" | quote }}
+            {{- with .Values.meetingApi.transcriptionGatewayUrl }}
+            - name: TRANSCRIPTION_GATEWAY_URL
+              value: {{ . | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.meetingApi.logLevel | default "INFO" | quote }}
             {{- with .Values.meetingApi.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
-          # v0.10.5 Pack C.4 — readinessProbe gated on consumer-up.
-          # /readyz returns 503 until startup_complete (Redis ping
-          # succeeded AND xgroup_create succeeded AND consumer tasks
-          # alive). K8s Service routes traffic only to Ready pods, so
-          # a pod with no working consumer never receives traffic.
+            {{- if and .Values.meetingApi.extraSecretName .Values.meetingApi.extraSecretEnv }}
+            {{- range $name, $key := .Values.meetingApi.extraSecretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.meetingApi.extraSecretName | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
@@ -132,7 +202,6 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
             failureThreshold: 3
-          # /health = HTTP-loop liveness (always 200 unless event loop wedges)
           livenessProbe:
             httpGet:
               path: /health

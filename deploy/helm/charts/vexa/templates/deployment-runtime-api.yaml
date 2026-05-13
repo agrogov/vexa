@@ -46,29 +46,47 @@ spec:
             - name: DB_PORT
               value: {{ include "vexa.dbPortEffective" . | quote }}
             - name: DB_NAME
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_DB
+              {{- else }}
+              value: {{ .Values.database.name | quote }}
+              {{- end }}
             - name: DB_USER
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_USER
+              {{- else }}
+              value: {{ .Values.database.user | quote }}
+              {{- end }}
             - name: DB_SSL_MODE
               value: {{ .Values.database.sslMode | quote }}
             - name: DB_PASSWORD
+              {{- if .Values.postgres.enabled }}
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "vexa.postgresCredentialsSecretName" . | quote }}
+                  name: {{ .Values.postgres.credentialsSecretName | quote }}
                   key: POSTGRES_PASSWORD
+              {{- else }}
+              value: {{ .Values.database.password | quote }}
+              {{- end }}
             {{- if .Values.minio.enabled }}
             - name: MINIO_ENDPOINT
               value: "{{ include "vexa.componentName" (list . "minio") }}:{{ .Values.minio.service.port }}"
             - name: MINIO_ACCESS_KEY
-              value: {{ .Values.minio.accessKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.minioSecretName" . }}
+                  key: MINIO_ROOT_USER
             - name: MINIO_SECRET_KEY
-              value: {{ .Values.minio.secretKey | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vexa.minioSecretName" . }}
+                  key: MINIO_ROOT_PASSWORD
             - name: MINIO_BUCKET
               value: {{ .Values.minio.bucket | quote }}
             {{- else }}
@@ -86,7 +104,17 @@ spec:
             - name: ALLOW_PRIVATE_CALLBACKS
               value: "true"
             - name: BROWSER_IMAGE
-              value: {{ .Values.runtimeApi.browserImage | default (printf "%s:%s" .Values.meetingApi.image.repository .Values.meetingApi.image.tag) | quote }}
+              value: {{ .Values.runtimeApi.browser.image | default (printf "%s:%s" .Values.meetingApi.image.repository .Values.meetingApi.image.tag) | quote }}
+            {{- with (default .Values.runtimeApi.agentImage .Values.agentApi.agent.image) }}
+            - name: AGENT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.runtimeApi.apiKeys }}
+            - name: API_KEYS
+              value: {{ .Values.runtimeApi.apiKeys | quote }}
+            - name: BOT_API_TOKEN
+              value: {{ .Values.runtimeApi.apiKeys | quote }}
+            {{- end }}
             {{- if eq (default "process" .Values.runtimeApi.orchestrator) "kubernetes" }}
             - name: K8S_NAMESPACE
               valueFrom:
@@ -96,19 +124,33 @@ spec:
               value: {{ include "vexa.componentName" (list . "runtime-api") | quote }}
             - name: K8S_IMAGE_PULL_POLICY
               value: {{ .Values.global.imagePullPolicy | quote }}
+            {{- $pullSecrets := default .Values.global.imagePullSecrets .Values.runtimeApi.browser.imagePullSecrets }}
+            {{- if $pullSecrets }}
+            - name: K8S_IMAGE_PULL_SECRETS
+              value: {{ $pullSecrets | toJson | quote }}
+            {{- end }}
+            {{- if .Values.runtimeApi.browser.nodeSelector }}
+            - name: K8S_NODE_SELECTOR
+              value: {{ .Values.runtimeApi.browser.nodeSelector | quote }}
+            {{- end }}
+            {{- with .Values.runtimeApi.browser.resources }}
+            - name: K8S_BOT_CPU_REQUEST
+              value: {{ .requests.cpu | quote }}
+            - name: K8S_BOT_MEMORY_REQUEST
+              value: {{ .requests.memory | quote }}
+            - name: K8S_BOT_CPU_LIMIT
+              value: {{ .limits.cpu | quote }}
+            - name: K8S_BOT_MEMORY_LIMIT
+              value: {{ .limits.memory | quote }}
+            {{- end }}
             {{- end }}
             - name: TRANSCRIPTION_SERVICE_URL
-              value: {{ .Values.meetingApi.transcriptionServiceUrl | default "" | quote }}
+              value: {{ default (printf "http://%s.%s.svc.%s:%d/v1/audio/transcriptions" (include "vexa.componentName" (list . "transcription-service")) .Release.Namespace .Values.global.clusterDomain (.Values.transcriptionService.service.port | int)) .Values.meetingApi.transcriptionServiceUrl | quote }}
             - name: TRANSCRIPTION_SERVICE_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: {{ include "vexa.adminTokenSecretName" . }}
-                  key: TRANSCRIPTION_SERVICE_TOKEN
-            # v0.10.5 Pack B.3 — runtime-api needs MEETING_API_URL +
-            # RECORDING_ENABLED + STORAGE_BACKEND + MINIO_SECURE on its own
-            # env so profile-load-time `${VAR}` substitution resolves the
-            # values into bot pods' env (#235). meeting-api/redis/minio
-            # vars (above) cover the storage trio; these add the missing.
+                  key: TRANSCRIBER_API_KEY
             - name: MEETING_API_URL
               value: "http://{{ include "vexa.componentName" (list . "meeting-api") }}:{{ .Values.meetingApi.service.port | default 8080 }}"
             - name: RECORDING_ENABLED
@@ -124,6 +166,15 @@ spec:
             {{- with .Values.runtimeApi.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- if and .Values.runtimeApi.extraSecretName .Values.runtimeApi.extraSecretEnv }}
+            {{- range $name, $key := .Values.runtimeApi.extraSecretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.runtimeApi.extraSecretName | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /docs
@@ -136,20 +187,16 @@ spec:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 20
-          {{- if .Values.runtimeApi.profilesConfigMap }}
           volumeMounts:
             - name: profiles
               mountPath: /app/profiles.yaml
               subPath: profiles.yaml
-          {{- end }}
           resources:
             {{- toYaml .Values.runtimeApi.resources | nindent 12 }}
-      {{- if .Values.runtimeApi.profilesConfigMap }}
       volumes:
         - name: profiles
           configMap:
-            name: {{ .Values.runtimeApi.profilesConfigMap }}
-      {{- end }}
+            name: {{ include "vexa.componentName" (list . "runtime-api-profiles") }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -46,17 +46,38 @@ spec:
               value: "http://{{ include "vexa.componentName" (list . "meeting-api") }}:{{ .Values.meetingApi.service.port }}"
             - name: MCP_URL
               value: {{ default (printf "http://%s:%d" (include "vexa.componentName" (list . "mcp")) (.Values.mcp.service.port | int)) .Values.apiGateway.mcpUrl | quote }}
+            - name: AGENT_API_URL
+              value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "agent-api")) .Release.Namespace .Values.global.clusterDomain (.Values.agentApi.service.port | int)) .Values.apiGateway.agentApiUrl | quote }}
             - name: REDIS_URL
               value: {{ include "vexa.redisUrl" . | quote }}
             - name: REDIS_HOST
-              value: {{ include "vexa.redisUrl" . | quote }}
+              value: {{ include "vexa.redisHost" . | quote }}
             - name: INTERNAL_API_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "vexa.adminTokenSecretName" . }}
                   key: INTERNAL_API_SECRET
+            {{- with .Values.apiGateway.rateLimitRpm }}
+            - name: RATE_LIMIT_RPM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.apiGateway.corsOrigins }}
+            - name: CORS_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.apiGateway.logLevel | default "INFO" | quote }}
             {{- with .Values.apiGateway.extraEnv }}
             {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if and .Values.apiGateway.extraSecretName .Values.apiGateway.extraSecretEnv }}
+            {{- range $name, $key := .Values.apiGateway.extraSecretEnv }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.apiGateway.extraSecretName | quote }}
+                  key: {{ $key | quote }}
+            {{- end }}
             {{- end }}
           readinessProbe:
             httpGet:

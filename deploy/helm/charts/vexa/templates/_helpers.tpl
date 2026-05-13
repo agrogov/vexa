@@ -65,13 +65,6 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
-{{- /*
-  vexa.dbHostEffective — the host every service SHOULD point at for DB.
-  When pgbouncer.enabled=true, routes through the pgbouncer Service.
-  Otherwise falls through to vexa.dbHost (direct Postgres). PgBouncer's
-  own Deployment bypasses this helper and uses vexa.dbHost directly to
-  avoid pointing at itself.
-*/ -}}
 {{- define "vexa.dbHostEffective" -}}
 {{- if .Values.pgbouncer.enabled -}}
 {{- include "vexa.componentName" (list . "pgbouncer") -}}
@@ -88,19 +81,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
-{{- define "vexa.adminTokenSecretName" -}}
-{{- if .Values.secrets.existingSecretName -}}
-{{- .Values.secrets.existingSecretName -}}
-{{- else -}}
-{{- include "vexa.componentName" (list . "secrets") -}}
-{{- end -}}
-{{- end -}}
-
 {{- define "vexa.postgresCredentialsSecretName" -}}
 {{- if .Values.postgres.enabled -}}
 {{- .Values.postgres.credentialsSecretName | default "postgres-credentials" -}}
 {{- else -}}
-{{- required "postgres.credentialsSecretName must name a pre-existing Secret when postgres.enabled=false (keys: POSTGRES_PASSWORD, POSTGRES_USER, POSTGRES_DB)" .Values.postgres.credentialsSecretName -}}
+{{- required "postgres.credentialsSecretName must name a pre-existing Secret when postgres.enabled=false" .Values.postgres.credentialsSecretName -}}
 {{- end -}}
 {{- end -}}
 
@@ -112,26 +97,27 @@ strategy:
     maxUnavailable: 1
 {{- end -}}
 
-{{/*
-v0.10.5 Pack C.5 — Redis durability paired invariant.
-
-AOF (appendonly + appendfsync) is the per-write durability mechanism.
-`stop-writes-on-bgsave-error: no` allows writes to continue when the
-snapshot mechanism fails (block-volume hiccup, disk-full, fsync stall) —
-which is non-blocking when AOF is on. Setting `stop-writes-on-bgsave-error: yes`
-WITHOUT `appendonly: yes` would create a write-loss window: Redis would
-accept writes that aren't durable anywhere if BGSAVE fails. Refuse to render.
-
-The 2026-04-21 redis-storage-cascade incident was triggered by exactly
-this anti-pattern: BGSAVE failed, default `stop-writes-on-bgsave-error: yes`
-froze writes for 46 min. With AOF + bgsave-error: no, BGSAVE failures
-become non-blocking. Industry-standard Redis-as-stream-buffer config.
-*/}}
 {{- define "vexa.validateRedisDurability" -}}
 {{- $aof := .Values.redis.durability.appendonly | default "yes" -}}
 {{- $bgsaveBlocks := .Values.redis.durability.stopWritesOnBgsaveError | default "no" -}}
 {{- if and (eq $bgsaveBlocks "yes") (ne $aof "yes") -}}
-{{- required "INVALID redis.durability config: stopWritesOnBgsaveError=yes requires appendonly=yes (paired AOF + BGSAVE durability invariant — see v0.10.5 Pack C.5). Without AOF, blocking writes on BGSAVE failure means writes that arrive while BGSAVE is failing have no durable record anywhere." "" -}}
+{{- required "INVALID redis.durability config: stopWritesOnBgsaveError=yes requires appendonly=yes" "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "vexa.adminTokenSecretName" -}}
+{{- if .Values.secrets.existingSecretName -}}
+{{- .Values.secrets.existingSecretName -}}
+{{- else -}}
+{{- include "vexa.componentName" (list . "secrets") -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "vexa.minioSecretName" -}}
+{{- if .Values.minio.existingSecretName -}}
+{{- .Values.minio.existingSecretName -}}
+{{- else -}}
+{{- include "vexa.componentName" (list . "minio-credentials") -}}
 {{- end -}}
 {{- end -}}
 

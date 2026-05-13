@@ -40,6 +40,8 @@ spec:
               value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "api-gateway")) .Release.Namespace .Values.global.clusterDomain (.Values.apiGateway.service.port | int)) .Values.dashboard.vexaApiUrl | quote }}
             - name: VEXA_ADMIN_API_URL
               value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "admin-api")) .Release.Namespace .Values.global.clusterDomain (.Values.adminApi.service.port | int)) .Values.dashboard.vexaAdminApiUrl | quote }}
+            - name: AGENT_API_URL
+              value: {{ default (printf "http://%s.%s.svc.%s:%d" (include "vexa.componentName" (list . "agent-api")) .Release.Namespace .Values.global.clusterDomain (.Values.agentApi.service.port | int)) .Values.dashboard.agentApiUrl | quote }}
             - name: VEXA_ADMIN_API_KEY
               valueFrom:
                 secretKeyRef:

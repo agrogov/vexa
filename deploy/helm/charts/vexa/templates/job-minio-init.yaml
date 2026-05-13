@@ -8,10 +8,6 @@ metadata:
   annotations:
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "5"
-    # v0.10.5 Pack A.3 — drop `hook-succeeded` from delete-policy so failed
-    # Jobs stay around for diagnosis. The original policy auto-deleted on
-    # success which was fine, but auto-deleted on failure too — leaving no
-    # trace when subsequent runs failed (#249).
     "helm.sh/hook-delete-policy": before-hook-creation
 spec:
   backoffLimit: 5
@@ -30,14 +26,6 @@ spec:
         - name: minio-init
           image: docker.ib-ci.com/minio/mc:latest
           imagePullPolicy: IfNotPresent
-          # v0.10.5 Pack A.3 — replace `sleep 5` with poll-until-ready (#249).
-          # On a fresh PVC, MinIO can take 30+ seconds to attach + initialize.
-          # Hardcoded 5s sleep races MinIO startup → `mc mb` runs against an
-          # unready server → bucket never created → recordings 500 forever
-          # with `NoSuchBucket`. Polling `mc ready` (or fallback HTTP probe)
-          # waits up to 120s for genuine readiness; if MinIO genuinely isn't
-          # up after 2 minutes, exit non-zero so the Job retries (backoffLimit=5)
-          # and the failure is visible in `kubectl get jobs`.
           command:
             - /bin/sh
             - -c
@@ -54,11 +42,9 @@ spec:
                 echo "MinIO not ready yet (attempt $attempt/24), sleeping 5s..."
                 sleep 5
               done
-              # Final readiness check — fail loud if MinIO genuinely isn't up
               mc admin info vexa
               mc mb --ignore-existing vexa/{{ .Values.minio.bucket }}
               echo "Bucket {{ .Values.minio.bucket }} ensured"
-              exit 0
           env:
             - name: MINIO_ROOT_USER
               {{- if .Values.minio.existingSecretName }}

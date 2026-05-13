@@ -7,6 +7,7 @@ metadata:
     {{- include "vexa.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.transcriptionService.replicaCount }}
+  {{- include "vexa.deploymentStrategy" . | nindent 2 }}
   selector:
     matchLabels:
       {{- include "vexa.selectorLabels" . | nindent 6 }}
@@ -32,10 +33,12 @@ spec:
           image: "{{ .Values.transcriptionService.image.repository }}:{{ .Values.global.imageTag | default .Values.transcriptionService.image.tag }}"
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           {{- with .Values.transcriptionService.command }}
-          command: {{ toJson . }}
+          command:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.transcriptionService.args }}
-          args: {{ toJson . }}
+          args:
+            {{- toYaml . | nindent 12 }}
           {{- end }}
           ports:
             - name: http
@@ -67,17 +70,21 @@ spec:
             {{- with .Values.transcriptionService.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 45
             periodSeconds: 20
           resources:
             {{- toYaml .Values.transcriptionService.resources | nindent 12 }}
