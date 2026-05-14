@@ -432,7 +432,7 @@ export const teamsCaptionSelectors = {
   /** Top-level caption container. Present when captions are enabled AND someone has spoken. */
   rendererWrapper: '[data-tid="closed-caption-renderer-wrapper"]',
   /** @deprecated Host-only. Use authorName/captionText directly. */
-  captionItem: '[data-tid="closed-captions-v2-items-renderer"]',
+  captionItem: '[data-tid="author"]',
   /** Speaker name — stable across host and guest views. Pair with captionText by index. */
   authorName: '[data-tid="author"]',
   /** Caption text — stable across host and guest views. Pair with authorName by index. */
