@@ -1,4 +1,4 @@
-import type { Meeting, TranscriptSegment } from "@/types/vexa";
+import type { Meeting, TranscriptSegment, ChatMessage } from "@/types/vexa";
 import { format } from "date-fns";
 import { parseUTCTimestamp } from "@/lib/utils";
 
@@ -41,7 +41,7 @@ function formatDuration(startTime: string | null, endTime: string | null): strin
   return `${hours}h ${remainingMinutes}min`;
 }
 
-export function exportToTxt(meeting: Meeting, segments: TranscriptSegment[]): string {
+export function exportToTxt(meeting: Meeting, segments: TranscriptSegment[], chatMessages: ChatMessage[] = []): string {
   let output = "=".repeat(60) + "\n";
   output += `MEETING TRANSCRIPT\n`;
   output += "=".repeat(60) + "\n\n";
@@ -65,10 +65,27 @@ export function exportToTxt(meeting: Meeting, segments: TranscriptSegment[]): st
   output += "TRANSCRIPT\n";
   output += "-".repeat(60) + "\n\n";
 
-  for (const segment of segments) {
-    const time = formatTimestamp(segment.start_time);
-    output += `[${time}] ${segment.speaker}:\n`;
-    output += `${segment.text}\n\n`;
+  // Build a unified timeline of transcript segments and chat messages, sorted by time
+  type TxtItem =
+    | { kind: "segment"; ts: number; segment: TranscriptSegment }
+    | { kind: "chat"; ts: number; message: ChatMessage };
+
+  const items: TxtItem[] = [
+    ...segments.map((s) => ({ kind: "segment" as const, ts: s.start_time, segment: s })),
+    ...chatMessages.map((m) => ({ kind: "chat" as const, ts: m.timestamp / 1000, message: m })),
+  ];
+  items.sort((a, b) => a.ts - b.ts);
+
+  for (const item of items) {
+    if (item.kind === "segment") {
+      const time = formatTimestamp(item.segment.start_time);
+      output += `[${time}] ${item.segment.speaker}:\n`;
+      output += `${item.segment.text}\n\n`;
+    } else {
+      const time = formatTimestamp(item.ts);
+      output += `[${time}] [CHAT] ${item.message.sender}:\n`;
+      output += `${item.message.text}\n\n`;
+    }
   }
 
   output += "\n" + "=".repeat(60) + "\n";
@@ -79,7 +96,7 @@ export function exportToTxt(meeting: Meeting, segments: TranscriptSegment[]): st
   return output;
 }
 
-export function exportToJson(meeting: Meeting, segments: TranscriptSegment[]): string {
+export function exportToJson(meeting: Meeting, segments: TranscriptSegment[], chatMessages: ChatMessage[] = []): string {
   const exportData = {
     meeting: {
       id: meeting.id,
@@ -99,6 +116,12 @@ export function exportToJson(meeting: Meeting, segments: TranscriptSegment[]): s
       absolute_start_time: s.absolute_start_time,
       absolute_end_time: s.absolute_end_time,
       language: s.language,
+    })),
+    chat_messages: chatMessages.map((m) => ({
+      sender: m.sender,
+      text: m.text,
+      timestamp: m.timestamp,
+      is_from_bot: m.is_from_bot,
     })),
     exported_at: new Date().toISOString(),
   };

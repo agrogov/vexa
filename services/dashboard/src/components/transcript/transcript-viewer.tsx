@@ -458,11 +458,11 @@ export function TranscriptViewer({
 
     switch (format) {
       case "txt":
-        content = exportToTxt(meeting, segments);
+        content = exportToTxt(meeting, segments, chatMessages);
         mimeType = "text/plain";
         break;
       case "json":
-        content = exportToJson(meeting, segments);
+        content = exportToJson(meeting, segments, chatMessages);
         mimeType = "application/json";
         break;
       case "srt":
