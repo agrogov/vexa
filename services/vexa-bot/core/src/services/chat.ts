@@ -646,52 +646,50 @@ export class MeetingChatService {
   private async initTeamsObserver(): Promise<void> {
     const botName = this.botName;
     await this.page.evaluate((botNameArg: string) => {
-      const seenMessages = new Set<string>();
+      // Deduplicate by DOM element reference — immune to layout shifts and re-renders.
+      // WeakSet entries are GC'd automatically when elements leave the DOM.
+      const seenElements = new WeakSet<Element>();
 
       const scanForMessages = () => {
-        // Teams chat messages
-        const messageSelectors = [
-          '[data-tid*="chat-pane-message"]',
-          '.message-body',
-          '[data-tid*="messageBodyContent"]'
-        ];
+        // Use only the canonical message container selector to avoid processing the
+        // same logical message multiple times (inner selectors overlap with this one).
+        document.querySelectorAll('[data-tid*="chat-pane-message"]').forEach((el) => {
+          if (seenElements.has(el)) return;
+          seenElements.add(el);
 
-        for (const sel of messageSelectors) {
-          document.querySelectorAll(sel).forEach((el) => {
-            const text = el.textContent?.trim() || '';
-            if (!text) return;
+          // Extract text from the inner body element; fall back to the container itself.
+          const textEl = el.querySelector('[data-tid*="messageBodyContent"]') ||
+                         el.querySelector('.message-body') ||
+                         el;
+          const text = textEl.textContent?.trim() || '';
+          if (!text) return;
 
-            // Generate a unique key from content + position
-            const key = `${text}-${el.getBoundingClientRect().top}`;
-            if (seenMessages.has(key)) return;
-            seenMessages.add(key);
+          // Find sender name from the message author element.
+          let sender = 'Unknown';
+          const parentMsg = el.closest('[data-tid*="chat-pane-item"]') || el.parentElement;
+          if (parentMsg) {
+            const senderEl = parentMsg.querySelector('[data-tid*="message-author"]') ||
+                             parentMsg.querySelector('.ui-chat__messageheader__author');
+            if (senderEl) sender = senderEl.textContent?.trim() || 'Unknown';
+          }
 
-            // Try to find sender name
-            let sender = 'Unknown';
-            const parentMsg = el.closest('[data-tid*="chat-pane-item"]') || el.closest('[data-tid*="chat-pane-message"]') || el.parentElement;
-            if (parentMsg) {
-              const senderEl = parentMsg.querySelector('[data-tid*="message-author"]') ||
-                              parentMsg.querySelector('.ui-chat__messageheader__author');
-              if (senderEl) sender = senderEl.textContent?.trim() || 'Unknown';
-            }
-
-            try {
-              (window as any).__vexaChatMessage({
-                sender,
-                text,
-                timestamp: Date.now(),
-                isFromBot: sender === botNameArg
-              });
-            } catch {}
-          });
-        }
+          try {
+            (window as any).__vexaChatMessage({
+              sender,
+              text,
+              timestamp: Date.now(),
+              isFromBot: sender === botNameArg
+            });
+          } catch {}
+        });
       };
 
+      // childList+subtree is sufficient — new messages add DOM nodes, not text mutations.
+      // Removing characterData avoids flooding re-scans on typing indicators / timestamps.
       const observer = new MutationObserver(() => scanForMessages());
       observer.observe(document.body, {
         childList: true,
         subtree: true,
-        characterData: true
       });
 
       scanForMessages();
