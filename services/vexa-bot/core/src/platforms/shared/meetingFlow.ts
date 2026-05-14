@@ -3,6 +3,10 @@ import { BotConfig } from "../../types";
 import { log, callStartupCallback } from "../../utils";
 import { hasStopSignalReceived, triggerPostAdmissionCamera, triggerPostAdmissionChat, startVideoRecordingIfNeeded, enterBrowserFullscreen } from "../../index";
 import { enableTeamsLiveCaptions } from "../msteams/captions";
+import {
+  teamsPostJoinMediaDialogSelectors,
+  teamsPostJoinMediaDialogCloseSelector,
+} from "../msteams/selectors";
 
 export type AdmissionDecision = {
   admitted: boolean;
@@ -172,6 +176,22 @@ export async function runMeetingFlow(
           enableTeamsLiveCaptions(page).catch((err: any) => {
             log(`[Captions] Failed to enable live captions (non-fatal, falling back to DOM signals): ${err?.message || err}`);
           });
+
+          // Watchdog: dismiss the "Want to use your camera and mic?" info dialog
+          // that Teams occasionally shows post-admission. It has no action buttons —
+          // only a Close (X) button. Left open it blocks captions and other UI.
+          const dialogDetectSelector = teamsPostJoinMediaDialogSelectors.join(', ');
+          const modalWatchdog = setInterval(async () => {
+            if (page.isClosed()) { clearInterval(modalWatchdog); return; }
+            try {
+              const visible = await page.locator(dialogDetectSelector).first().isVisible({ timeout: 500 }).catch(() => false);
+              if (visible) {
+                log('[Teams] Post-join media dialog detected — dismissing...');
+                await page.locator(teamsPostJoinMediaDialogCloseSelector).first().click({ timeout: 3000 });
+                log('[Teams] ✅ Post-join media dialog dismissed');
+              }
+            } catch {}
+          }, 3000);
         }
       }
     } catch (error: any) {

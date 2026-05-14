@@ -283,6 +283,20 @@ export const teamsContinueWithoutMediaSelectors: string[] = [
   '[role="alertdialog"] button:has-text("Continue without audio or video")',
 ];
 
+// Post-join "Want to use your camera and mic for the meeting?" info dialog.
+// This dialog has no action buttons — dismiss via the Close (X) button only.
+// Detected from live DOM: [role="dialog"] with a <span> heading containing the text.
+export const teamsPostJoinMediaDialogSelectors: string[] = [
+  '[role="dialog"] span:text-matches("Want to use your camera and mic", "i")',
+  '[role="alertdialog"] span:text-matches("Want to use your camera and mic", "i")',
+];
+
+// Close button scoped inside this specific dialog to avoid matching other Fluent UI dialogs
+// (captions settings, device settings) that share the same ui-dialog__headerAction class.
+export const teamsPostJoinMediaDialogCloseSelector =
+  '[role="dialog"]:has(span:text-matches("Want to use your camera and mic", "i")) button[title="Close"],' +
+  '[role="alertdialog"]:has(span:text-matches("Want to use your camera and mic", "i")) button[title="Close"]';
+
 export const teamsJoinButtonSelectors: string[] = [
   // data-tid based (most reliable, works in both full and light experience)
   'button[data-tid="prejoin-join-button"]',
