@@ -454,11 +454,11 @@ export default function MeetingDetailPage() {
 
     switch (format) {
       case "txt":
-        content = exportToTxt(currentMeeting, transcripts);
+        content = exportToTxt(currentMeeting, transcripts, chatMessages);
         mimeType = "text/plain";
         break;
       case "json":
-        content = exportToJson(currentMeeting, transcripts);
+        content = exportToJson(currentMeeting, transcripts, chatMessages);
         mimeType = "application/json";
         break;
       case "srt":
@@ -473,7 +473,7 @@ export default function MeetingDetailPage() {
 
     const filename = generateFilename(currentMeeting, format);
     downloadFile(content, filename, mimeType);
-  }, [currentMeeting, transcripts]);
+  }, [currentMeeting, transcripts, chatMessages]);
 
   // Trigger download of a blob URL
   const triggerBlobDownload = useCallback((url: string, filename: string) => {
@@ -1270,7 +1270,7 @@ export default function MeetingDetailPage() {
                   <DropdownMenuItem
                     onClick={() => {
                       if (!currentMeeting || transcripts.length === 0) return;
-                      const text = exportToTxt(currentMeeting, transcripts);
+                      const text = exportToTxt(currentMeeting, transcripts, chatMessages);
                       navigator.clipboard.writeText(text).then(() => {
                         toast.success("Transcript copied to clipboard");
                       });
@@ -1617,7 +1617,7 @@ export default function MeetingDetailPage() {
                     <DropdownMenuItem
                       onClick={() => {
                         if (!currentMeeting || transcripts.length === 0) return;
-                        const text = exportToTxt(currentMeeting, transcripts);
+                        const text = exportToTxt(currentMeeting, transcripts, chatMessages);
                         navigator.clipboard.writeText(text).then(() => {
                           toast.success("Transcript copied to clipboard");
                         });
