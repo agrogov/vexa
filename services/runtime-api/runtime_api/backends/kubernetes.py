@@ -38,7 +38,18 @@ class KubernetesBackend(Backend):
             except k8s_config.ConfigException:
                 logger.error("Could not load Kubernetes config")
                 raise
-        self._api = client.CoreV1Api()
+        # kubernetes Python client v36 changed the security scheme name from
+        # 'authorization' to 'BearerToken'. load_incluster_config still writes
+        # into 'authorization', so the Authorization header is never sent.
+        # Re-key it so the generated API code picks it up.
+        cfg = client.Configuration.get_default_copy()
+        if 'authorization' in cfg.api_key and 'BearerToken' not in cfg.api_key:
+            token = cfg.api_key['authorization'].removeprefix('bearer ').removeprefix('Bearer ')
+            cfg.api_key = {'BearerToken': token}
+            cfg.api_key_prefix = {'BearerToken': 'Bearer'}
+            self._api = client.CoreV1Api(client.ApiClient(cfg))
+        else:
+            self._api = client.CoreV1Api()
         return self._api
 
     async def startup(self) -> None:
