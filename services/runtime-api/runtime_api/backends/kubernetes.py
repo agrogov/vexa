@@ -336,7 +336,8 @@ class KubernetesBackend(Backend):
                                     if cs.state and cs.state.terminated:
                                         exit_code = cs.state.terminated.exit_code or 0
                                 asyncio.run_coroutine_threadsafe(
-                                    on_exit(name, exit_code), loop,
+                                    _delete_and_report(api, ns, name, exit_code=exit_code, on_exit=on_exit),
+                                    loop,
                                 )
                             continue
 
@@ -381,14 +382,14 @@ class KubernetesBackend(Backend):
 
 
 async def _delete_and_report(api, ns: str, name: str, exit_code: int, on_exit: callable) -> None:
-    """Delete a stuck pod and fire the on_exit callback."""
+    """Delete a finished or stuck pod and fire the on_exit callback."""
     from kubernetes.client.rest import ApiException
     try:
         await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: api.delete_namespaced_pod(name=name, namespace=ns, grace_period_seconds=0),
         )
-        logger.info(f"Deleted stuck pod {name}")
+        logger.info(f"Deleted pod {name} (exit_code={exit_code})")
     except ApiException as e:
         if e.status != 404:
             logger.error(f"Failed to delete stuck pod {name}: {e.status}")
