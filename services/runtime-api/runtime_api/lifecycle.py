@@ -29,7 +29,7 @@ async def idle_loop(redis, backend: Backend) -> None:
     """Background task: stop idle containers + sweep pending exit callbacks
     + reconcile browser-session secondary index against primary container state.
 
-    Three responsibilities, one loop tick:
+    Four responsibilities, one loop tick:
       (1) Stop containers that have been idle past their profile's timeout.
       (2) Re-try any exit callback that has not yet been acknowledged by the
           consumer. This makes exit-callback delivery durable across consumer
@@ -41,6 +41,9 @@ async def idle_loop(redis, backend: Backend) -> None:
           stale browser_session entries vs 0 actual K8s pods — pods were
           reaped but the secondary index never reconciled, leading to the
           "Browser session not found or expired" UX symptom.
+      (4) Sweep completed/failed pods from the backend — catches pods that
+          finished while the watch loop was not running (runtime-api restart,
+          missed events, etc.).
 
     v0.10.5 Pack K.5 — heartbeat instrumentation logs the loop's tick
     rate. Without an external observable, can't tell whether the loop is
@@ -95,6 +98,19 @@ async def idle_loop(redis, backend: Backend) -> None:
                         await _fire_exit_callback(redis, name, exit_code=0)
                     except Exception:
                         logger.warning(f"Failed to stop idle container {name}", exc_info=True)
+
+            # Sweep completed/failed pods the watch loop may have missed.
+            try:
+                backend_containers = await backend.list()
+                for c in backend_containers:
+                    if c.status in ("exited", "failed"):
+                        try:
+                            await backend.remove(c.name)
+                            logger.info(f"idle_loop sweep: deleted completed pod {c.name} (status={c.status})")
+                        except Exception:
+                            logger.warning(f"idle_loop sweep: failed to delete {c.name}", exc_info=True)
+            except Exception:
+                logger.debug("idle_loop completed-pod sweep failed", exc_info=True)
 
             # Durable exit-callback sweep — re-deliver anything still pending.
             # This is the single mechanism that makes callback delivery
@@ -274,13 +290,28 @@ async def reconcile_state(redis, backend: Backend) -> None:
 
     Containers that exist in the backend but not in Redis get added.
     Redis entries for containers that no longer exist get marked stopped.
+    Completed/failed pods left over from a previous runtime-api instance
+    (which could not fire the watch-loop deletion) are deleted here.
     """
     try:
         backend_containers = await backend.list()
         backend_names = set()
         count = 0
+        cleaned = 0
 
         for c in backend_containers:
+            # Delete pods that already finished — they were not cleaned up
+            # because the watch loop only deletes pods it observes transitioning;
+            # pods that completed while runtime-api was down survive restarts.
+            if c.status in ("exited", "failed"):
+                try:
+                    await backend.remove(c.name)
+                    cleaned += 1
+                    logger.info(f"Startup sweep: deleted completed pod {c.name} (status={c.status})")
+                except Exception:
+                    logger.warning(f"Startup sweep: failed to delete {c.name}", exc_info=True)
+                continue
+
             backend_names.add(c.name)
             data = {
                 "status": c.status,
@@ -303,7 +334,7 @@ async def reconcile_state(redis, backend: Backend) -> None:
                 await state.set_stopped(redis, rname)
                 stale += 1
 
-        if count or stale:
-            logger.info(f"Reconciled: {count} from backend, {stale} stale entries cleaned")
+        if count or stale or cleaned:
+            logger.info(f"Reconciled: {count} from backend, {stale} stale entries cleaned, {cleaned} completed pods deleted")
     except Exception as e:
         logger.warning(f"State reconciliation failed: {e}")
