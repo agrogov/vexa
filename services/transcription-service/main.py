@@ -187,18 +187,6 @@ def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _build_nemotron_audio_entry(audio_path: str, duration: float, target_lang: str) -> Dict[str, Any]:
-    entry: Dict[str, Any] = {
-        "audio_filepath": audio_path,
-        "duration": duration if duration > 0 else 100000,
-        "text": "",
-        # NeMo's prompt dataset currently reads cut.supervisions[0].language directly.
-        "lang": target_lang,
-        "language": target_lang,
-    }
-    return entry
-
-
 def _nemotron_restore_needs_prompt_compat(exc: Exception) -> bool:
     message = str(exc)
     return (
@@ -423,11 +411,15 @@ class NemotronBackend(BaseTranscriptionBackend):
     def __init__(self) -> None:
         try:
             import nemo.collections.asr as nemo_asr
+            from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (
+                HybridRNNTCTCPromptTranscribeConfig,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "Nemotron backend requires NeMo ASR runtime. Install nemo_toolkit[asr] to use TRANSCRIPTION_BACKEND=nemotron."
             ) from exc
         self.nemo_asr = nemo_asr
+        self.prompt_transcribe_config_cls = HybridRNNTCTCPromptTranscribeConfig
         self.model = _load_nemotron_model(nemo_asr, NEMOTRON_MODEL_NAME)
 
     def startup_details(self) -> Dict[str, Any]:
@@ -456,31 +448,25 @@ class NemotronBackend(BaseTranscriptionBackend):
         target_lang = _normalize_nemotron_target_lang(language)
         duration = float(len(audio_array) / sample_rate) if sample_rate > 0 else 0.0
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-            wav_path = tmp_wav.name
-        try:
-            sf.write(wav_path, audio_array, sample_rate)
-
-            def _transcribe_sync():
-                kwargs: Dict[str, Any] = {
-                    "audio": [_build_nemotron_audio_entry(wav_path, duration, target_lang)],
-                    "batch_size": 1,
-                }
-                if target_lang:
-                    kwargs["target_lang"] = target_lang
-                    kwargs["prompt_field"] = NEMOTRON_PROMPT_FIELD
-                if want_word_timestamps:
-                    kwargs["timestamps"] = True
-                return self.model.transcribe(**kwargs)
-
-            hypotheses = await asyncio.get_event_loop().run_in_executor(
-                transcription_executor, _transcribe_sync
+        def _transcribe_sync():
+            override_config = self.prompt_transcribe_config_cls(
+                use_lhotse=False,
+                batch_size=1,
+                return_hypotheses=want_word_timestamps,
+                num_workers=0,
+                timestamps=want_word_timestamps,
+                verbose=False,
+                target_lang=target_lang,
+                prompt_field=NEMOTRON_PROMPT_FIELD,
             )
-        finally:
-            try:
-                os.unlink(wav_path)
-            except OSError:
-                pass
+            return self.model.transcribe(
+                audio=[audio_array],
+                override_config=override_config,
+            )
+
+        hypotheses = await asyncio.get_event_loop().run_in_executor(
+            transcription_executor, _transcribe_sync
+        )
 
         if not isinstance(hypotheses, list) or not hypotheses:
             raise RuntimeError("Nemotron backend returned no hypotheses")

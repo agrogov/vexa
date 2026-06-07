@@ -18,7 +18,6 @@ from main import (
     _looks_like_hallucination,
     _normalize_backend_name,
     _normalize_nemotron_target_lang,
-    _build_nemotron_audio_entry,
     _nemotron_compat_mismatches,
     _nemotron_restore_needs_prompt_compat,
     _normalize_transcription_tier,
@@ -223,15 +222,6 @@ class TestNormalizeNemotronTargetLang:
 
     def test_prompt_field_matches_nemo_prompt_model_expectation(self):
         assert NEMOTRON_PROMPT_FIELD == "lang"
-
-    def test_build_nemotron_audio_entry_sets_language_fields(self):
-        entry = _build_nemotron_audio_entry("/tmp/test.wav", 1.25, "auto")
-        assert entry["audio_filepath"] == "/tmp/test.wav"
-        assert entry["duration"] == pytest.approx(1.25)
-        assert entry["text"] == ""
-        assert entry["lang"] == "auto"
-        assert entry["language"] == "auto"
-
 
 class TestNemotronCompatHelpers:
     def test_restore_needs_prompt_compat_for_missing_prompt_module(self):
