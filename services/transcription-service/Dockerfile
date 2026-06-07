@@ -13,6 +13,7 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list /etc/apt/sources.list.d/nvidia*.lis
 RUN apt-get update && apt-get install -y \
     python3.10 \
     python3-pip \
+    git \
     curl \
     nvtop \
     build-essential \

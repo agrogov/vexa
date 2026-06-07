@@ -18,16 +18,14 @@ from main import (
     _looks_like_hallucination,
     _normalize_backend_name,
     _normalize_nemotron_target_lang,
-    _nemotron_compat_mismatches,
-    _nemotron_restore_needs_prompt_compat,
     _normalize_transcription_tier,
     _deferred_capacity_available,
     _extract_response_text,
     _extract_word_timestamps,
     _validate_requested_model,
     WHISPER_COMPAT_MODEL,
+    NEMOTRON_MODEL_FILENAME,
     NEMOTRON_PUBLIC_MODEL,
-    NEMOTRON_PROMPT_FIELD,
     NO_SPEECH_THRESHOLD,
     LOG_PROB_THRESHOLD,
     COMPRESSION_RATIO_THRESHOLD,
@@ -220,37 +218,8 @@ class TestNormalizeNemotronTargetLang:
     def test_locale_passthrough(self):
         assert _normalize_nemotron_target_lang("fr-FR") == "fr-FR"
 
-    def test_prompt_field_matches_nemo_prompt_model_expectation(self):
-        assert NEMOTRON_PROMPT_FIELD == "lang"
-
-class TestNemotronCompatHelpers:
-    def test_restore_needs_prompt_compat_for_missing_prompt_module(self):
-        exc = RuntimeError("No module named 'nemo.collections.asr.models.rnnt_bpe_models_prompt'")
-        assert _nemotron_restore_needs_prompt_compat(exc) is True
-
-    def test_restore_needs_prompt_compat_for_abstract_asr_model_fallback(self):
-        exc = TypeError("Can't instantiate abstract class ASRModel with abstract methods setup_training_data")
-        assert _nemotron_restore_needs_prompt_compat(exc) is True
-
-    def test_restore_does_not_claim_unrelated_errors(self):
-        exc = RuntimeError("connection reset")
-        assert _nemotron_restore_needs_prompt_compat(exc) is False
-
-    def test_compat_mismatches_ignore_only_ctc_decoder_missing_keys(self):
-        result = type(
-            "IncompatibleKeys",
-            (),
-            {
-                "missing_keys": [
-                    "ctc_decoder.decoder_layers.0.weight",
-                    "encoder.layers.0.weight",
-                ],
-                "unexpected_keys": [],
-            },
-        )()
-        bad_missing, bad_unexpected = _nemotron_compat_mismatches(result)
-        assert bad_missing == ["encoder.layers.0.weight"]
-        assert bad_unexpected == []
+    def test_model_filename_matches_repo_artifact(self):
+        assert NEMOTRON_MODEL_FILENAME == "nemotron-3.5-asr-streaming-0.6b.nemo"
 
 
 class TestExtractResponseHelpers:

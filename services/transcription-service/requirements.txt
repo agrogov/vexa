@@ -4,7 +4,7 @@ h11>=0.16.0                       # CVE-2025-43859 (uvicorn transitive)
 python-multipart>=0.0.6
 faster-whisper>=1.0.0
 # Optional runtime selected by TRANSCRIPTION_BACKEND=nemotron
-nemo_toolkit[asr]
+nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@main
 soundfile>=0.12.0
 numpy>=1.21.0,<2.0.0
 # CUDA 12 runtime libraries (required by ctranslate2 for GPU inference)

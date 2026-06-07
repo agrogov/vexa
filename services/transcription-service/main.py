@@ -8,9 +8,7 @@ import time
 import logging
 import asyncio
 import json
-import sys
 import tempfile
-import types
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
@@ -21,6 +19,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 import uvicorn
 from faster_whisper import WhisperModel
+from huggingface_hub import hf_hub_download
 # faster-whisper uses CTranslate2 internally (no PyTorch needed)
 
 # Logging
@@ -107,10 +106,7 @@ TEMPERATURE_FALLBACK_CHAIN = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
 WHISPER_COMPAT_MODEL = "whisper-1"
 NEMOTRON_PUBLIC_MODEL = "nemotron-3.5-asr-streaming-0.6b"
-NEMOTRON_PROMPT_MODULE = "nemo.collections.asr.models.rnnt_bpe_models_prompt"
-NEMOTRON_PROMPT_CLASS = "EncDecRNNTBPEModelWithPrompt"
-NEMOTRON_ALLOWED_MISSING_PREFIXES = ("ctc_decoder.",)
-NEMOTRON_PROMPT_FIELD = "lang"
+NEMOTRON_MODEL_FILENAME = "nemotron-3.5-asr-streaming-0.6b.nemo"
 NEMOTRON_LANGUAGE_MAP = {
     "de": "de-DE",
     "en": "en-US",
@@ -185,89 +181,6 @@ def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
             }
         )
     return out
-
-
-def _nemotron_restore_needs_prompt_compat(exc: Exception) -> bool:
-    message = str(exc)
-    return (
-        NEMOTRON_PROMPT_MODULE in message
-        or "Can't instantiate abstract class ASRModel" in message
-    )
-
-
-def _nemotron_compat_mismatches(result: Any) -> Tuple[List[str], List[str]]:
-    missing_keys = list(getattr(result, "missing_keys", []) or [])
-    unexpected_keys = list(getattr(result, "unexpected_keys", []) or [])
-    bad_missing = [
-        key for key in missing_keys
-        if not key.startswith(NEMOTRON_ALLOWED_MISSING_PREFIXES)
-    ]
-    return bad_missing, unexpected_keys
-
-
-def _install_nemotron_prompt_compat() -> type:
-    module_name = NEMOTRON_PROMPT_MODULE
-    existing = sys.modules.get(module_name)
-    if existing is not None and hasattr(existing, NEMOTRON_PROMPT_CLASS):
-        return getattr(existing, NEMOTRON_PROMPT_CLASS)
-
-    from torch.nn.modules.module import _IncompatibleKeys
-    from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (
-        EncDecHybridRNNTCTCBPEModelWithPrompt,
-    )
-
-    class EncDecRNNTBPEModelWithPrompt(EncDecHybridRNNTCTCBPEModelWithPrompt):
-        def forward(self, *args, **kwargs):
-            prompt = kwargs.get("prompt")
-            try:
-                return super().forward(*args, **kwargs)
-            except RuntimeError as exc:
-                if (
-                    prompt is None
-                    or prompt.ndim < 2
-                    or "Sizes of tensors must match except in dimension 2" not in str(exc)
-                    or prompt.shape[1] <= 1
-                ):
-                    raise
-                logger.warning(
-                    "Nemotron compatibility shim trimming prompt length from %s to %s after shape mismatch",
-                    prompt.shape[1],
-                    prompt.shape[1] - 1,
-                )
-                retry_kwargs = dict(kwargs)
-                retry_kwargs["prompt"] = prompt[:, :-1, :]
-                return super().forward(*args, **retry_kwargs)
-
-        def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
-            result = super().load_state_dict(state_dict, strict=False, assign=assign)
-            bad_missing, bad_unexpected = _nemotron_compat_mismatches(result)
-            if strict and (bad_missing or bad_unexpected):
-                raise RuntimeError(
-                    "Nemotron compatibility shim saw unexpected state_dict mismatch: "
-                    f"missing={bad_missing} unexpected={bad_unexpected}"
-                )
-            return _IncompatibleKeys(bad_missing, bad_unexpected)
-
-    EncDecRNNTBPEModelWithPrompt.__module__ = module_name
-    module = types.ModuleType(module_name)
-    module.EncDecRNNTBPEModelWithPrompt = EncDecRNNTBPEModelWithPrompt
-    sys.modules[module_name] = module
-    return EncDecRNNTBPEModelWithPrompt
-
-
-def _load_nemotron_model(nemo_asr, model_name: str):
-    try:
-        return nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
-    except Exception as exc:
-        if not _nemotron_restore_needs_prompt_compat(exc):
-            raise
-        logger.info(
-            "Applying Nemotron NeMo compatibility shim for %s after restore failure: %s",
-            model_name,
-            exc,
-        )
-        _install_nemotron_prompt_compat()
-        return nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
 
 
 class BaseTranscriptionBackend:
@@ -431,23 +344,28 @@ class NemotronBackend(BaseTranscriptionBackend):
 
     def __init__(self) -> None:
         try:
-            import nemo.collections.asr as nemo_asr
-            from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (
-                HybridRNNTCTCPromptTranscribeConfig,
+            from nemo.collections.asr.models.rnnt_bpe_models_prompt import (
+                EncDecRNNTBPEModelWithPrompt,
             )
         except ImportError as exc:
             raise RuntimeError(
-                "Nemotron backend requires NeMo ASR runtime. Install nemo_toolkit[asr] to use TRANSCRIPTION_BACKEND=nemotron."
+                "Nemotron backend requires NeMo ASR runtime from NVIDIA/NeMo main. "
+                "Install `nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@main` "
+                "to use TRANSCRIPTION_BACKEND=nemotron."
             ) from exc
-        self.nemo_asr = nemo_asr
-        self.prompt_transcribe_config_cls = HybridRNNTCTCPromptTranscribeConfig
-        self.model = _load_nemotron_model(nemo_asr, NEMOTRON_MODEL_NAME)
+        self.model_path = hf_hub_download(
+            repo_id=NEMOTRON_MODEL_NAME,
+            filename=NEMOTRON_MODEL_FILENAME,
+            cache_dir="/app/models/hf",
+        )
+        self.model = EncDecRNNTBPEModelWithPrompt.restore_from(self.model_path)
 
     def startup_details(self) -> Dict[str, Any]:
         return {
             "backend": self.backend_name,
             "backend_model": NEMOTRON_MODEL_NAME,
             "device": DEVICE,
+            "checkpoint": self.model_path,
         }
 
     def accepted_models(self) -> Set[str]:
@@ -469,38 +387,28 @@ class NemotronBackend(BaseTranscriptionBackend):
         target_lang = _normalize_nemotron_target_lang(language)
         duration = float(len(audio_array) / sample_rate) if sample_rate > 0 else 0.0
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            wav_path = os.path.join(tmp_dir, "input.wav")
-            manifest_path = os.path.join(tmp_dir, "manifest.jsonl")
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+            wav_path = tmp_wav.name
+        try:
             sf.write(wav_path, audio_array, sample_rate)
-            with open(manifest_path, "w", encoding="utf-8") as manifest:
-                manifest.write(json.dumps({
-                    "audio_filepath": wav_path,
-                    "duration": duration if duration > 0 else 100000,
-                    "text": "",
-                    "lang": target_lang,
-                }) + "\n")
 
             def _transcribe_sync():
-                override_config = self.prompt_transcribe_config_cls(
-                    use_lhotse=True,
-                    batch_size=1,
-                    return_hypotheses=want_word_timestamps,
-                    num_workers=0,
-                    timestamps=want_word_timestamps,
-                    verbose=False,
-                    target_lang=target_lang,
-                    prompt_field=NEMOTRON_PROMPT_FIELD,
-                )
-                override_config.lang_field = NEMOTRON_PROMPT_FIELD
                 return self.model.transcribe(
-                    audio=[manifest_path],
-                    override_config=override_config,
+                    [wav_path],
+                    batch_size=1,
+                    verbose=False,
+                    timestamps=want_word_timestamps,
+                    target_lang=target_lang,
                 )
 
             hypotheses = await asyncio.get_event_loop().run_in_executor(
                 transcription_executor, _transcribe_sync
             )
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
 
         if not isinstance(hypotheses, list) or not hypotheses:
             raise RuntimeError("Nemotron backend returned no hypotheses")

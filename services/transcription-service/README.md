@@ -114,12 +114,15 @@ The service now supports two backend modes:
   - preserves the existing bot-safe path, including
     `model=whisper-1` and word timestamps
 - `TRANSCRIPTION_BACKEND=nemotron`
-  - uses NVIDIA NeMo with
+  - uses NVIDIA NeMo from `NVIDIA/NeMo@main` with
     `nvidia/nemotron-3.5-asr-streaming-0.6b`
   - keeps the same HTTP endpoint and top-level response envelope
   - continues to accept `model=whisper-1` for compatibility, so
     existing callers do not need to change when pointed at a
     Nemotron-backed deployment
+  - requires `git` in the image because the supported runtime is
+    installed from the NeMo GitHub repository rather than a released
+    `nemo_toolkit` wheel
 
 Unknown `model` values are rejected with 400.
 

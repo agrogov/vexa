@@ -40,6 +40,9 @@ Notes:
 
 - The service integrates Nemotron through **NeMo ASR**, not
   `faster-whisper`.
+- The supported runtime path for this checkpoint is currently
+  `nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@main`,
+  matching the NVIDIA model card guidance.
 - Backend selection happens at service startup, not per request.
 - The HTTP request still requires the `model` form field for OpenAI
   compatibility.

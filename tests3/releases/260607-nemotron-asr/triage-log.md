@@ -29,6 +29,42 @@
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (runtime integration)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - Nemotron-backed `/v1/audio/transcriptions` accepts the repo WAV and returns `200 OK`
+    on the same service contract used by Whisper callers.
+- Actual:
+  - Startup is healthy and the model restores on GPU, but live inference still fails in
+    NeMo internals with prompt-shape errors.
+  - Latest observed error:
+    - `Sizes of tensors must match except in dimension 2. Expected size 76 but got size 74`
+- Root cause:
+  - The current service is forcing Nemotron through generic `transcribe()` paths that do
+    not match the model family's supported runtime path.
+  - Primary-source review shows NVIDIA recommends NeMo from `main` plus the cache-aware
+    streaming / manifest workflow for this checkpoint, not the generic wrapper path.
+- Touched commits:
+  - `72cb42d6` `fix(transcription-service): restore Nemotron prompt checkpoint`
+  - `8e52a3d6` `fix(transcription-service): map Nemotron prompt field correctly`
+  - `d606d67b` `fix(transcription-service): pass Nemotron language via manifest`
+  - `fcef2e0d` `fix(transcription-service): use tensor path for Nemotron prompts`
+  - `cb31a8fb` `fix(transcription-service): drive Nemotron through manifest path`
+  - `4af53222` `fix(transcription-service): trim Nemotron prompt mismatch`
+- Evidence:
+  - Whisper still succeeds on the same image and service contract.
+  - Nemotron build, GPU runtime, and startup are good; failure is isolated to inference path.
+- Next-fix target:
+  - Replace the Nemotron runtime dependency with NeMo from `main` and rework the backend
+    to use the supported prompt-aware/cache-aware path instead of layered service-side shims.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
 ## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (follow-up)
 
 - Classification: regression
