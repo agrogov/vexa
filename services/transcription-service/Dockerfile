@@ -1,8 +1,7 @@
-FROM docker.ib-ci.com/nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+ARG CUDA_BASE_IMAGE=nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+FROM ${CUDA_BASE_IMAGE}
 
-# Add Infobip Root CA (required behind corporate SSL inspection)
-ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
-RUN update-ca-certificates
+ARG INSTALL_INFOBIP_CA=false
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
@@ -18,14 +17,22 @@ RUN apt-get update && apt-get install -y \
     nvtop \
     libsndfile1 \
     ffmpeg \
+    sox \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Optional corporate CA for environments behind Infobip SSL inspection.
+RUN if [ "$INSTALL_INFOBIP_CA" = "true" ]; then \
+      curl -fsSL http://ca.infobip.com/crl/RootCA.crt -o /usr/local/share/ca-certificates/infobip-rootca.crt && \
+      update-ca-certificates; \
+    fi
 
 WORKDIR /app
 
 # Copy requirements and install
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir "numpy<2.0.0" setuptools wheel && \
+    pip3 install --no-cache-dir -r requirements.txt
 
 # Symlink pip-installed nvidia CUDA libs into /usr/local/lib (always in linker search path).
 # This avoids depending on LD_LIBRARY_PATH or ldconfig cache at runtime.
@@ -46,4 +53,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 EXPOSE 8000
 
 CMD ["python3", "main.py"]
-

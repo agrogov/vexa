@@ -45,6 +45,14 @@ docker compose logs -f
 
 The service listens on the port mapped in `docker-compose.yml` (default 8083:80).
 
+The Dockerfiles now default to public base images:
+
+- GPU: `nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04`
+- CPU: `python:3.10-slim`
+
+For environments behind Infobip SSL inspection, build with
+`--build-arg INSTALL_INFOBIP_CA=true`.
+
 ### Test
 
 ```bash
