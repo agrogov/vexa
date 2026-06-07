@@ -448,25 +448,38 @@ class NemotronBackend(BaseTranscriptionBackend):
         target_lang = _normalize_nemotron_target_lang(language)
         duration = float(len(audio_array) / sample_rate) if sample_rate > 0 else 0.0
 
-        def _transcribe_sync():
-            override_config = self.prompt_transcribe_config_cls(
-                use_lhotse=False,
-                batch_size=1,
-                return_hypotheses=want_word_timestamps,
-                num_workers=0,
-                timestamps=want_word_timestamps,
-                verbose=False,
-                target_lang=target_lang,
-                prompt_field=NEMOTRON_PROMPT_FIELD,
-            )
-            return self.model.transcribe(
-                audio=[audio_array],
-                override_config=override_config,
-            )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            wav_path = os.path.join(tmp_dir, "input.wav")
+            manifest_path = os.path.join(tmp_dir, "manifest.jsonl")
+            sf.write(wav_path, audio_array, sample_rate)
+            with open(manifest_path, "w", encoding="utf-8") as manifest:
+                manifest.write(json.dumps({
+                    "audio_filepath": wav_path,
+                    "duration": duration if duration > 0 else 100000,
+                    "text": "",
+                    "lang": target_lang,
+                }) + "\n")
 
-        hypotheses = await asyncio.get_event_loop().run_in_executor(
-            transcription_executor, _transcribe_sync
-        )
+            def _transcribe_sync():
+                override_config = self.prompt_transcribe_config_cls(
+                    use_lhotse=True,
+                    batch_size=1,
+                    return_hypotheses=want_word_timestamps,
+                    num_workers=0,
+                    timestamps=want_word_timestamps,
+                    verbose=False,
+                    target_lang=target_lang,
+                    prompt_field=NEMOTRON_PROMPT_FIELD,
+                )
+                override_config.lang_field = NEMOTRON_PROMPT_FIELD
+                return self.model.transcribe(
+                    audio=[manifest_path],
+                    override_config=override_config,
+                )
+
+            hypotheses = await asyncio.get_event_loop().run_in_executor(
+                transcription_executor, _transcribe_sync
+            )
 
         if not isinstance(hypotheses, list) or not hypotheses:
             raise RuntimeError("Nemotron backend returned no hypotheses")
