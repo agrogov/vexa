@@ -8,7 +8,9 @@ import time
 import logging
 import asyncio
 import json
+import sys
 import tempfile
+import types
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
@@ -105,6 +107,9 @@ TEMPERATURE_FALLBACK_CHAIN = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
 WHISPER_COMPAT_MODEL = "whisper-1"
 NEMOTRON_PUBLIC_MODEL = "nemotron-3.5-asr-streaming-0.6b"
+NEMOTRON_PROMPT_MODULE = "nemo.collections.asr.models.rnnt_bpe_models_prompt"
+NEMOTRON_PROMPT_CLASS = "EncDecRNNTBPEModelWithPrompt"
+NEMOTRON_ALLOWED_MISSING_PREFIXES = ("ctc_decoder.",)
 NEMOTRON_LANGUAGE_MAP = {
     "de": "de-DE",
     "en": "en-US",
@@ -179,6 +184,68 @@ def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
             }
         )
     return out
+
+
+def _nemotron_restore_needs_prompt_compat(exc: Exception) -> bool:
+    message = str(exc)
+    return (
+        NEMOTRON_PROMPT_MODULE in message
+        or "Can't instantiate abstract class ASRModel" in message
+    )
+
+
+def _nemotron_compat_mismatches(result: Any) -> Tuple[List[str], List[str]]:
+    missing_keys = list(getattr(result, "missing_keys", []) or [])
+    unexpected_keys = list(getattr(result, "unexpected_keys", []) or [])
+    bad_missing = [
+        key for key in missing_keys
+        if not key.startswith(NEMOTRON_ALLOWED_MISSING_PREFIXES)
+    ]
+    return bad_missing, unexpected_keys
+
+
+def _install_nemotron_prompt_compat() -> type:
+    module_name = NEMOTRON_PROMPT_MODULE
+    existing = sys.modules.get(module_name)
+    if existing is not None and hasattr(existing, NEMOTRON_PROMPT_CLASS):
+        return getattr(existing, NEMOTRON_PROMPT_CLASS)
+
+    from torch.nn.modules.module import _IncompatibleKeys
+    from nemo.collections.asr.models.hybrid_rnnt_ctc_bpe_models_prompt import (
+        EncDecHybridRNNTCTCBPEModelWithPrompt,
+    )
+
+    class EncDecRNNTBPEModelWithPrompt(EncDecHybridRNNTCTCBPEModelWithPrompt):
+        def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+            result = super().load_state_dict(state_dict, strict=False, assign=assign)
+            bad_missing, bad_unexpected = _nemotron_compat_mismatches(result)
+            if strict and (bad_missing or bad_unexpected):
+                raise RuntimeError(
+                    "Nemotron compatibility shim saw unexpected state_dict mismatch: "
+                    f"missing={bad_missing} unexpected={bad_unexpected}"
+                )
+            return _IncompatibleKeys(bad_missing, bad_unexpected)
+
+    EncDecRNNTBPEModelWithPrompt.__module__ = module_name
+    module = types.ModuleType(module_name)
+    module.EncDecRNNTBPEModelWithPrompt = EncDecRNNTBPEModelWithPrompt
+    sys.modules[module_name] = module
+    return EncDecRNNTBPEModelWithPrompt
+
+
+def _load_nemotron_model(nemo_asr, model_name: str):
+    try:
+        return nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
+    except Exception as exc:
+        if not _nemotron_restore_needs_prompt_compat(exc):
+            raise
+        logger.info(
+            "Applying Nemotron NeMo compatibility shim for %s after restore failure: %s",
+            model_name,
+            exc,
+        )
+        _install_nemotron_prompt_compat()
+        return nemo_asr.models.ASRModel.from_pretrained(model_name=model_name)
 
 
 class BaseTranscriptionBackend:
@@ -348,7 +415,7 @@ class NemotronBackend(BaseTranscriptionBackend):
                 "Nemotron backend requires NeMo ASR runtime. Install nemo_toolkit[asr] to use TRANSCRIPTION_BACKEND=nemotron."
             ) from exc
         self.nemo_asr = nemo_asr
-        self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=NEMOTRON_MODEL_NAME)
+        self.model = _load_nemotron_model(nemo_asr, NEMOTRON_MODEL_NAME)
 
     def startup_details(self) -> Dict[str, Any]:
         return {
