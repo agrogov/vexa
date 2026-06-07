@@ -217,6 +217,27 @@ def _install_nemotron_prompt_compat() -> type:
     )
 
     class EncDecRNNTBPEModelWithPrompt(EncDecHybridRNNTCTCBPEModelWithPrompt):
+        def forward(self, *args, **kwargs):
+            prompt = kwargs.get("prompt")
+            try:
+                return super().forward(*args, **kwargs)
+            except RuntimeError as exc:
+                if (
+                    prompt is None
+                    or prompt.ndim < 2
+                    or "Sizes of tensors must match except in dimension 2" not in str(exc)
+                    or prompt.shape[1] <= 1
+                ):
+                    raise
+                logger.warning(
+                    "Nemotron compatibility shim trimming prompt length from %s to %s after shape mismatch",
+                    prompt.shape[1],
+                    prompt.shape[1] - 1,
+                )
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["prompt"] = prompt[:, :-1, :]
+                return super().forward(*args, **retry_kwargs)
+
         def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
             result = super().load_state_dict(state_dict, strict=False, assign=assign)
             bad_missing, bad_unexpected = _nemotron_compat_mismatches(result)
