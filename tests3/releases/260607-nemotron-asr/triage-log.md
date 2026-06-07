@@ -28,3 +28,36 @@
 
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (follow-up)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - With `TRANSCRIPTION_BACKEND=nemotron`, a request to `/v1/audio/transcriptions`
+    using a valid WAV and compatibility `model=whisper-1` returns `200 OK`.
+- Actual:
+  - Startup and `/health` now succeed, but the transcription request returns `500`.
+  - Observed response:
+    - `Unknown prompt key: 'None'. Available prompts: [...]`
+- Root cause:
+  - The Nemotron prompt-conditioned model requires a non-null prompt key.
+  - The current service request mapping still reaches NeMo with a missing prompt
+    value when callers omit or supply `language`, so inference fails before GPU
+    work starts.
+- Touched commits:
+  - `72cb42d6` `fix(transcription-service): restore Nemotron prompt checkpoint`
+- Evidence:
+  - Model restored successfully and occupies ~5.1 GiB on GPU 0.
+  - `/health` returns `200 OK`.
+  - The first real `/v1/audio/transcriptions` request fails before inference with
+    prompt-key validation.
+- Next-fix target:
+  - Normalize request language for Nemotron so the backend always passes a valid
+    prompt key such as `auto` when the caller omits language, and verify a real
+    transcription request completes.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`

@@ -110,6 +110,7 @@ NEMOTRON_PUBLIC_MODEL = "nemotron-3.5-asr-streaming-0.6b"
 NEMOTRON_PROMPT_MODULE = "nemo.collections.asr.models.rnnt_bpe_models_prompt"
 NEMOTRON_PROMPT_CLASS = "EncDecRNNTBPEModelWithPrompt"
 NEMOTRON_ALLOWED_MISSING_PREFIXES = ("ctc_decoder.",)
+NEMOTRON_PROMPT_FIELD = "lang"
 NEMOTRON_LANGUAGE_MAP = {
     "de": "de-DE",
     "en": "en-US",
@@ -455,6 +456,7 @@ class NemotronBackend(BaseTranscriptionBackend):
                 }
                 if target_lang:
                     kwargs["target_lang"] = target_lang
+                    kwargs["prompt_field"] = NEMOTRON_PROMPT_FIELD
                 if want_word_timestamps:
                     kwargs["timestamps"] = True
                 return self.model.transcribe(**kwargs)

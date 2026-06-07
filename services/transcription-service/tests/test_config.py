@@ -27,6 +27,7 @@ from main import (
     _validate_requested_model,
     WHISPER_COMPAT_MODEL,
     NEMOTRON_PUBLIC_MODEL,
+    NEMOTRON_PROMPT_FIELD,
     NO_SPEECH_THRESHOLD,
     LOG_PROB_THRESHOLD,
     COMPRESSION_RATIO_THRESHOLD,
@@ -218,6 +219,9 @@ class TestNormalizeNemotronTargetLang:
 
     def test_locale_passthrough(self):
         assert _normalize_nemotron_target_lang("fr-FR") == "fr-FR"
+
+    def test_prompt_field_matches_nemo_prompt_model_expectation(self):
+        assert NEMOTRON_PROMPT_FIELD == "lang"
 
 
 class TestNemotronCompatHelpers:
