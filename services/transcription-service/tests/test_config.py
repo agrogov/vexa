@@ -16,8 +16,15 @@ from main import (
     _env_float,
     _looks_like_silence,
     _looks_like_hallucination,
+    _normalize_backend_name,
+    _normalize_nemotron_target_lang,
     _normalize_transcription_tier,
     _deferred_capacity_available,
+    _extract_response_text,
+    _extract_word_timestamps,
+    _validate_requested_model,
+    WHISPER_COMPAT_MODEL,
+    NEMOTRON_PUBLIC_MODEL,
     NO_SPEECH_THRESHOLD,
     LOG_PROB_THRESHOLD,
     COMPRESSION_RATIO_THRESHOLD,
@@ -178,3 +185,87 @@ class TestDeferredCapacityAvailable:
 
     def test_has_capacity_with_some_active(self):
         assert _deferred_capacity_available(5, 3) is True
+
+
+# --- backend helpers ---
+
+class TestNormalizeBackendName:
+    def test_default_is_whisper(self):
+        assert _normalize_backend_name(None) == "whisper"
+
+    def test_accepts_whisper(self):
+        assert _normalize_backend_name("whisper") == "whisper"
+
+    def test_accepts_nemotron(self):
+        assert _normalize_backend_name("nemotron") == "nemotron"
+
+    def test_unknown_falls_back_to_whisper(self):
+        assert _normalize_backend_name("something-else") == "whisper"
+
+
+class TestNormalizeNemotronTargetLang:
+    def test_missing_uses_default(self):
+        assert _normalize_nemotron_target_lang(None) == "auto"
+
+    def test_auto_passthrough(self):
+        assert _normalize_nemotron_target_lang("auto") == "auto"
+
+    def test_two_letter_language_maps_to_locale(self):
+        assert _normalize_nemotron_target_lang("en") == "en-US"
+        assert _normalize_nemotron_target_lang("de") == "de-DE"
+
+    def test_locale_passthrough(self):
+        assert _normalize_nemotron_target_lang("fr-FR") == "fr-FR"
+
+
+class TestExtractResponseHelpers:
+    def test_extract_response_text_from_string(self):
+        assert _extract_response_text(" hello ") == "hello"
+
+    def test_extract_response_text_from_dict(self):
+        assert _extract_response_text({"text": "hi"}) == "hi"
+
+    def test_extract_response_text_from_object(self):
+        payload = type("Hyp", (), {"text": "ciao"})()
+        assert _extract_response_text(payload) == "ciao"
+
+    def test_extract_word_timestamps_from_dict(self):
+        payload = {
+            "timestamp": {
+                "word": [
+                    {"word": "hello", "start": 0.0, "end": 0.5, "probability": 0.9},
+                    {"word": "world", "start": 0.5, "end": 1.0},
+                ]
+            }
+        }
+        assert _extract_word_timestamps(payload) == [
+            {"word": "hello", "start": 0.0, "end": 0.5, "probability": 0.9},
+            {"word": "world", "start": 0.5, "end": 1.0, "probability": 1.0},
+        ]
+
+
+class _FakeBackend:
+    def __init__(self, backend_name, models):
+        self.backend_name = backend_name
+        self._models = set(models)
+
+    def accepted_models(self):
+        return self._models
+
+
+class TestValidateRequestedModel:
+    def test_accepts_whisper_model(self):
+        backend = _FakeBackend("whisper", {WHISPER_COMPAT_MODEL})
+        _validate_requested_model(backend, WHISPER_COMPAT_MODEL)
+
+    def test_accepts_nemotron_public_model(self):
+        backend = _FakeBackend("nemotron", {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL})
+        _validate_requested_model(backend, NEMOTRON_PUBLIC_MODEL)
+
+    def test_rejects_unknown_model(self):
+        from fastapi import HTTPException
+
+        backend = _FakeBackend("nemotron", {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL})
+        with pytest.raises(HTTPException) as exc:
+            _validate_requested_model(backend, "unknown-model")
+        assert exc.value.status_code == 400

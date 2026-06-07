@@ -1474,6 +1474,34 @@ TESTS3_WORKTREE_BOOTSTRAP:
   - lite
   state: stateless
   max_duration_sec: 30
+TRANSCRIPTION_WHISPER_BACKEND_COMPAT:
+  proves: transcription-service source preserves whisper backend selection and whisper-1 compatibility path
+  symptom: Whisper backend contract drift — default Vexa callers may stop working unchanged
+  found: '2026-06-07'
+  type: script
+  dispatch: SHELL_CHECK
+  script: tests3/checks/scripts/transcription-whisper-backend-compat.sh
+  from_tier: static
+  modes:
+  - lite
+  - compose
+  - helm
+  state: stateless
+  max_duration_sec: 10
+TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT:
+  proves: transcription-service source contains a Nemotron backend plus NeMo runtime dependency and compatibility model aliases
+  symptom: Nemotron backend missing or not wired into the service contract
+  found: '2026-06-07'
+  type: script
+  dispatch: SHELL_CHECK
+  script: tests3/checks/scripts/transcription-nemotron-backend-compat.sh
+  from_tier: static
+  modes:
+  - lite
+  - compose
+  - helm
+  state: stateless
+  max_duration_sec: 10
 TRANSCRIPTION_TOKEN_VALID:
   proves: "transcription API token accepted \u2014 bots can convert audio to text"
   symptom: "Transcription returns 403 \u2014 TRANSCRIPTION_SERVICE_TOKEN expired or invalid. Bots capture audio but produce\
@@ -1488,6 +1516,20 @@ TRANSCRIPTION_TOKEN_VALID:
   - helm
   state: stateful
   max_duration_sec: 30
+TRANSCRIPTION_INVALID_MODEL_REJECTED:
+  proves: transcription-service source rejects unsupported model values with HTTP 400
+  symptom: Unknown model values silently fall through to a backend, making selection ambiguous
+  found: '2026-06-07'
+  type: script
+  dispatch: SHELL_CHECK
+  script: tests3/checks/scripts/transcription-invalid-model-rejected.sh
+  from_tier: static
+  modes:
+  - lite
+  - compose
+  - helm
+  state: stateless
+  max_duration_sec: 10
 TRANSCRIPTION_UP:
   proves: "transcription service responds \u2014 audio can be converted to text"
   symptom: Transcription service not responding
@@ -1500,6 +1542,21 @@ TRANSCRIPTION_UP:
   - helm
   state: stateless
   max_duration_sec: 30
+BOT_TRANSCRIPTION_CLIENT_WHISPER_DEFAULT_UNCHANGED:
+  proves: bot transcription client still emits model=whisper-1 in multipart requests
+  symptom: Bot-side default model changed unexpectedly, risking compatibility with the preserved Whisper path
+  found: '2026-06-07'
+  type: script
+  dispatch: SHELL_CHECK
+  script: tests3/checks/scripts/bot-transcription-client-whisper-default-unchanged.sh
+  from_tier: static
+  modes:
+  - lite
+  - compose
+  - helm
+  state: stateless
+  max_duration_sec: 10
+  must_match: model_field_default=whisper-1
 TRANSCRIPT_RENDERING_DEDUP_TESTS_PASS:
   proves: "packages/transcript-rendering npm test passes \u2014 dedup-prefers-confirmed fix + existing invariants"
   symptom: "dedup regression \u2014 pending segments stuck italic or confirmed dropped"

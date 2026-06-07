@@ -1,0 +1,117 @@
+# Plan approval — 260607-nemotron-asr
+#
+# Drafted in stage `plan` on 2026-06-07 after the user explicitly
+# approved the groom pack. All items below remain `approved: false`
+# until the human signs them off line-by-line in the current turn.
+
+release_id: 260607-nemotron-asr
+approved_at: '2026-06-07T16:38:00Z'
+approver: dmitry@vexa.ai
+approval_source: |
+  Human sign-off received in the current turn: "approved, go further"
+  on 2026-06-07. Groom had already been approved earlier in the same
+  session ("approved, go ahead"), which authorized entering `plan`.
+  This turn approves the line items below and authorizes advancing to
+  `develop`.
+
+# ── OBJECTIVES ────────────────────────────────────────────────────────
+
+scope_approved:
+  - issue: transcription-service-instance-selectable-backend
+    hypothesis: true       # Startup-time backend selector (`TRANSCRIPTION_BACKEND`) chooses Whisper or Nemotron per service instance; service stays single-backend-per-worker.
+    gap_analysis: true     # Existing matrix proves service health/auth only; it does not prove backend selection, compatibility aliasing, or invalid-model rejection.
+    proves: true           # Existing checks `TRANSCRIPTION_UP` + `TRANSCRIPTION_TOKEN_VALID`, plus 4 new checks for Whisper compat, Nemotron compat, invalid-model rejection, and bot-client default stability.
+    new_checks: true       # [TRANSCRIPTION_WHISPER_BACKEND_COMPAT, TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT, TRANSCRIPTION_INVALID_MODEL_REJECTED, BOT_TRANSCRIPTION_CLIENT_WHISPER_DEFAULT_UNCHANGED]
+    required_modes: true   # [lite, compose, helm] — service image/config ships to every deployment mode.
+    human_verify: true     # Compose manual verification of Whisper path, Nemotron path, and invalid-model failure.
+    bot_scope_boundary: true  # This cycle does not teach the bot to choose Nemotron dynamically; the bot remains on Whisper-compatible requests and backend selection happens at service deploy time.
+
+# ── REGISTRY CHANGES ──────────────────────────────────────────────────
+
+registry_changes_approved:
+  - check_id: TRANSCRIPTION_WHISPER_BACKEND_COMPAT
+    approved: true
+    type: script
+    proves: |
+      With transcription-service configured for `TRANSCRIPTION_BACKEND=whisper`,
+      a POST to `/v1/audio/transcriptions` using a valid audio file,
+      `model=whisper-1`, and `timestamp_granularities=word` returns 200
+      with non-empty `text`, standard top-level response keys, and at
+      least one word timestamp entry. Locks the current caller contract.
+    shape: |
+      Start the service in Whisper mode, submit
+      `services/transcription-service/tests/test_audio.wav`, assert the
+      response schema contains `text`, `language`, `duration`,
+      `segments`, and `segments[*].words[*]`.
+    modes: [lite, compose, helm]
+    max_duration_sec: 60
+
+  - check_id: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT
+    approved: true
+    type: script
+    proves: |
+      With transcription-service configured for
+      `TRANSCRIPTION_BACKEND=nemotron`, the same endpoint accepts a
+      valid audio file and returns the standard transcription JSON
+      envelope without crashing at model load or inference time.
+      `model=whisper-1` remains accepted for backward compatibility on
+      a Nemotron-backed deployment.
+    shape: |
+      Start the service in Nemotron mode, submit the test WAV with
+      `model=whisper-1`, assert 200 plus standard top-level response
+      keys. If timestamps are unavailable on Nemotron, the check does
+      not require `segments[*].words[*]`; that limitation is documented
+      and Whisper remains the timestamp-dependent path.
+    modes: [lite, compose, helm]
+    max_duration_sec: 90
+
+  - check_id: TRANSCRIPTION_INVALID_MODEL_REJECTED
+    approved: true
+    type: script
+    proves: |
+      The service rejects unknown `model` values with a clear client
+      error instead of silently routing them to a backend. Prevents the
+      new selector contract from becoming ambiguous.
+    shape: |
+      Submit a valid audio file with `model=totally-unknown-model`;
+      assert 4xx and an error message naming the invalid model value.
+    modes: [lite, compose, helm]
+    max_duration_sec: 30
+
+  - check_id: BOT_TRANSCRIPTION_CLIENT_WHISPER_DEFAULT_UNCHANGED
+    approved: true
+    type: script
+    proves: |
+      `services/vexa-bot/core/src/services/transcription-client.ts`
+      still emits `model=whisper-1` in multipart requests. This keeps
+      the bot on the known-good compatibility path while Nemotron is
+      added to the service.
+    shape: |
+      Static grep against the TypeScript client source for the
+      multipart `name="model"` field followed by the literal value
+      `whisper-1`.
+    modes: [lite, compose, helm]
+    max_duration_sec: 10
+    must_match: 'model_field_default=whisper-1'
+
+# ── DOD CHANGES ───────────────────────────────────────────────────────
+
+dod_changes_approved: []
+
+# ── NOTES ─────────────────────────────────────────────────────────────
+#
+# 1. This plan deliberately chooses instance-level backend selection,
+#    not simultaneous multi-backend residency in one worker. That
+#    matches the current service architecture (one global model loaded
+#    at startup) and avoids committing this cycle to a larger GPU-memory
+#    and routing redesign.
+#
+# 2. The user request was to preserve Whisper while adding Nemotron.
+#    This packet interprets that as: Whisper remains the default and the
+#    supported path for current bot callers; Nemotron becomes an
+#    alternate backend for the same service contract.
+#
+# 3. If develop-stage proves that NeMo/Nemotron can provide word-level
+#    timestamps cheaply and reliably, the implementation may exceed this
+#    floor and preserve full timestamp parity. The approved floor does
+#    not require that for Nemotron in this cycle.

@@ -6,7 +6,10 @@ GPU inference is expensive, stateful, and hardware-specific. You don't want ever
 
 Any client that speaks the OpenAI Whisper API can use it. The bot pipeline uses it for real-time meeting transcription. But it's a standalone, general-purpose service — not tied to Vexa. Send audio, get text back.
 
-Under the hood: faster-whisper behind an Nginx load balancer. Add workers to scale. GPU or CPU. One API endpoint, one docker-compose command.
+Under the hood: a selectable ASR backend behind an Nginx load balancer.
+Whisper remains the default compatibility path. Nemotron can be enabled
+per service instance. Add workers to scale. GPU or CPU. One API
+endpoint, one docker-compose command.
 
 ### Documentation
 - [Concepts](../../docs/concepts.mdx)
@@ -14,6 +17,7 @@ Under the hood: faster-whisper behind an Nginx load balancer. Add workers to sca
 ## What
 
 - **OpenAI Whisper API compatible** (`/v1/audio/transcriptions`) -- works with any client that speaks the OpenAI audio API.
+- **Selectable backend** -- choose `whisper` or `nemotron` at startup with `TRANSCRIPTION_BACKEND`.
 - **Load-balanced** -- Nginx distributes requests across workers using least-connections.
 - **Backpressure-aware** -- configurable fail-fast mode returns 503 when busy, letting callers buffer and retry.
 - **GPU and CPU** -- same codebase, different docker-compose files.
@@ -35,7 +39,7 @@ docker compose up -d
 # Start (CPU)
 docker compose -f docker-compose.cpu.yml up -d
 
-# Watch logs until "Model loaded successfully"
+# Watch logs until the backend reports ready
 docker compose logs -f
 ```
 
@@ -72,7 +76,10 @@ All configuration is via environment variables. Copy `.env.example` and adjust.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TRANSCRIPTION_BACKEND` | `whisper` | Backend for this service instance: `whisper` or `nemotron` |
 | `MODEL_SIZE` | `large-v3-turbo` | Whisper model (see [docs/models.md](docs/models.md)) |
+| `NEMOTRON_MODEL_NAME` | `nvidia/nemotron-3.5-asr-streaming-0.6b` | NeMo model to load when `TRANSCRIPTION_BACKEND=nemotron` |
+| `NEMOTRON_TARGET_LANG_DEFAULT` | `auto` | Default Nemotron target language when the request omits `language` |
 | `DEVICE` | `cuda` | `cuda` or `cpu` |
 | `COMPUTE_TYPE` | `int8` | `int8`, `float16`, or `float32` |
 | `CPU_THREADS` | `0` (auto) | CPU threads when `DEVICE=cpu` |
@@ -88,6 +95,25 @@ All configuration is via environment variables. Copy `.env.example` and adjust.
 These can be overridden per-request via form fields `max_speech_duration_s` and `min_silence_duration_ms`.
 
 Full list with quality/VAD tuning parameters: `.env.example`.
+
+### Backend selection
+
+The service now supports two backend modes:
+
+- `TRANSCRIPTION_BACKEND=whisper`
+  - current/default behavior
+  - uses `faster-whisper`
+  - preserves the existing bot-safe path, including
+    `model=whisper-1` and word timestamps
+- `TRANSCRIPTION_BACKEND=nemotron`
+  - uses NVIDIA NeMo with
+    `nvidia/nemotron-3.5-asr-streaming-0.6b`
+  - keeps the same HTTP endpoint and top-level response envelope
+  - continues to accept `model=whisper-1` for compatibility, so
+    existing callers do not need to change when pointed at a
+    Nemotron-backed deployment
+
+Unknown `model` values are rejected with 400.
 
 ### Response format
 
@@ -138,6 +164,11 @@ Response segments include a `words` array:
 Used by the bot pipeline for speaker attribution on Teams' single-channel mixed audio: caption says "Alice spoke 10.0s-15.2s" → match word timestamps → attribute those words to Alice.
 
 Default (`timestamp_granularities=segment`) returns no `words` array — no performance impact.
+
+Whisper remains the supported backend for the current bot path that
+expects word timestamps. Nemotron responses are normalized into the same
+top-level JSON envelope, but word-level timestamp parity depends on the
+installed NeMo runtime and model support.
 
 ### Scale
 

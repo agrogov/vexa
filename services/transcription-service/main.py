@@ -8,9 +8,10 @@ import time
 import logging
 import asyncio
 import json
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Set
 import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Request
@@ -30,6 +31,12 @@ logger = logging.getLogger(__name__)
 # Configuration
 WORKER_ID = os.getenv("WORKER_ID", "1")
 MODEL_SIZE = os.getenv("MODEL_SIZE", "large-v3-turbo")
+TRANSCRIPTION_BACKEND = os.getenv("TRANSCRIPTION_BACKEND", "whisper").strip().lower() or "whisper"
+NEMOTRON_MODEL_NAME = os.getenv(
+    "NEMOTRON_MODEL_NAME",
+    "nvidia/nemotron-3.5-asr-streaming-0.6b",
+).strip()
+NEMOTRON_TARGET_LANG_DEFAULT = os.getenv("NEMOTRON_TARGET_LANG_DEFAULT", "auto").strip() or "auto"
 
 # Device detection: Use environment variable or default to cuda for GPU containers
 # CTranslate2 (used by faster-whisper) will automatically detect and use CUDA if available
@@ -96,6 +103,362 @@ VAD_MAX_SPEECH_DURATION_S = _env_float("VAD_MAX_SPEECH_DURATION_S", 15.0)  # max
 USE_TEMPERATURE_FALLBACK = _env_bool("USE_TEMPERATURE_FALLBACK", False)
 TEMPERATURE_FALLBACK_CHAIN = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
+WHISPER_COMPAT_MODEL = "whisper-1"
+NEMOTRON_PUBLIC_MODEL = "nemotron-3.5-asr-streaming-0.6b"
+NEMOTRON_LANGUAGE_MAP = {
+    "de": "de-DE",
+    "en": "en-US",
+    "es": "es-ES",
+    "fr": "fr-FR",
+    "it": "it-IT",
+    "nl": "nl-NL",
+    "pl": "pl-PL",
+    "pt": "pt-PT",
+    "ru": "ru-RU",
+    "uk": "uk-UA",
+}
+
+
+def _normalize_backend_name(raw: Optional[str]) -> str:
+    backend = (raw or "whisper").strip().lower()
+    if backend not in ("whisper", "nemotron"):
+        logger.warning("Unknown TRANSCRIPTION_BACKEND=%r, defaulting to whisper", raw)
+        return "whisper"
+    return backend
+
+
+def _normalize_nemotron_target_lang(raw: Optional[str]) -> str:
+    if raw is None:
+        return NEMOTRON_TARGET_LANG_DEFAULT
+    value = raw.strip()
+    if not value:
+        return NEMOTRON_TARGET_LANG_DEFAULT
+    lowered = value.lower()
+    if lowered == "auto":
+        return "auto"
+    return NEMOTRON_LANGUAGE_MAP.get(lowered, value)
+
+
+def _extract_response_text(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if hasattr(payload, "text"):
+        return str(payload.text).strip()
+    if isinstance(payload, dict):
+        if "text" in payload:
+            return str(payload["text"]).strip()
+        if "pred_text" in payload:
+            return str(payload["pred_text"]).strip()
+    return str(payload).strip()
+
+
+def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
+    timestamp_data = getattr(payload, "timestamp", None)
+    if timestamp_data is None and isinstance(payload, dict):
+        timestamp_data = payload.get("timestamp")
+    if not isinstance(timestamp_data, dict):
+        return []
+    words = timestamp_data.get("word")
+    if not isinstance(words, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in words:
+        if not isinstance(item, dict):
+            continue
+        word = item.get("word")
+        start = item.get("start")
+        end = item.get("end")
+        if word is None or start is None or end is None:
+            continue
+        out.append(
+            {
+                "word": str(word),
+                "start": float(start),
+                "end": float(end),
+                "probability": float(item.get("probability", 1.0)),
+            }
+        )
+    return out
+
+
+class BaseTranscriptionBackend:
+    backend_name: str
+
+    def startup_details(self) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    def accepted_models(self) -> Set[str]:
+        raise NotImplementedError
+
+    async def transcribe(
+        self,
+        audio_array: np.ndarray,
+        sample_rate: int,
+        requested_model: str,
+        language: Optional[str],
+        prompt: Optional[str],
+        task: str,
+        want_word_timestamps: bool,
+        req_max_speech: float,
+        req_min_silence: int,
+        requested_temp: float,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+
+class WhisperBackend(BaseTranscriptionBackend):
+    backend_name = "whisper"
+
+    def __init__(self) -> None:
+        model_kwargs = {
+            "model_size_or_path": MODEL_SIZE,
+            "device": DEVICE,
+            "compute_type": COMPUTE_TYPE,
+            "download_root": "/app/models",
+        }
+        if DEVICE == "cpu" and CPU_THREADS > 0:
+            model_kwargs["cpu_threads"] = CPU_THREADS
+            logger.info("Worker %s using %s CPU threads", WORKER_ID, CPU_THREADS)
+        self.model = WhisperModel(**model_kwargs)
+
+    def startup_details(self) -> Dict[str, Any]:
+        return {
+            "backend": self.backend_name,
+            "backend_model": MODEL_SIZE,
+            "device": DEVICE,
+            "compute_type": COMPUTE_TYPE,
+        }
+
+    def accepted_models(self) -> Set[str]:
+        return {WHISPER_COMPAT_MODEL, MODEL_SIZE}
+
+    async def transcribe(
+        self,
+        audio_array: np.ndarray,
+        sample_rate: int,
+        requested_model: str,
+        language: Optional[str],
+        prompt: Optional[str],
+        task: str,
+        want_word_timestamps: bool,
+        req_max_speech: float,
+        req_min_silence: int,
+        requested_temp: float,
+    ) -> Dict[str, Any]:
+        temps = TEMPERATURE_FALLBACK_CHAIN if USE_TEMPERATURE_FALLBACK else [requested_temp]
+
+        best: Optional[Tuple[str, str, float, float, List[Dict[str, Any]]]] = None
+        last_info = None
+        last_segments: List[Dict[str, Any]] = []
+
+        for t in temps:
+            def _transcribe_sync():
+                return self.model.transcribe(
+                    audio_array,
+                    language=language,
+                    task=task,
+                    initial_prompt=prompt,
+                    temperature=t,
+                    beam_size=BEAM_SIZE,
+                    best_of=BEST_OF,
+                    compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
+                    log_prob_threshold=LOG_PROB_THRESHOLD,
+                    no_speech_threshold=NO_SPEECH_THRESHOLD,
+                    condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
+                    prompt_reset_on_temperature=PROMPT_RESET_ON_TEMPERATURE,
+                    repetition_penalty=REPETITION_PENALTY,
+                    no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
+                    vad_filter=VAD_FILTER,
+                    vad_parameters={
+                        "threshold": VAD_FILTER_THRESHOLD,
+                        "min_silence_duration_ms": req_min_silence,
+                        "max_speech_duration_s": req_max_speech,
+                    },
+                    word_timestamps=want_word_timestamps,
+                )
+
+            segments_list, info = await asyncio.get_event_loop().run_in_executor(
+                transcription_executor, _transcribe_sync
+            )
+            last_info = info
+
+            segments: List[Dict[str, Any]] = []
+            for idx, segment in enumerate(segments_list):
+                seg_dict: Dict[str, Any] = {
+                    "id": idx,
+                    "seek": 0,
+                    "start": segment.start,
+                    "end": segment.end,
+                    "text": segment.text,
+                    "tokens": [],
+                    "temperature": t,
+                    "avg_logprob": segment.avg_logprob,
+                    "compression_ratio": segment.compression_ratio,
+                    "no_speech_prob": segment.no_speech_prob,
+                    "audio_start": segment.start,
+                    "audio_end": segment.end,
+                }
+                if want_word_timestamps and hasattr(segment, "words") and segment.words:
+                    seg_dict["words"] = [
+                        {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
+                        for w in segment.words
+                    ]
+                segments.append(seg_dict)
+            last_segments = segments
+
+            if _looks_like_silence(segments):
+                best = ("", info.language, getattr(info, "language_probability", 0.0), 0.0, [])
+                logger.info("Worker %s detected silence (temp=%s)", WORKER_ID, t)
+                break
+
+            if not _looks_like_hallucination(segments):
+                full_text = " ".join([s["text"].strip() for s in segments]).strip()
+                duration = segments[-1]["end"] if segments else 0.0
+                best = (full_text, info.language, getattr(info, "language_probability", 0.0), duration, segments)
+                logger.info("Worker %s accepted whisper transcription (temp=%s)", WORKER_ID, t)
+                break
+
+            logger.info("Worker %s rejected whisper transcription as hallucination/low-confidence (temp=%s)", WORKER_ID, t)
+
+        if best is None:
+            info = last_info
+            segments = last_segments
+            full_text = " ".join([s["text"].strip() for s in segments]).strip()
+            duration = segments[-1]["end"] if segments else 0.0
+            lang_prob = getattr(info, "language_probability", 0.0) if info else 0.0
+            best = (full_text, info.language if info else (language or "unknown"), lang_prob, duration, segments)
+
+        full_text, detected_language, detected_language_probability, duration, segments = best
+        return {
+            "text": full_text,
+            "language": detected_language,
+            "language_probability": detected_language_probability,
+            "duration": duration,
+            "segments": segments,
+        }
+
+class NemotronBackend(BaseTranscriptionBackend):
+    backend_name = "nemotron"
+
+    def __init__(self) -> None:
+        try:
+            import nemo.collections.asr as nemo_asr
+        except ImportError as exc:
+            raise RuntimeError(
+                "Nemotron backend requires NeMo ASR runtime. Install nemo_toolkit[asr] to use TRANSCRIPTION_BACKEND=nemotron."
+            ) from exc
+        self.nemo_asr = nemo_asr
+        self.model = nemo_asr.models.ASRModel.from_pretrained(model_name=NEMOTRON_MODEL_NAME)
+
+    def startup_details(self) -> Dict[str, Any]:
+        return {
+            "backend": self.backend_name,
+            "backend_model": NEMOTRON_MODEL_NAME,
+            "device": DEVICE,
+        }
+
+    def accepted_models(self) -> Set[str]:
+        return {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL, NEMOTRON_MODEL_NAME}
+
+    async def transcribe(
+        self,
+        audio_array: np.ndarray,
+        sample_rate: int,
+        requested_model: str,
+        language: Optional[str],
+        prompt: Optional[str],
+        task: str,
+        want_word_timestamps: bool,
+        req_max_speech: float,
+        req_min_silence: int,
+        requested_temp: float,
+    ) -> Dict[str, Any]:
+        target_lang = _normalize_nemotron_target_lang(language)
+        duration = float(len(audio_array) / sample_rate) if sample_rate > 0 else 0.0
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+            wav_path = tmp_wav.name
+        try:
+            sf.write(wav_path, audio_array, sample_rate)
+
+            def _transcribe_sync():
+                kwargs: Dict[str, Any] = {
+                    "audio": [wav_path],
+                    "batch_size": 1,
+                }
+                if target_lang:
+                    kwargs["target_lang"] = target_lang
+                if want_word_timestamps:
+                    kwargs["timestamps"] = True
+                return self.model.transcribe(**kwargs)
+
+            hypotheses = await asyncio.get_event_loop().run_in_executor(
+                transcription_executor, _transcribe_sync
+            )
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+        if not isinstance(hypotheses, list) or not hypotheses:
+            raise RuntimeError("Nemotron backend returned no hypotheses")
+
+        first = hypotheses[0]
+        full_text = _extract_response_text(first)
+        words = _extract_word_timestamps(first) if want_word_timestamps else []
+        if words:
+            seg_start = words[0]["start"]
+            seg_end = words[-1]["end"]
+        else:
+            seg_start = 0.0
+            seg_end = duration
+
+        segment: Dict[str, Any] = {
+            "id": 0,
+            "seek": 0,
+            "start": seg_start,
+            "end": seg_end,
+            "text": full_text,
+            "tokens": [],
+            "temperature": 0.0,
+            "avg_logprob": 0.0,
+            "compression_ratio": 0.0,
+            "no_speech_prob": 0.0,
+            "audio_start": seg_start,
+            "audio_end": seg_end,
+        }
+        if words:
+            segment["words"] = words
+
+        detected_language = target_lang if target_lang != "auto" else "auto"
+        return {
+            "text": full_text,
+            "language": detected_language,
+            "language_probability": 1.0 if target_lang != "auto" else 0.0,
+            "duration": duration,
+            "segments": [segment] if full_text or words else [],
+        }
+
+
+def _build_backend() -> BaseTranscriptionBackend:
+    backend = _normalize_backend_name(TRANSCRIPTION_BACKEND)
+    if backend == "nemotron":
+        return NemotronBackend()
+    return WhisperBackend()
+
+
+def _validate_requested_model(backend: BaseTranscriptionBackend, requested_model: str) -> None:
+    accepted = backend.accepted_models()
+    if requested_model not in accepted:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported model '{requested_model}' for backend '{backend.backend_name}'. "
+                f"Accepted values: {sorted(accepted)}"
+            ),
+        )
+
 def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
     """Heuristic: treat as silence if all segments look like no-speech."""
     if not segments:
@@ -159,8 +522,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if _PUBLIC_DOCS else None,
 )
 
-# Global model instance
-model: Optional[WhisperModel] = None
+# Global backend instance
+transcription_backend: Optional[BaseTranscriptionBackend] = None
 
 # Load management: Global concurrency limit and bounded queue
 # These settings control how many transcription requests can be processed concurrently.
@@ -208,10 +571,17 @@ def _deferred_capacity_available(active_rt: int, active_df: int) -> bool:
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize Whisper model on startup"""
-    global model
+    """Initialize the configured transcription backend on startup."""
+    global transcription_backend
     logger.info(f"Worker {WORKER_ID} starting up...")
-    logger.info(f"Device: {DEVICE}, Model: {MODEL_SIZE}, Compute: {COMPUTE_TYPE}")
+    logger.info(
+        "Backend startup - backend=%s device=%s whisper_model=%s nemotron_model=%s compute=%s",
+        _normalize_backend_name(TRANSCRIPTION_BACKEND),
+        DEVICE,
+        MODEL_SIZE,
+        NEMOTRON_MODEL_NAME,
+        COMPUTE_TYPE,
+    )
     logger.info(
         "Quality params - "
         f"beam_size={BEAM_SIZE}, best_of={BEST_OF}, "
@@ -225,34 +595,25 @@ async def startup_event():
     )
     
     try:
-        # Build model initialization parameters
-        model_kwargs = {
-            "model_size_or_path": MODEL_SIZE,
-            "device": DEVICE,
-            "compute_type": COMPUTE_TYPE,
-            "download_root": "/app/models"
-        }
-        
-        # Add CPU threads for CPU mode (optimization from research)
-        if DEVICE == "cpu" and CPU_THREADS > 0:
-            model_kwargs["cpu_threads"] = CPU_THREADS
-            logger.info(f"Worker {WORKER_ID} using {CPU_THREADS} CPU threads")
-        
-        model = WhisperModel(**model_kwargs)
-        logger.info(f"Worker {WORKER_ID} ready - Model loaded successfully")
+        transcription_backend = _build_backend()
+        details = transcription_backend.startup_details()
+        logger.info("Worker %s ready - backend loaded successfully: %s", WORKER_ID, json.dumps(details, sort_keys=True))
     except Exception as e:
-        logger.error(f"Failed to load model: {e}")
+        logger.error(f"Failed to load transcription backend: {e}")
         raise
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint for load balancer"""
+    backend = transcription_backend
+    backend_details = backend.startup_details() if backend is not None else {}
     health_status = {
-        "status": "healthy" if model is not None else "unhealthy",
+        "status": "healthy" if backend is not None else "unhealthy",
         "worker_id": WORKER_ID,
         "timestamp": datetime.utcnow().isoformat(),
-        "model": MODEL_SIZE,
+        "model": backend_details.get("backend_model", MODEL_SIZE),
+        "backend": backend_details.get("backend", _normalize_backend_name(TRANSCRIPTION_BACKEND)),
         "device": DEVICE,
         "gpu_available": DEVICE == "cuda",
     }
@@ -261,7 +622,7 @@ async def health_check():
         # CTranslate2 (via faster-whisper) handles GPU automatically
         health_status["compute_type"] = COMPUTE_TYPE
     
-    if model is None:
+    if backend is None:
         return JSONResponse(content=health_status, status_code=503)
     
     return health_status
@@ -297,6 +658,10 @@ async def transcribe_audio(
     """
     if not requested_model:
         raise HTTPException(status_code=400, detail="Model parameter is required")
+    backend = transcription_backend
+    if backend is None:
+        raise HTTPException(status_code=503, detail="Transcription backend not initialized")
+    _validate_requested_model(backend, requested_model)
     global waiting_requests, active_realtime_requests, active_deferred_requests
 
     tier_from_header = request.headers.get("X-Transcription-Tier")
@@ -407,9 +772,7 @@ async def transcribe_audio(
         # Ensure audio is contiguous array
         audio_array = np.ascontiguousarray(audio_array, dtype=np.float32)
         
-        # Transcribe (with optional temperature fallback)
         requested_temp = float(temperature) if temperature else 0.0
-        temps = TEMPERATURE_FALLBACK_CHAIN if USE_TEMPERATURE_FALLBACK else [requested_temp]
         want_word_timestamps = "word" in timestamp_granularities
 
         # Per-request VAD overrides (with defaults from env)
@@ -417,117 +780,36 @@ async def transcribe_audio(
         req_min_silence = int(min_silence_duration_ms) if min_silence_duration_ms else VAD_MIN_SILENCE_DURATION_MS
 
         logger.info(
-            f"Worker {WORKER_ID} starting transcription - requested_temp: {requested_temp}, "
-            f"temps: {temps}, language: {language}, task: {task}, vad_filter: {VAD_FILTER}, "
+            f"Worker {WORKER_ID} starting transcription - backend={backend.backend_name}, requested_model={requested_model}, "
+            f"requested_temp: {requested_temp}, language: {language}, task: {task}, vad_filter: {VAD_FILTER}, "
             f"max_speech={req_max_speech}s, min_silence={req_min_silence}ms"
         )
-
-        best: Optional[Tuple[str, str, float, List[Dict[str, Any]]]] = None
-        last_info = None
-        last_segments: List[Dict[str, Any]] = []
-
-        for t in temps:
-            # Run blocking transcription in thread pool to avoid blocking event loop
-            def _transcribe_sync():
-                return model.transcribe(
-                    audio_array,
-                    language=language,
-                    task=task,
-                    initial_prompt=prompt,
-                    temperature=t,
-                    beam_size=BEAM_SIZE,
-                    best_of=BEST_OF,
-                    compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
-                    log_prob_threshold=LOG_PROB_THRESHOLD,
-                    no_speech_threshold=NO_SPEECH_THRESHOLD,
-                    condition_on_previous_text=CONDITION_ON_PREVIOUS_TEXT,
-                    prompt_reset_on_temperature=PROMPT_RESET_ON_TEMPERATURE,
-                    repetition_penalty=REPETITION_PENALTY,
-                    no_repeat_ngram_size=NO_REPEAT_NGRAM_SIZE,
-                    vad_filter=VAD_FILTER,
-                    vad_parameters={
-                        "threshold": VAD_FILTER_THRESHOLD,
-                        "min_silence_duration_ms": req_min_silence,
-                        "max_speech_duration_s": req_max_speech,
-                    },
-                    word_timestamps=want_word_timestamps,
-                )
-            
-            segments_list, info = await asyncio.get_event_loop().run_in_executor(
-                transcription_executor, _transcribe_sync
-            )
-            last_info = info
-
-            # Convert segments to list (faster-whisper returns generator)
-            segments: List[Dict[str, Any]] = []
-            for idx, segment in enumerate(segments_list):
-                seg_dict: Dict[str, Any] = {
-                    "id": idx,
-                    "seek": 0,
-                    "start": segment.start,
-                    "end": segment.end,
-                    "text": segment.text,
-                    "tokens": [],
-                    "temperature": t,
-                    "avg_logprob": segment.avg_logprob,
-                    "compression_ratio": segment.compression_ratio,
-                    "no_speech_prob": segment.no_speech_prob,
-                    "audio_start": segment.start,
-                    "audio_end": segment.end,
-                }
-                if want_word_timestamps and hasattr(segment, 'words') and segment.words:
-                    seg_dict["words"] = [
-                        {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
-                        for w in segment.words
-                    ]
-                segments.append(seg_dict)
-            last_segments = segments
-
-            if _looks_like_silence(segments):
-                best = ("", info.language, getattr(info, 'language_probability', 0.0), 0.0, [])
-                logger.info(f"Worker {WORKER_ID} detected silence (temp={t})")
-                break
-
-            is_hallucination = _looks_like_hallucination(segments)
-
-            if not is_hallucination:
-                full_text = " ".join([s["text"].strip() for s in segments]).strip()
-                duration = segments[-1]["end"] if segments else 0.0
-                best = (full_text, info.language, getattr(info, 'language_probability', 0.0), duration, segments)
-                logger.info(f"Worker {WORKER_ID} accepted transcription (temp={t})")
-                break
-            else:
-                logger.info(f"Worker {WORKER_ID} rejected transcription as hallucination/low-confidence (temp={t})")
-
-        if best is None:
-            # Fall back to last attempt (even if it looks low-quality) to preserve backward behavior.
-            info = last_info
-            segments = last_segments
-            full_text = " ".join([s["text"].strip() for s in segments]).strip()
-            duration = segments[-1]["end"] if segments else 0.0
-            lang_prob = getattr(info, 'language_probability', 0.0) if info else 0.0
-            best = (full_text, info.language if info else (language or "unknown"), lang_prob, duration, segments)
-
-        full_text, detected_language, detected_language_probability, duration, segments = best
-        logger.info(f"Worker {WORKER_ID} transcription completed - language: {detected_language}, language_probability: {detected_language_probability}")
+        response = await backend.transcribe(
+            audio_array=audio_array,
+            sample_rate=sample_rate,
+            requested_model=requested_model,
+            language=language,
+            prompt=prompt,
+            task=task,
+            want_word_timestamps=want_word_timestamps,
+            req_max_speech=req_max_speech,
+            req_min_silence=req_min_silence,
+            requested_temp=requested_temp,
+        )
+        logger.info(
+            "Worker %s transcription completed - backend=%s language=%s language_probability=%s",
+            WORKER_ID,
+            backend.backend_name,
+            response.get("language"),
+            response.get("language_probability"),
+        )
         
         processing_time = time.time() - start_time
         logger.info(
             f"Worker {WORKER_ID} completed in {processing_time:.2f}s - "
-            f"Duration: {duration:.2f}s, Segments: {len(segments)}, Language: {detected_language}"
+            f"Duration: {float(response.get('duration', 0.0)):.2f}s, "
+            f"Segments: {len(response.get('segments', []))}, Language: {response.get('language')}"
         )
-        
-        # Return format expected by Vexa RemoteTranscriber
-        response = {
-            "text": full_text,
-            "language": detected_language,
-            "language_probability": detected_language_probability,
-            "duration": duration,
-            "segments": segments,
-        }
-        
-        # CTranslate2 handles memory management automatically
-        
         return response
         
     except HTTPException:
@@ -558,12 +840,18 @@ async def transcribe_audio(
 @app.get("/")
 async def root():
     """Root endpoint with service info"""
+    backend = transcription_backend
+    backend_name = backend.backend_name if backend is not None else _normalize_backend_name(TRANSCRIPTION_BACKEND)
+    backend_model = MODEL_SIZE
+    if backend is not None:
+        backend_model = backend.startup_details().get("backend_model", MODEL_SIZE)
     return {
         "service": "Vexa Transcription Service",
         "worker_id": WORKER_ID,
-        "model": MODEL_SIZE,
+        "model": backend_model,
+        "backend": backend_name,
         "device": DEVICE,
-        "status": "ready" if model is not None else "initializing",
+        "status": "ready" if backend is not None else "initializing",
         "endpoints": {
             "transcribe": "/v1/audio/transcriptions",
             "health": "/health"

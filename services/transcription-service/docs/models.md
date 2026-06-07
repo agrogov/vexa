@@ -1,6 +1,18 @@
-# Whisper Model Selection Guide
+# Transcription Backend Guide
 
-## Model Comparison
+## Backend choice
+
+`services/transcription-service` now supports two startup-time backends:
+
+| Backend | Env | Runtime | Best for |
+|---------|-----|---------|----------|
+| Whisper | `TRANSCRIPTION_BACKEND=whisper` | `faster-whisper` | Current Vexa bot path, word timestamps, lowest migration risk |
+| Nemotron | `TRANSCRIPTION_BACKEND=nemotron` | NeMo ASR | Alternate NVIDIA ASR backend behind the same HTTP API |
+
+Whisper remains the default and the compatibility path for existing
+callers that send `model=whisper-1`.
+
+## Whisper model selection
 
 | Model | GPU VRAM (INT8) | CPU RAM (INT8) | Quality | Speed | Multilingual |
 |-------|-----------------|----------------|---------|-------|--------------|
@@ -10,33 +22,39 @@
 | **base** | ~150 MB | ~300-600 MB | Good | Extremely Fast | Yes |
 | **tiny** | ~75 MB | ~150-300 MB | Basic | Fastest | Yes |
 
-All models are multilingual (99+ languages).
+All Whisper models are multilingual (99+ languages).
 
-## Recommended: large-v3-turbo + INT8
+### Recommended Whisper default
 
-- **GPU VRAM**: ~2.1 GB (validated)
-- **Quality**: Excellent (95-98% accuracy)
-- **Speed**: Very fast (>10x real-time)
+- **Model**: `large-v3-turbo`
+- **Compute**: `int8`
+- **Why**: good quality / latency / VRAM balance for the current bot path
 
-## Model Selection by GPU VRAM
+## Nemotron backend
 
-| Your GPU VRAM | Recommended Model | Compute Type | Expected VRAM |
-|---------------|-------------------|--------------|---------------|
-| 8+ GB | large-v3-turbo | INT8 | ~2.1 GB |
-| 4-8 GB | large-v3-turbo | INT8 | ~2.1 GB |
-| 2-4 GB | medium | INT8 | ~1-1.5 GB |
-| 1-2 GB | small | INT8 | ~0.5-1 GB |
-| CPU Only | medium | INT8 | ~2-4 GB RAM |
+Default Nemotron model:
 
-## Why INT8 Quantization?
+- `NEMOTRON_MODEL_NAME=nvidia/nemotron-3.5-asr-streaming-0.6b`
 
-**GPU benefits:**
-- 50-60% VRAM reduction (6-8 GB -> 2-3 GB for large models)
-- Still uses GPU acceleration (faster than CPU)
-- Minimal accuracy loss (~1-2% WER increase)
-- Enables larger models on smaller GPUs
+Notes:
 
-**CPU benefits:**
-- 2-4x speedup vs float32
-- 50% memory reduction (6-8 GB -> 3-4 GB)
-- Real-time capable (2-4x RT speed)
+- The service integrates Nemotron through **NeMo ASR**, not
+  `faster-whisper`.
+- Backend selection happens at service startup, not per request.
+- The HTTP request still requires the `model` form field for OpenAI
+  compatibility.
+- `model=whisper-1` remains accepted even on a Nemotron-backed
+  deployment so existing callers can keep working unchanged.
+- If the request provides `language=en`, `de`, `fr`, etc., the service
+  maps common 2-letter codes to Nemotron locale-style values such as
+  `en-US`, `de-DE`, `fr-FR`. If omitted, Nemotron uses
+  `NEMOTRON_TARGET_LANG_DEFAULT` (default `auto`).
+
+## Practical recommendation
+
+- Use **Whisper** for the existing Vexa bot deployment today.
+- Use **Nemotron** when you want to run an alternate backend behind the
+  same service contract and are prepared to install the NeMo runtime.
+- Do not assume Nemotron is yet a drop-in replacement for every
+  timestamp-sensitive bot flow; Whisper remains the safest path for that
+  workload.

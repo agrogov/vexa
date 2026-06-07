@@ -1,0 +1,125 @@
+release_id: 260607-nemotron-asr
+branch: release/260607-nemotron-asr
+summary: |
+  Add NVIDIA Nemotron ASR support to `services/transcription-service`
+  without replacing the existing Whisper path.
+
+  This cycle chooses the smallest shape that fits the current code:
+
+  - The service remains a **single-backend-per-worker** process.
+    It does NOT become a multi-model in-memory router this cycle.
+  - A new startup-time backend selector chooses `whisper` or
+    `nemotron`; default stays `whisper`.
+  - Whisper remains the compatibility path for existing Vexa callers.
+    In particular, the bot client stays unchanged and continues to
+    send `model=whisper-1`.
+  - Nemotron is added as an alternate service backend behind the
+    same `/v1/audio/transcriptions` HTTP contract, with response
+    normalization back into the current JSON envelope.
+  - This cycle does NOT redesign the bot/service realtime protocol
+    to exploit Nemotron's native cache-aware streaming interface.
+    It integrates Nemotron behind the current file-upload API.
+  - This cycle also does NOT switch the bot pipeline to Nemotron by
+    default. Operators choose the backend at service deploy time.
+
+deployments:
+  modes: [lite, compose, helm]
+
+issues:
+  - id: transcription-service-instance-selectable-backend
+    source: human
+    ref: "User request 2026-06-07"
+    problem: |
+      `services/transcription-service` currently loads one global
+      `faster-whisper` model and cannot run NVIDIA Nemotron ASR at all.
+      The request field `model` is required for OpenAI compatibility
+      but is not used to select a backend, so there is no supported way
+      to choose anything except Whisper.
+
+      At the same time, existing Vexa callers depend on the current
+      Whisper-shaped contract:
+
+      - the bot sends `model=whisper-1`
+      - the endpoint is `/v1/audio/transcriptions`
+      - the response is `verbose_json`-style JSON with `text`,
+        `language`, `language_probability`, `duration`, `segments`
+      - the bot requests `timestamp_granularities=word`
+
+      Replacing Whisper outright would risk breaking the installed
+      caller base. The release must add Nemotron without regressing the
+      current Whisper path.
+    hypothesis: |
+      Add an instance-level backend selector to
+      `services/transcription-service/main.py`:
+
+      - `TRANSCRIPTION_BACKEND=whisper|nemotron`, default `whisper`
+      - When `whisper`, keep the current startup/runtime path using
+        `faster-whisper` and `MODEL_SIZE`.
+      - When `nemotron`, initialize a NeMo ASR model from
+        `nvidia/nemotron-3.5-asr-streaming-0.6b` and run it behind the
+        same FastAPI endpoint.
+
+      Keep the existing HTTP surface stable:
+
+      - `model` remains required for OpenAI compatibility.
+      - `model=whisper-1` remains accepted on the Whisper backend.
+      - `model=whisper-1` also remains accepted on the Nemotron
+        backend so existing callers do not have to change to use a
+        Nemotron-backed deployment.
+      - Optionally also accept
+        `model=nemotron-3.5-asr-streaming-0.6b` as a truthful alias on
+        the Nemotron backend.
+      - Reject unknown model values with a clear 4xx instead of silently
+        routing them.
+
+      Normalize Nemotron output into the current response envelope:
+
+      - map request `language` to Nemotron target language when present
+      - use automatic language detection when `language` is absent
+      - return the existing top-level keys
+      - preserve Whisper word-timestamp behavior unchanged
+
+      Scope boundary for this cycle:
+
+      - The bot client is not changed to choose Nemotron dynamically.
+      - Backend selection happens at service startup/deploy time.
+      - If Nemotron cannot satisfy the exact current word-timestamp
+        contract, that limitation is surfaced explicitly and Whisper
+        remains the supported backend for timestamp-dependent bot flows.
+    gap_analysis: |
+      The current matrix only proves that transcription-service is up
+      (`TRANSCRIPTION_UP`) and that its API token works
+      (`TRANSCRIPTION_TOKEN_VALID`). It has no checks for backend
+      selection, Whisper compatibility alias preservation, Nemotron
+      startup/runtime success, or invalid-model rejection. That is why
+      the service can evolve from "one hard-wired Whisper backend" to a
+      dual-backend-capable deployment without the gate noticing whether
+      the new contract works.
+    new_checks:
+      - TRANSCRIPTION_WHISPER_BACKEND_COMPAT
+      - TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT
+      - TRANSCRIPTION_INVALID_MODEL_REJECTED
+      - BOT_TRANSCRIPTION_CLIENT_WHISPER_DEFAULT_UNCHANGED
+    fix_commits: []
+    proves:
+      - {check: TRANSCRIPTION_UP, modes: [lite, compose, helm]}
+      - {check: TRANSCRIPTION_TOKEN_VALID, modes: [lite, compose, helm]}
+      - {check: TRANSCRIPTION_WHISPER_BACKEND_COMPAT, modes: [lite, compose, helm]}
+      - {check: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT, modes: [lite, compose, helm]}
+      - {check: TRANSCRIPTION_INVALID_MODEL_REJECTED, modes: [lite, compose, helm]}
+      - {check: BOT_TRANSCRIPTION_CLIENT_WHISPER_DEFAULT_UNCHANGED, modes: [lite, compose, helm]}
+    required_modes: [lite, compose, helm]
+    human_verify:
+      - mode: compose
+        do: "Start transcription-service with `TRANSCRIPTION_BACKEND=whisper`, POST `tests/test_audio.wav` with `model=whisper-1` and `timestamp_granularities=word`"
+        expect: "200 response with non-empty `text` and at least one `segments[].words[]` entry"
+      - mode: compose
+        do: "Restart transcription-service with `TRANSCRIPTION_BACKEND=nemotron`, POST the same file with `model=whisper-1`"
+        expect: "200 response with the standard JSON envelope (`text`, `language`, `duration`, `segments`); no startup/runtime crash"
+      - mode: compose
+        do: "POST a valid file with `model=totally-unknown-model`"
+        expect: "4xx response with a clear invalid-model error; no silent fallback to Whisper"
+
+expensive_tests: []
+
+strict_features: []
