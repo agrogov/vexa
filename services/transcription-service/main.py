@@ -187,6 +187,18 @@ def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _build_nemotron_audio_entry(audio_path: str, duration: float, target_lang: str) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {
+        "audio_filepath": audio_path,
+        "duration": duration if duration > 0 else 100000,
+        "text": "",
+        # NeMo's prompt dataset currently reads cut.supervisions[0].language directly.
+        "lang": target_lang,
+        "language": target_lang,
+    }
+    return entry
+
+
 def _nemotron_restore_needs_prompt_compat(exc: Exception) -> bool:
     message = str(exc)
     return (
@@ -451,7 +463,7 @@ class NemotronBackend(BaseTranscriptionBackend):
 
             def _transcribe_sync():
                 kwargs: Dict[str, Any] = {
-                    "audio": [wav_path],
+                    "audio": [_build_nemotron_audio_entry(wav_path, duration, target_lang)],
                     "batch_size": 1,
                 }
                 if target_lang:
