@@ -15,6 +15,8 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     curl \
     nvtop \
+    build-essential \
+    python3-dev \
     libsndfile1 \
     ffmpeg \
     sox \
@@ -31,7 +33,8 @@ WORKDIR /app
 
 # Copy requirements and install
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir "numpy<2.0.0" setuptools wheel && \
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir "numpy<2.0.0" setuptools wheel typing_extensions && \
     pip3 install --no-cache-dir -r requirements.txt
 
 # Symlink pip-installed nvidia CUDA libs into /usr/local/lib (always in linker search path).
