@@ -52,6 +52,31 @@ if not tx_url:
     print("no transcription URL configured", file=sys.stderr)
     sys.exit(1)
 
+health_url = tx_url
+if health_url.endswith("/v1/audio/transcriptions"):
+    health_url = health_url[: -len("/v1/audio/transcriptions")] + "/health"
+else:
+    health_url = health_url.rstrip("/") + "/health"
+
+health_cmd = [
+    "curl", "-sS", "-X", "GET", health_url,
+    "-H", f"Authorization: Bearer {tx_token}",
+]
+health_result = subprocess.run(health_cmd, capture_output=True, text=True, timeout=30)
+if health_result.returncode != 0:
+    print(health_result.stderr.strip() or "health request failed", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    health_payload = json.loads(health_result.stdout)
+except json.JSONDecodeError as exc:
+    print(f"invalid health JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+if health_payload.get("backend") != "nemotron":
+    print(f"expected nemotron backend, got {health_payload.get('backend')!r}", file=sys.stderr)
+    sys.exit(1)
+
 cmd = [
     "curl", "-sS", "-w", "\n%{http_code}", "-X", "POST", tx_url,
     "-H", f"Authorization: Bearer {tx_token}",
