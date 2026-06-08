@@ -29,6 +29,39 @@
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (manifest as primary audio)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - The Nemotron request returns `200 OK` with prompt metadata preserved into the
+    Lhotse prompt dataset.
+- Actual:
+  - Startup is healthy and `set_inference_prompt('auto')` is logged, but the live
+    request still returns `500` with:
+    - `Unknown prompt key: 'None'`
+- Root cause:
+  - Passing raw audio files as the primary `audio` argument causes NeMo to build its
+    temporary manifest without the prompt fields this model needs.
+  - The prompt-aware dataset still reads `cut.supervisions[0].language == None`.
+  - To preserve `target_lang`, the primary `audio` argument likely needs to be a
+    manifest path whose entries include `target_lang`.
+- Touched commits:
+  - `13f24ba1` `fix(transcription-service): pass Nemotron audio positionally`
+- Evidence:
+  - Container logs show `Inference prompt set to 'auto' (index 101)`.
+  - The following stack still fails in `audio_to_text_lhotse_prompt_index.py`
+    on `cut.supervisions[0].language`.
+- Next-fix target:
+  - Restore the temp manifest entry with `target_lang`, but pass the manifest path
+    as the primary `audio` argument to `transcribe(...)` instead of using the
+    unsupported `manifest_filepath=` keyword path.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
 ## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (positional audio arg)
 
 - Classification: regression
