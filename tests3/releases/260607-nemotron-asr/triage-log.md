@@ -29,6 +29,30 @@
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (prod Dockerfile compatibility)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - `services/transcription-service/Dockerfile` and `Dockerfile.cpu` keep the existing
+    prod deployment support for the IB registry and certificate handling that existed
+    before `e315ed1ccabfd242f3c6722ad3f77f4cfadfe6a0`.
+- Actual:
+  - Later Dockerfile changes made the Nemotron image buildable and Python 3.12-compatible,
+    but dropped prod-specific registry/cert handling that operators need for deployment.
+- Root cause:
+  - The Dockerfile fixes focused on public image/dependency resolution and did not
+    preserve the prod registry/certificate plumbing from the pre-release Dockerfiles.
+- Next-fix target:
+  - Restore the pre-`e315ed1ccabfd242f3c6722ad3f77f4cfadfe6a0` IB registry and cert
+    handling in `services/transcription-service/Dockerfile` and `Dockerfile.cpu`,
+    while keeping the Nemotron/Whisper implementation and Python 3.12 dependency fixes.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
 ## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (post-review correctness)
 
 - Classification: regression

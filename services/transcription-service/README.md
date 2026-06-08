@@ -45,13 +45,11 @@ docker compose logs -f
 
 The service listens on the port mapped in `docker-compose.yml` (default 8083:80).
 
-The Dockerfiles now default to public base images:
+The Dockerfiles default to the Infobip registry and install the Infobip Root CA
+unconditionally for prod deployment behind corporate SSL inspection:
 
-- GPU: `nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04`
-- CPU: `python:3.10-slim`
-
-For environments behind Infobip SSL inspection, build with
-`--build-arg INSTALL_INFOBIP_CA=true`.
+- GPU: `docker.ib-ci.com/nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04`
+- CPU: `docker.ib-ci.com/python:3.12-slim`
 
 ### Test
 

@@ -1,7 +1,9 @@
-ARG CUDA_BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+ARG CUDA_BASE_IMAGE=docker.ib-ci.com/nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 FROM ${CUDA_BASE_IMAGE}
 
-ARG INSTALL_INFOBIP_CA=false
+# Add Infobip Root CA (required behind corporate SSL inspection)
+ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
+RUN update-ca-certificates
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV PATH=/opt/venv/bin:$PATH
@@ -25,12 +27,6 @@ RUN apt-get update && apt-get install -y \
     sox \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Optional corporate CA for environments behind Infobip SSL inspection.
-RUN if [ "$INSTALL_INFOBIP_CA" = "true" ]; then \
-      curl -fsSL http://ca.infobip.com/crl/RootCA.crt -o /usr/local/share/ca-certificates/infobip-rootca.crt && \
-      update-ca-certificates; \
-    fi
 
 WORKDIR /app
 
