@@ -4,6 +4,7 @@ FROM ${CUDA_BASE_IMAGE}
 ARG INSTALL_INFOBIP_CA=false
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV PATH=/opt/venv/bin:$PATH
 
 # Remove NVIDIA apt repo — CUDA libs are already in the base image; we don't
 # need to install anything from it, and its signing key has expired.
@@ -13,6 +14,7 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list /etc/apt/sources.list.d/nvidia*.lis
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
+    python3-venv \
     git \
     curl \
     nvtop \
@@ -34,13 +36,14 @@ WORKDIR /app
 
 # Copy requirements and install
 COPY requirements.txt .
-RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir "numpy<2.0.0" setuptools wheel typing_extensions && \
-    pip3 install --no-cache-dir -r requirements.txt
+RUN python3 -m venv /opt/venv && \
+    python -m pip install --no-cache-dir --upgrade pip && \
+    python -m pip install --no-cache-dir "numpy<2.0.0" setuptools wheel typing_extensions && \
+    python -m pip install --no-cache-dir -r requirements.txt
 
 # Symlink pip-installed nvidia CUDA libs into /usr/local/lib (always in linker search path).
 # This avoids depending on LD_LIBRARY_PATH or ldconfig cache at runtime.
-RUN find /usr/local/lib/python*/site-packages/nvidia/*/lib -name "*.so*" \
+RUN find /opt/venv/lib/python*/site-packages/nvidia/*/lib -name "*.so*" \
     | xargs -I{} ln -sf {} /usr/local/lib/ \
     && ldconfig
 
@@ -56,4 +59,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
 
 EXPOSE 8000
 
-CMD ["python3", "main.py"]
+CMD ["python", "main.py"]
