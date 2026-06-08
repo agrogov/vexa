@@ -141,6 +141,17 @@ def _normalize_nemotron_target_lang(raw: Optional[str]) -> str:
     return NEMOTRON_LANGUAGE_MAP.get(lowered, value)
 
 
+def _build_nemotron_manifest_entry(audio_filepath: str, duration: float, target_lang: str) -> Dict[str, Any]:
+    return {
+        "audio_filepath": audio_filepath,
+        "duration": duration,
+        "text": "",
+        "lang": target_lang,
+        "language": target_lang,
+        "target_lang": target_lang,
+    }
+
+
 def _extract_response_text(payload: Any) -> str:
     if isinstance(payload, str):
         return payload.strip()
@@ -389,12 +400,19 @@ class NemotronBackend(BaseTranscriptionBackend):
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
             wav_path = tmp_wav.name
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_manifest:
+            manifest_path = tmp_manifest.name
         try:
             sf.write(wav_path, audio_array, sample_rate)
+            json.dump(_build_nemotron_manifest_entry(wav_path, duration, target_lang), tmp_manifest)
+            tmp_manifest.write("\n")
+            tmp_manifest.flush()
 
             def _transcribe_sync():
+                if hasattr(self.model, "set_inference_prompt"):
+                    self.model.set_inference_prompt(target_lang)
                 return self.model.transcribe(
-                    [wav_path],
+                    manifest_filepath=manifest_path,
                     batch_size=1,
                     verbose=False,
                     timestamps=want_word_timestamps,
@@ -407,6 +425,10 @@ class NemotronBackend(BaseTranscriptionBackend):
         finally:
             try:
                 os.unlink(wav_path)
+            except OSError:
+                pass
+            try:
+                os.unlink(manifest_path)
             except OSError:
                 pass
 

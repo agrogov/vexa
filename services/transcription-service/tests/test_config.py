@@ -14,6 +14,7 @@ from main import (
     _env_bool,
     _env_int,
     _env_float,
+    _build_nemotron_manifest_entry,
     _looks_like_silence,
     _looks_like_hallucination,
     _normalize_backend_name,
@@ -220,6 +221,19 @@ class TestNormalizeNemotronTargetLang:
 
     def test_model_filename_matches_repo_artifact(self):
         assert NEMOTRON_MODEL_FILENAME == "nemotron-3.5-asr-streaming-0.6b.nemo"
+
+
+class TestBuildNemotronManifestEntry:
+    def test_manifest_entry_preserves_prompt_language(self):
+        entry = _build_nemotron_manifest_entry("/tmp/test.wav", 5.48, "auto")
+        assert entry == {
+            "audio_filepath": "/tmp/test.wav",
+            "duration": 5.48,
+            "text": "",
+            "lang": "auto",
+            "language": "auto",
+            "target_lang": "auto",
+        }
 
 
 class TestExtractResponseHelpers:
