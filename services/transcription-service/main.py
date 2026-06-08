@@ -40,6 +40,8 @@ NEMOTRON_MODEL_NAME = os.getenv(
     "nvidia/nemotron-3.5-asr-streaming-0.6b",
 ).strip()
 NEMOTRON_TARGET_LANG_DEFAULT = os.getenv("NEMOTRON_TARGET_LANG_DEFAULT", "auto").strip() or "auto"
+NEMOTRON_ATT_CONTEXT_SIZE_RAW = os.getenv("NEMOTRON_ATT_CONTEXT_SIZE", "56,6").strip() or "56,6"
+NEMOTRON_BOOSTING_PHRASES_FILE = os.getenv("NEMOTRON_BOOSTING_PHRASES_FILE", "").strip()
 
 # Device detection: Use environment variable or default to cuda for GPU containers
 # CTranslate2 (used by faster-whisper) will automatically detect and use CUDA if available
@@ -84,6 +86,10 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         logger.warning(f"Invalid float env {name}={raw!r}, using default {default}")
         return default
+
+NEMOTRON_BOOSTING_ALPHA = _env_float("NEMOTRON_BOOSTING_ALPHA", 1.0)
+NEMOTRON_BOOSTING_CONTEXT_SCORE = _env_float("NEMOTRON_BOOSTING_CONTEXT_SCORE", 1.0)
+NEMOTRON_BOOSTING_DEPTH_SCALING = _env_float("NEMOTRON_BOOSTING_DEPTH_SCALING", 2.0)
 
 # Transcription defaults (can be overridden via env)
 BEAM_SIZE = _env_int("BEAM_SIZE", 5)
@@ -141,6 +147,25 @@ def _normalize_nemotron_target_lang(raw: Optional[str]) -> str:
     if lowered == "auto":
         return "auto"
     return NEMOTRON_LANGUAGE_MAP.get(lowered, value)
+
+
+def _parse_nemotron_att_context_size(raw: Optional[str]) -> List[int]:
+    value = (raw or "56,6").strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    try:
+        parts = [int(part.strip()) for part in value.split(",") if part.strip()]
+    except ValueError:
+        logger.warning("Invalid NEMOTRON_ATT_CONTEXT_SIZE=%r, using [56, 6]", raw)
+        return [56, 6]
+    if len(parts) != 2 or parts[0] != 56 or parts[1] not in {0, 1, 3, 6, 13}:
+        logger.warning("Invalid NEMOTRON_ATT_CONTEXT_SIZE=%r, using [56, 6]", raw)
+        return [56, 6]
+    return parts
+
+
+def _nemotron_chunk_size_ms(att_context_size: List[int]) -> int:
+    return (att_context_size[1] + 1) * 80
 
 
 def _build_nemotron_manifest_entry(audio_filepath: str, duration: float, target_lang: str) -> Dict[str, Any]:
@@ -371,21 +396,38 @@ class NemotronBackend(BaseTranscriptionBackend):
 
     def __init__(self) -> None:
         try:
+            import torch
+            from omegaconf import OmegaConf
             from nemo.collections.asr.models.rnnt_bpe_models_prompt import (
                 EncDecRNNTBPEModelWithPrompt,
             )
+            from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecodingConfig
+            from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
+            from nemo.collections.asr.parts.utils.streaming_utils import CacheAwareStreamingAudioBuffer
         except ImportError as exc:
             raise RuntimeError(
                 "Nemotron backend requires NeMo ASR runtime from NVIDIA/NeMo main. "
                 "Install `nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@main` "
                 "to use TRANSCRIPTION_BACKEND=nemotron."
             ) from exc
+        self.torch = torch
+        self.hypothesis_cls = Hypothesis
+        self.streaming_buffer_cls = CacheAwareStreamingAudioBuffer
+        self.att_context_size = _parse_nemotron_att_context_size(NEMOTRON_ATT_CONTEXT_SIZE_RAW)
+        self.device = torch.device("cuda" if DEVICE == "cuda" and torch.cuda.is_available() else "cpu")
+        self.compute_dtype = torch.float32
         self.model_path = hf_hub_download(
             repo_id=NEMOTRON_MODEL_NAME,
             filename=NEMOTRON_MODEL_FILENAME,
             cache_dir="/app/models/hf",
         )
         self.model = EncDecRNNTBPEModelWithPrompt.restore_from(self.model_path)
+        if not hasattr(self.model.encoder, "set_default_att_context_size"):
+            raise RuntimeError("Nemotron model does not support configurable att_context_size")
+        self.model.encoder.set_default_att_context_size(att_context_size=self.att_context_size)
+        self._configure_decoding(RNNTDecodingConfig, OmegaConf)
+        self.model = self.model.to(device=self.device, dtype=self.compute_dtype)
+        self.model.eval()
         self._inference_lock = threading.Lock()
 
     def startup_details(self) -> Dict[str, Any]:
@@ -394,10 +436,96 @@ class NemotronBackend(BaseTranscriptionBackend):
             "backend_model": NEMOTRON_MODEL_NAME,
             "device": DEVICE,
             "checkpoint": self.model_path,
+            "att_context_size": self.att_context_size,
+            "chunk_size_ms": _nemotron_chunk_size_ms(self.att_context_size),
+            "boosting_phrases_file": NEMOTRON_BOOSTING_PHRASES_FILE or None,
         }
 
     def accepted_models(self) -> Set[str]:
         return {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL, NEMOTRON_MODEL_NAME}
+
+    def _configure_decoding(self, rnnt_decoding_config_cls, omega_conf) -> None:
+        decoding_cfg = omega_conf.structured(rnnt_decoding_config_cls(fused_batch_size=-1))
+        decoding_cfg.strategy = "greedy_batch"
+        if NEMOTRON_BOOSTING_PHRASES_FILE:
+            if not os.path.isfile(NEMOTRON_BOOSTING_PHRASES_FILE):
+                raise RuntimeError(
+                    f"NEMOTRON_BOOSTING_PHRASES_FILE does not exist: {NEMOTRON_BOOSTING_PHRASES_FILE}"
+                )
+            decoding_cfg.greedy.boosting_tree.key_phrases_file = NEMOTRON_BOOSTING_PHRASES_FILE
+            decoding_cfg.greedy.boosting_tree.context_score = NEMOTRON_BOOSTING_CONTEXT_SCORE
+            decoding_cfg.greedy.boosting_tree.depth_scaling = NEMOTRON_BOOSTING_DEPTH_SCALING
+            decoding_cfg.greedy.boosting_tree_alpha = NEMOTRON_BOOSTING_ALPHA
+            logger.info(
+                "Nemotron GPU phrase boosting enabled - file=%s alpha=%s context_score=%s depth_scaling=%s",
+                NEMOTRON_BOOSTING_PHRASES_FILE,
+                NEMOTRON_BOOSTING_ALPHA,
+                NEMOTRON_BOOSTING_CONTEXT_SCORE,
+                NEMOTRON_BOOSTING_DEPTH_SCALING,
+            )
+        if hasattr(self.model, "cur_decoder"):
+            self.model.change_decoding_strategy(decoding_cfg, decoder_type="rnnt")
+        else:
+            self.model.change_decoding_strategy(decoding_cfg)
+
+    def _extract_streaming_texts(self, hypotheses: Any) -> List[str]:
+        if not hypotheses:
+            return []
+        if isinstance(hypotheses[0], self.hypothesis_cls):
+            return [str(hyp.text).strip() for hyp in hypotheses]
+        return [str(hyp).strip() for hyp in hypotheses]
+
+    def _drop_extra_pre_encoded(self, step_num: int) -> int:
+        if step_num == 0:
+            return 0
+        return int(getattr(self.model.encoder.streaming_cfg, "drop_extra_pre_encoded", 0))
+
+    def _stream_audio_file(self, wav_path: str, target_lang: str) -> List[str]:
+        streaming_buffer = self.streaming_buffer_cls(
+            model=self.model,
+            online_normalization=False,
+            pad_and_drop_preencoded=False,
+        )
+        streaming_buffer.append_audio_file(wav_path, stream_id=-1)
+        batch_size = len(streaming_buffer.streams_length)
+        cache_last_channel, cache_last_time, cache_last_channel_len = self.model.encoder.get_initial_cache_state(
+            batch_size=batch_size
+        )
+        previous_hypotheses = None
+        pred_out_stream = None
+        transcribed_texts: List[str] = []
+        for step_num, (chunk_audio, chunk_lengths) in enumerate(iter(streaming_buffer)):
+            with self.torch.inference_mode():
+                chunk_audio = chunk_audio.to(self.device, dtype=self.compute_dtype)
+                chunk_lengths = chunk_lengths.to(self.device)
+                (
+                    pred_out_stream,
+                    step_hypotheses,
+                    cache_last_channel,
+                    cache_last_time,
+                    cache_last_channel_len,
+                    previous_hypotheses,
+                ) = self.model.conformer_stream_step(
+                    processed_signal=chunk_audio,
+                    processed_signal_length=chunk_lengths,
+                    cache_last_channel=cache_last_channel,
+                    cache_last_time=cache_last_time,
+                    cache_last_channel_len=cache_last_channel_len,
+                    keep_all_outputs=streaming_buffer.is_buffer_empty(),
+                    previous_hypotheses=previous_hypotheses,
+                    previous_pred_out=pred_out_stream,
+                    drop_extra_pre_encoded=self._drop_extra_pre_encoded(step_num),
+                    return_transcription=True,
+                )
+                transcribed_texts = self._extract_streaming_texts(step_hypotheses)
+        streaming_buffer.reset_buffer()
+        logger.info(
+            "Nemotron cache-aware streaming completed - target_lang=%s att_context_size=%s chunk_ms=%s",
+            target_lang,
+            self.att_context_size,
+            _nemotron_chunk_size_ms(self.att_context_size),
+        )
+        return transcribed_texts
 
     async def transcribe(
         self,
@@ -417,25 +545,16 @@ class NemotronBackend(BaseTranscriptionBackend):
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
             wav_path = tmp_wav.name
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_manifest:
-            manifest_path = tmp_manifest.name
         try:
             sf.write(wav_path, audio_array, sample_rate)
-            with open(manifest_path, "w", encoding="utf-8") as manifest_file:
-                json.dump(_build_nemotron_manifest_entry(wav_path, duration, target_lang), manifest_file)
-                manifest_file.write("\n")
 
             def _transcribe_sync():
                 with self._inference_lock:
                     if hasattr(self.model, "set_inference_prompt"):
                         self.model.set_inference_prompt(target_lang)
-                    return self.model.transcribe(
-                        manifest_path,
-                        batch_size=1,
-                        verbose=False,
-                        timestamps=want_word_timestamps,
-                        target_lang=target_lang,
-                    )
+                    if hasattr(self.model, "decoding") and hasattr(self.model.decoding, "set_strip_lang_tags"):
+                        self.model.decoding.set_strip_lang_tags(False)
+                    return self._stream_audio_file(wav_path, target_lang)
 
             hypotheses = await asyncio.get_event_loop().run_in_executor(
                 transcription_executor, _transcribe_sync
@@ -443,10 +562,6 @@ class NemotronBackend(BaseTranscriptionBackend):
         finally:
             try:
                 os.unlink(wav_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(manifest_path)
             except OSError:
                 pass
 
@@ -667,6 +782,12 @@ async def health_check():
         "device": DEVICE,
         "gpu_available": DEVICE == "cuda",
     }
+    if "att_context_size" in backend_details:
+        health_status["att_context_size"] = backend_details["att_context_size"]
+    if "chunk_size_ms" in backend_details:
+        health_status["chunk_size_ms"] = backend_details["chunk_size_ms"]
+    if "boosting_phrases_file" in backend_details:
+        health_status["boosting_phrases_file"] = backend_details["boosting_phrases_file"]
     
     if DEVICE == "cuda":
         # CTranslate2 (via faster-whisper) handles GPU automatically

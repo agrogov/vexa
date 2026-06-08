@@ -17,8 +17,10 @@ from main import (
     _build_nemotron_manifest_entry,
     _clean_nemotron_text,
     _extract_nemotron_detected_language,
+    _nemotron_chunk_size_ms,
     _looks_like_silence,
     _looks_like_hallucination,
+    _parse_nemotron_att_context_size,
     _normalize_backend_name,
     _normalize_nemotron_target_lang,
     _normalize_transcription_tier,
@@ -223,6 +225,25 @@ class TestNormalizeNemotronTargetLang:
 
     def test_model_filename_matches_repo_artifact(self):
         assert NEMOTRON_MODEL_FILENAME == "nemotron-3.5-asr-streaming-0.6b.nemo"
+
+
+class TestNemotronStreamingConfig:
+    def test_att_context_size_accepts_comma_pair(self):
+        assert _parse_nemotron_att_context_size("56,6") == [56, 6]
+
+    def test_att_context_size_accepts_bracket_pair(self):
+        assert _parse_nemotron_att_context_size("[56,13]") == [56, 13]
+
+    def test_att_context_size_invalid_falls_back_to_default(self):
+        assert _parse_nemotron_att_context_size("bad") == [56, 6]
+        assert _parse_nemotron_att_context_size("56,-1") == [56, 6]
+        assert _parse_nemotron_att_context_size("70,6") == [56, 6]
+        assert _parse_nemotron_att_context_size("56,2") == [56, 6]
+
+    def test_chunk_size_uses_current_plus_right_context_frames(self):
+        assert _nemotron_chunk_size_ms([56, 0]) == 80
+        assert _nemotron_chunk_size_ms([56, 6]) == 560
+        assert _nemotron_chunk_size_ms([56, 13]) == 1120
 
 
 class TestBuildNemotronManifestEntry:

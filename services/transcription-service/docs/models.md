@@ -43,15 +43,55 @@ Notes:
 - The supported runtime path for this checkpoint is currently
   `nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@main`,
   matching the NVIDIA model card guidance.
+- Nemotron inference uses the documented cache-aware streaming path:
+  `CacheAwareStreamingAudioBuffer` feeds chunks into
+  `conformer_stream_step(...)`.
 - Backend selection happens at service startup, not per request.
 - The HTTP request still requires the `model` form field for OpenAI
   compatibility.
-- Nemotron-backed deployments require a truthful Nemotron model id in
-  the request, such as `nemotron-3.5-asr-streaming-0.6b`.
+- Nemotron-backed deployments accept the existing compatibility value
+  `model=whisper-1`, and also accept truthful Nemotron model ids such as
+  `nemotron-3.5-asr-streaming-0.6b`.
 - If the request provides `language=en`, `de`, `fr`, etc., the service
   maps common 2-letter codes to Nemotron locale-style values such as
   `en-US`, `de-DE`, `fr-FR`. If omitted, Nemotron uses
   `NEMOTRON_TARGET_LANG_DEFAULT` (default `auto`).
+
+### Nemotron streaming configuration
+
+`NEMOTRON_ATT_CONTEXT_SIZE` controls the runtime latency/accuracy point.
+It accepts comma or bracket syntax; the service default is `56,6`.
+
+| Value | Right context | Chunk size |
+|-------|---------------|------------|
+| `56,0` | 0 frames | 80 ms |
+| `56,1` | 1 frame | 160 ms |
+| `56,3` | 3 frames | 320 ms |
+| `56,6` | 6 frames | 560 ms |
+| `56,13` | 13 frames | 1120 ms |
+
+Chunk size is the current 80 ms frame plus right context. The first value
+is left context and remains `56` for this model family.
+
+### Nemotron phrase boosting
+
+Optional phrase boosting uses NeMo GPU phrase boosting for RNNT greedy
+decoding. Configure it with:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEMOTRON_BOOSTING_PHRASES_FILE` | unset | Plain text file, one phrase per line |
+| `NEMOTRON_BOOSTING_ALPHA` | `1.0` | Shallow-fusion weight for the boosting tree |
+| `NEMOTRON_BOOSTING_CONTEXT_SCORE` | `1.0` | Per-token context graph score |
+| `NEMOTRON_BOOSTING_DEPTH_SCALING` | `2.0` | Context graph depth scaling |
+
+Example phrase file:
+
+```text
+vexa
+meeting api
+webhook delivery
+```
 
 ## Practical recommendation
 

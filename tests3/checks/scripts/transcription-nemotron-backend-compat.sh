@@ -76,6 +76,9 @@ except json.JSONDecodeError as exc:
 if health_payload.get("backend") != "nemotron":
     print(f"expected nemotron backend, got {health_payload.get('backend')!r}", file=sys.stderr)
     sys.exit(1)
+if health_payload.get("att_context_size") != [56, 6]:
+    print(f"expected default att_context_size [56, 6], got {health_payload.get('att_context_size')!r}", file=sys.stderr)
+    sys.exit(1)
 
 cmd = [
     "curl", "-sS", "-w", "\n%{http_code}", "-X", "POST", tx_url,

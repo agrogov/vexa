@@ -243,6 +243,35 @@ Human decision:
   - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
   - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 - Expected:
+  - The Nemotron backend uses the model's documented cache-aware streaming inference
+    path, not generic offline `transcribe(...)`, and exposes the documented latency
+    knob with `[56,6]` as the service default.
+  - Operators can optionally configure NeMo GPU phrase boosting for domain terms
+    without changing callers or touching non-transcription services.
+- Actual:
+  - The current branch validates functional Nemotron transcription but still drives
+    the model through `model.transcribe(manifest_path, ...)`.
+  - There is no `att_context_size` config surface and no word-boosting config surface.
+- Root cause:
+  - The first integration targeted OpenAI-compatible service behavior and startup
+    compatibility. NVIDIA's model card and NeMo example show that true streaming
+    behavior requires `set_default_att_context_size(...)` and the cache-aware
+    `conformer_stream_step(...)` loop.
+- Next-fix target:
+  - Rework `services/transcription-service` Nemotron inference to use NeMo's
+    cache-aware streaming path.
+  - Add `NEMOTRON_ATT_CONTEXT_SIZE=56,6` as the default env-controlled latency knob.
+  - Add optional phrase-boosting env vars for NeMo GPU-PB / RNNT greedy decoding,
+    document usage, and validate the Docker runtime.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
   - With `TRANSCRIPTION_BACKEND=nemotron`, a request to `/v1/audio/transcriptions`
     using a valid WAV and compatibility `model=whisper-1` returns `200 OK`.
 - Actual:

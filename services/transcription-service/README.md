@@ -88,6 +88,11 @@ All configuration is via environment variables. Copy `.env.example` and adjust.
 | `MODEL_SIZE` | `large-v3-turbo` | Whisper model (see [docs/models.md](docs/models.md)) |
 | `NEMOTRON_MODEL_NAME` | `nvidia/nemotron-3.5-asr-streaming-0.6b` | NeMo model to load when `TRANSCRIPTION_BACKEND=nemotron` |
 | `NEMOTRON_TARGET_LANG_DEFAULT` | `auto` | Default Nemotron target language when the request omits `language` |
+| `NEMOTRON_ATT_CONTEXT_SIZE` | `56,6` | Nemotron cache-aware streaming latency mode. Accepts `56,0`, `56,1`, `56,3`, `56,6`, or `56,13` |
+| `NEMOTRON_BOOSTING_PHRASES_FILE` | (none) | Optional NeMo GPU phrase-boosting phrase list, one phrase per line |
+| `NEMOTRON_BOOSTING_ALPHA` | `1.0` | Phrase-boosting shallow-fusion weight when `NEMOTRON_BOOSTING_PHRASES_FILE` is set |
+| `NEMOTRON_BOOSTING_CONTEXT_SCORE` | `1.0` | Per-token context graph score for phrase boosting |
+| `NEMOTRON_BOOSTING_DEPTH_SCALING` | `2.0` | Context graph depth scaling for phrase boosting |
 | `DEVICE` | `cuda` | `cuda` or `cpu` |
 | `COMPUTE_TYPE` | `int8` | `int8`, `float16`, or `float32` |
 | `CPU_THREADS` | `0` (auto) | CPU threads when `DEVICE=cpu` |
@@ -116,14 +121,61 @@ The service now supports two backend modes:
 - `TRANSCRIPTION_BACKEND=nemotron`
   - uses NVIDIA NeMo from `NVIDIA/NeMo@main` with
     `nvidia/nemotron-3.5-asr-streaming-0.6b`
+  - runs Nemotron through NeMo's cache-aware streaming path using
+    `CacheAwareStreamingAudioBuffer` and `conformer_stream_step`
+  - defaults to `NEMOTRON_ATT_CONTEXT_SIZE=56,6`, a 560 ms streaming
+    chunk; override it with one of the supported right-context values
   - keeps the same HTTP endpoint and top-level response envelope
-  - requires a truthful Nemotron model id in the `model` form field
-    such as `nemotron-3.5-asr-streaming-0.6b`
+  - accepts `model=whisper-1` for compatibility with existing callers,
+    and also accepts Nemotron model ids such as
+    `nemotron-3.5-asr-streaming-0.6b`
   - requires `git` in the image because the supported runtime is
     installed from the NeMo GitHub repository rather than a released
     `nemo_toolkit` wheel
 
 Unknown `model` values are rejected with 400.
+
+### Nemotron streaming latency
+
+Nemotron's latency/accuracy operating point is controlled by
+`NEMOTRON_ATT_CONTEXT_SIZE`, a pair of 80 ms-frame counts:
+
+| Value | Chunk size |
+|-------|------------|
+| `56,0` | 80 ms |
+| `56,1` | 160 ms |
+| `56,3` | 320 ms |
+| `56,6` | 560 ms |
+| `56,13` | 1120 ms |
+
+The service default is `56,6`, matching a middle-ground 560 ms chunk.
+Use bracket syntax (`[56,6]`) or comma syntax (`56,6`); malformed values
+fall back to `56,6`.
+
+### Nemotron phrase boosting
+
+Nemotron uses NeMo RNNT greedy decoding. Optional word or phrase boosting
+uses NeMo GPU phrase boosting (GPU-PB), not Flashlight CTC boost files.
+Create a plain text file with one phrase per line:
+
+```text
+vexa
+meeting api
+nemotron
+```
+
+Mount the file into the container and set:
+
+```bash
+TRANSCRIPTION_BACKEND=nemotron
+NEMOTRON_BOOSTING_PHRASES_FILE=/app/config/boosting_phrases.txt
+NEMOTRON_BOOSTING_ALPHA=1.0
+NEMOTRON_BOOSTING_CONTEXT_SCORE=1.0
+NEMOTRON_BOOSTING_DEPTH_SCALING=2.0
+```
+
+Increase `NEMOTRON_BOOSTING_ALPHA` if phrases are still missed; lower it
+if the decoder over-inserts boosted terms.
 
 ### Response format
 
