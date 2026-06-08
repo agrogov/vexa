@@ -1237,6 +1237,7 @@ async function initPerSpeakerPipeline(botConfig: BotConfig): Promise<boolean> {
     transcriptionClient = new TranscriptionClient({
       serviceUrl: transcriptionServiceUrl,
       apiToken: botConfig.transcriptionServiceToken || process.env.TRANSCRIPTION_SERVICE_TOKEN,
+      model: botConfig.transcriptionServiceModel || process.env.TRANSCRIPTION_SERVICE_MODEL || 'whisper-1',
       maxSpeechDurationSec: process.env.MAX_SPEECH_DURATION_SEC ? parseFloat(process.env.MAX_SPEECH_DURATION_SEC) : undefined,
       minSilenceDurationMs: process.env.MIN_SILENCE_DURATION_MS ? parseInt(process.env.MIN_SILENCE_DURATION_MS) : 100,
     });

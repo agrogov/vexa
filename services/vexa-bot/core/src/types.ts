@@ -28,6 +28,7 @@ export type BotConfig = {
   // Per-speaker transcription
   transcriptionServiceUrl?: string;   // HTTP endpoint for transcription-service
   transcriptionServiceToken?: string; // Bearer token for transcription-service
+  transcriptionServiceModel?: string; // Request model field for transcription-service
 
   // Voice agent / meeting interaction interface
   voiceAgentEnabled?: boolean;  // Enable TTS, chat, screen share capabilities

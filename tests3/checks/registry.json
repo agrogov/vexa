@@ -1094,23 +1094,23 @@
     },
     {
       "id": "TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT",
-      "tier": "static",
+      "tier": "contract",
       "found": "2026-06-07",
-      "proves": "transcription-service source contains a Nemotron backend plus NeMo runtime dependency and compatibility model aliases",
-      "symptom": "Nemotron backend missing or not wired into the service contract",
+      "proves": "transcription-service in Nemotron mode accepts a real WAV request and returns the standard JSON envelope",
+      "symptom": "Nemotron backend loads but crashes or rejects real transcription requests",
       "method": "SHELL_CHECK",
       "script": "tests3/checks/scripts/transcription-nemotron-backend-compat.sh",
-      "max_duration_sec": 10
+      "max_duration_sec": 90
     },
     {
       "id": "TRANSCRIPTION_INVALID_MODEL_REJECTED",
-      "tier": "static",
+      "tier": "contract",
       "found": "2026-06-07",
-      "proves": "transcription-service source rejects unsupported model values with HTTP 400",
+      "proves": "transcription-service rejects unsupported model values with a clear 4xx response on a real request",
       "symptom": "Unknown model values silently fall through to a backend, making selection ambiguous",
       "method": "SHELL_CHECK",
       "script": "tests3/checks/scripts/transcription-invalid-model-rejected.sh",
-      "max_duration_sec": 10
+      "max_duration_sec": 30
     },
     {
       "id": "BOT_TRANSCRIPTION_CLIENT_WHISPER_DEFAULT_UNCHANGED",

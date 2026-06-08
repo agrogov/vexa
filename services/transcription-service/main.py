@@ -172,6 +172,15 @@ def _clean_nemotron_text(text: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
+def _extract_nemotron_detected_language(text: str, target_lang: str) -> str:
+    if target_lang != "auto":
+        return target_lang
+    match = re.search(r"<([A-Za-z]{2,3}(?:-[A-Za-z]{2,3})?)>", text)
+    if match:
+        return match.group(1)
+    return "auto"
+
+
 def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
     timestamp_data = getattr(payload, "timestamp", None)
     if timestamp_data is None and isinstance(payload, dict):
@@ -445,7 +454,8 @@ class NemotronBackend(BaseTranscriptionBackend):
             raise RuntimeError("Nemotron backend returned no hypotheses")
 
         first = hypotheses[0]
-        full_text = _clean_nemotron_text(_extract_response_text(first))
+        raw_text = _extract_response_text(first)
+        full_text = _clean_nemotron_text(raw_text)
         words = _extract_word_timestamps(first) if want_word_timestamps else []
         if words:
             seg_start = words[0]["start"]
@@ -471,11 +481,11 @@ class NemotronBackend(BaseTranscriptionBackend):
         if words:
             segment["words"] = words
 
-        detected_language = target_lang if target_lang != "auto" else "auto"
+        detected_language = _extract_nemotron_detected_language(raw_text, target_lang)
         return {
             "text": full_text,
             "language": detected_language,
-            "language_probability": 1.0 if target_lang != "auto" else 0.0,
+            "language_probability": 1.0 if detected_language != "auto" else 0.0,
             "duration": duration,
             "segments": [segment] if full_text or words else [],
         }

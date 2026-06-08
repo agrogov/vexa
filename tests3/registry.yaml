@@ -1489,19 +1489,19 @@ TRANSCRIPTION_WHISPER_BACKEND_COMPAT:
   state: stateless
   max_duration_sec: 10
 TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT:
-  proves: transcription-service source contains a Nemotron backend plus NeMo runtime dependency and compatibility model aliases
-  symptom: Nemotron backend missing or not wired into the service contract
+  proves: transcription-service in Nemotron mode accepts a real WAV request and returns the standard JSON envelope
+  symptom: Nemotron backend loads but crashes or rejects real transcription requests
   found: '2026-06-07'
   type: script
   dispatch: SHELL_CHECK
   script: tests3/checks/scripts/transcription-nemotron-backend-compat.sh
-  from_tier: static
+  from_tier: contract
   modes:
   - lite
   - compose
   - helm
   state: stateless
-  max_duration_sec: 10
+  max_duration_sec: 90
 TRANSCRIPTION_TOKEN_VALID:
   proves: "transcription API token accepted \u2014 bots can convert audio to text"
   symptom: "Transcription returns 403 \u2014 TRANSCRIPTION_SERVICE_TOKEN expired or invalid. Bots capture audio but produce\
@@ -1517,19 +1517,19 @@ TRANSCRIPTION_TOKEN_VALID:
   state: stateful
   max_duration_sec: 30
 TRANSCRIPTION_INVALID_MODEL_REJECTED:
-  proves: transcription-service source rejects unsupported model values with HTTP 400
+  proves: transcription-service rejects unsupported model values with a clear 4xx response on a real request
   symptom: Unknown model values silently fall through to a backend, making selection ambiguous
   found: '2026-06-07'
   type: script
   dispatch: SHELL_CHECK
   script: tests3/checks/scripts/transcription-invalid-model-rejected.sh
-  from_tier: static
+  from_tier: contract
   modes:
   - lite
   - compose
   - helm
   state: stateless
-  max_duration_sec: 10
+  max_duration_sec: 30
 TRANSCRIPTION_UP:
   proves: "transcription service responds \u2014 audio can be converted to text"
   symptom: Transcription service not responding

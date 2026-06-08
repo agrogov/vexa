@@ -16,6 +16,7 @@ from main import (
     _env_float,
     _build_nemotron_manifest_entry,
     _clean_nemotron_text,
+    _extract_nemotron_detected_language,
     _looks_like_silence,
     _looks_like_hallucination,
     _normalize_backend_name,
@@ -240,6 +241,12 @@ class TestBuildNemotronManifestEntry:
 class TestExtractResponseHelpers:
     def test_clean_nemotron_text_strips_control_tags(self):
         assert _clean_nemotron_text("Hello <en-US> world <de-DE>") == "Hello world"
+
+    def test_extract_nemotron_detected_language_from_control_tag(self):
+        assert _extract_nemotron_detected_language("Hello <en-US> world", "auto") == "en-US"
+
+    def test_extract_nemotron_detected_language_prefers_explicit_target(self):
+        assert _extract_nemotron_detected_language("Hello <en-US> world", "de-DE") == "de-DE"
 
     def test_extract_response_text_from_string(self):
         assert _extract_response_text(" hello ") == "hello"
