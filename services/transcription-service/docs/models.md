@@ -46,8 +46,8 @@ Notes:
 - Backend selection happens at service startup, not per request.
 - The HTTP request still requires the `model` form field for OpenAI
   compatibility.
-- `model=whisper-1` remains accepted even on a Nemotron-backed
-  deployment so existing callers can keep working unchanged.
+- Nemotron-backed deployments require a truthful Nemotron model id in
+  the request, such as `nemotron-3.5-asr-streaming-0.6b`.
 - If the request provides `language=en`, `de`, `fr`, etc., the service
   maps common 2-letter codes to Nemotron locale-style values such as
   `en-US`, `de-DE`, `fr-FR`. If omitted, Nemotron uses

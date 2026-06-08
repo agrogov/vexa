@@ -8,7 +8,9 @@ import time
 import logging
 import asyncio
 import json
+import re
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
@@ -163,6 +165,11 @@ def _extract_response_text(payload: Any) -> str:
         if "pred_text" in payload:
             return str(payload["pred_text"]).strip()
     return str(payload).strip()
+
+
+def _clean_nemotron_text(text: str) -> str:
+    cleaned = re.sub(r"<[A-Za-z]{2,3}(?:-[A-Za-z]{2,3})?>", " ", text)
+    return " ".join(cleaned.split()).strip()
 
 
 def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
@@ -370,6 +377,7 @@ class NemotronBackend(BaseTranscriptionBackend):
             cache_dir="/app/models/hf",
         )
         self.model = EncDecRNNTBPEModelWithPrompt.restore_from(self.model_path)
+        self._inference_lock = threading.Lock()
 
     def startup_details(self) -> Dict[str, Any]:
         return {
@@ -380,7 +388,7 @@ class NemotronBackend(BaseTranscriptionBackend):
         }
 
     def accepted_models(self) -> Set[str]:
-        return {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL, NEMOTRON_MODEL_NAME}
+        return {NEMOTRON_PUBLIC_MODEL, NEMOTRON_MODEL_NAME}
 
     async def transcribe(
         self,
@@ -409,15 +417,16 @@ class NemotronBackend(BaseTranscriptionBackend):
                 manifest_file.write("\n")
 
             def _transcribe_sync():
-                if hasattr(self.model, "set_inference_prompt"):
-                    self.model.set_inference_prompt(target_lang)
-                return self.model.transcribe(
-                    manifest_path,
-                    batch_size=1,
-                    verbose=False,
-                    timestamps=want_word_timestamps,
-                    target_lang=target_lang,
-                )
+                with self._inference_lock:
+                    if hasattr(self.model, "set_inference_prompt"):
+                        self.model.set_inference_prompt(target_lang)
+                    return self.model.transcribe(
+                        manifest_path,
+                        batch_size=1,
+                        verbose=False,
+                        timestamps=want_word_timestamps,
+                        target_lang=target_lang,
+                    )
 
             hypotheses = await asyncio.get_event_loop().run_in_executor(
                 transcription_executor, _transcribe_sync
@@ -436,7 +445,7 @@ class NemotronBackend(BaseTranscriptionBackend):
             raise RuntimeError("Nemotron backend returned no hypotheses")
 
         first = hypotheses[0]
-        full_text = _extract_response_text(first)
+        full_text = _clean_nemotron_text(_extract_response_text(first))
         words = _extract_word_timestamps(first) if want_word_timestamps else []
         if words:
             seg_start = words[0]["start"]

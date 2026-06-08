@@ -29,6 +29,48 @@
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (post-review correctness)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - The release should add Nemotron without misleading request semantics, without
+    request cross-talk under concurrency, and with a working registry proof for the
+    Nemotron path.
+- Actual:
+  - Independent review found four post-validate defects:
+    - backend choice is still per-worker, not per-request, even though `model` values
+      imply request-time choice
+    - `set_inference_prompt(target_lang)` mutates shared model state and is race-prone
+      under concurrent requests
+    - `tests3/checks/scripts/transcription-nemotron-backend-compat.sh` is stale and
+      no longer matches the implementation
+    - Nemotron transcript text currently leaks `<en-US>` control tokens into API output
+- Root cause:
+  - The current implementation optimized for functional green validation first, but
+    still relies on global backend/model state and compatibility aliases that hide
+    request semantics.
+  - The registry check was not updated after the final NeMo integration shape changed.
+- Touched commits:
+  - `e315ed1c` through `f14e3e3e`
+- Evidence:
+  - `NemotronBackend.accepted_models()` accepts `whisper-1` while `_build_backend()`
+    still selects one backend for the whole worker
+  - `set_inference_prompt()` is called on a shared global model immediately before
+    inference
+  - live validation returned transcript text with `<en-US>` markers
+- Next-fix target:
+  - Make request semantics explicit and correct:
+    - stop aliasing `whisper-1` onto Nemotron
+    - serialize Nemotron inference or otherwise eliminate prompt-state races
+    - update the Nemotron registry proof script to the current code path
+    - strip prompt/control tags from Nemotron response text
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
 ## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (manifest as primary audio)
 
 - Classification: regression

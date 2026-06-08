@@ -117,9 +117,8 @@ The service now supports two backend modes:
   - uses NVIDIA NeMo from `NVIDIA/NeMo@main` with
     `nvidia/nemotron-3.5-asr-streaming-0.6b`
   - keeps the same HTTP endpoint and top-level response envelope
-  - continues to accept `model=whisper-1` for compatibility, so
-    existing callers do not need to change when pointed at a
-    Nemotron-backed deployment
+  - requires a truthful Nemotron model id in the `model` form field
+    such as `nemotron-3.5-asr-streaming-0.6b`
   - requires `git` in the image because the supported runtime is
     installed from the NeMo GitHub repository rather than a released
     `nemo_toolkit` wheel

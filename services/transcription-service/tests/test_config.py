@@ -15,6 +15,7 @@ from main import (
     _env_int,
     _env_float,
     _build_nemotron_manifest_entry,
+    _clean_nemotron_text,
     _looks_like_silence,
     _looks_like_hallucination,
     _normalize_backend_name,
@@ -237,6 +238,9 @@ class TestBuildNemotronManifestEntry:
 
 
 class TestExtractResponseHelpers:
+    def test_clean_nemotron_text_strips_control_tags(self):
+        assert _clean_nemotron_text("Hello <en-US> world <de-DE>") == "Hello world"
+
     def test_extract_response_text_from_string(self):
         assert _extract_response_text(" hello ") == "hello"
 
@@ -277,13 +281,21 @@ class TestValidateRequestedModel:
         _validate_requested_model(backend, WHISPER_COMPAT_MODEL)
 
     def test_accepts_nemotron_public_model(self):
-        backend = _FakeBackend("nemotron", {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL})
+        backend = _FakeBackend("nemotron", {NEMOTRON_PUBLIC_MODEL})
         _validate_requested_model(backend, NEMOTRON_PUBLIC_MODEL)
+
+    def test_rejects_whisper_alias_on_nemotron_backend(self):
+        from fastapi import HTTPException
+
+        backend = _FakeBackend("nemotron", {NEMOTRON_PUBLIC_MODEL})
+        with pytest.raises(HTTPException) as exc:
+            _validate_requested_model(backend, WHISPER_COMPAT_MODEL)
+        assert exc.value.status_code == 400
 
     def test_rejects_unknown_model(self):
         from fastapi import HTTPException
 
-        backend = _FakeBackend("nemotron", {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL})
+        backend = _FakeBackend("nemotron", {NEMOTRON_PUBLIC_MODEL})
         with pytest.raises(HTTPException) as exc:
             _validate_requested_model(backend, "unknown-model")
         assert exc.value.status_code == 400
