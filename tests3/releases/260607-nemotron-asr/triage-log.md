@@ -29,6 +29,40 @@
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (manifest lifecycle)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - With `TRANSCRIPTION_BACKEND=nemotron`, a request to `/v1/audio/transcriptions`
+    using the repo WAV returns `200 OK` after the prompt-aware manifest path is applied.
+- Actual:
+  - Startup is healthy and the previous `Unknown prompt key: 'None'` failure is gone,
+    but the live transcription request still returns `500`.
+  - Latest observed error:
+    - `ValueError: I/O operation on closed file.`
+- Root cause:
+  - The new manifest-writing path in `services/transcription-service/main.py`
+    writes JSON to `tmp_manifest` after the `NamedTemporaryFile(...)` context has
+    already closed the handle.
+  - This is a local file-lifecycle bug in the service adapter, not a NeMo runtime
+    incompatibility.
+- Touched commits:
+  - `41268abd` `fix(transcription-service): set Nemotron inference prompt`
+- Evidence:
+  - `/health` is `200 OK`.
+  - The request now reaches the manifest path and no longer fails with a `None`
+    prompt key.
+  - Container logs show the exception at `json.dump(..., tmp_manifest)`.
+- Next-fix target:
+  - Keep the temporary manifest file open while writing, or reopen the path before
+    `json.dump`, then rerun the same Nemotron validation request.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
 ## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (runtime integration)
 
 - Classification: regression

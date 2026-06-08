@@ -400,13 +400,13 @@ class NemotronBackend(BaseTranscriptionBackend):
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
             wav_path = tmp_wav.name
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp_manifest:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_manifest:
             manifest_path = tmp_manifest.name
         try:
             sf.write(wav_path, audio_array, sample_rate)
-            json.dump(_build_nemotron_manifest_entry(wav_path, duration, target_lang), tmp_manifest)
-            tmp_manifest.write("\n")
-            tmp_manifest.flush()
+            with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+                json.dump(_build_nemotron_manifest_entry(wav_path, duration, target_lang), manifest_file)
+                manifest_file.write("\n")
 
             def _transcribe_sync():
                 if hasattr(self.model, "set_inference_prompt"):
