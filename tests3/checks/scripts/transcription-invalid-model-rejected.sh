@@ -48,8 +48,8 @@ if not tx_token:
     tx_token = docker_compose_env("TRANSCRIPTION_SERVICE_TOKEN")
 
 if not tx_url:
-    print("no transcription URL configured — skipped")
-    sys.exit(0)
+    print("no transcription URL configured", file=sys.stderr)
+    sys.exit(1)
 
 cmd = [
     "curl", "-sS", "-w", "\n%{http_code}", "-X", "POST", tx_url,

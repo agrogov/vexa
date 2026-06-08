@@ -291,13 +291,9 @@ class TestValidateRequestedModel:
         backend = _FakeBackend("nemotron", {NEMOTRON_PUBLIC_MODEL})
         _validate_requested_model(backend, NEMOTRON_PUBLIC_MODEL)
 
-    def test_rejects_whisper_alias_on_nemotron_backend(self):
-        from fastapi import HTTPException
-
-        backend = _FakeBackend("nemotron", {NEMOTRON_PUBLIC_MODEL})
-        with pytest.raises(HTTPException) as exc:
-            _validate_requested_model(backend, WHISPER_COMPAT_MODEL)
-        assert exc.value.status_code == 400
+    def test_accepts_whisper_alias_on_nemotron_backend(self):
+        backend = _FakeBackend("nemotron", {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL})
+        _validate_requested_model(backend, WHISPER_COMPAT_MODEL)
 
     def test_rejects_unknown_model(self):
         from fastapi import HTTPException

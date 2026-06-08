@@ -397,7 +397,7 @@ class NemotronBackend(BaseTranscriptionBackend):
         }
 
     def accepted_models(self) -> Set[str]:
-        return {NEMOTRON_PUBLIC_MODEL, NEMOTRON_MODEL_NAME}
+        return {WHISPER_COMPAT_MODEL, NEMOTRON_PUBLIC_MODEL, NEMOTRON_MODEL_NAME}
 
     async def transcribe(
         self,
@@ -485,7 +485,7 @@ class NemotronBackend(BaseTranscriptionBackend):
         return {
             "text": full_text,
             "language": detected_language,
-            "language_probability": 1.0 if detected_language != "auto" else 0.0,
+            "language_probability": 1.0 if target_lang != "auto" else 0.0,
             "duration": duration,
             "segments": [segment] if full_text or words else [],
         }

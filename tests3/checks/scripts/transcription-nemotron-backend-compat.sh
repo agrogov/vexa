@@ -49,14 +49,14 @@ if not tx_token:
     tx_token = docker_compose_env("TRANSCRIPTION_SERVICE_TOKEN")
 
 if not tx_url:
-    print("no transcription URL configured — skipped")
-    sys.exit(0)
+    print("no transcription URL configured", file=sys.stderr)
+    sys.exit(1)
 
 cmd = [
     "curl", "-sS", "-w", "\n%{http_code}", "-X", "POST", tx_url,
     "-H", f"Authorization: Bearer {tx_token}",
     "-F", f"file=@{test_audio};type=audio/wav",
-    "-F", "model=nemotron-3.5-asr-streaming-0.6b",
+    "-F", "model=whisper-1",
     "-F", "response_format=verbose_json",
 ]
 result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
