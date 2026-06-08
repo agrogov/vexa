@@ -19,13 +19,13 @@ if not test_audio.is_file():
     sys.exit(1)
 
 env_file = root / ".env"
-tx_url = ""
-tx_token = ""
+tx_url = os.environ.get("TRANSCRIPTION_SERVICE_URL", "").strip()
+tx_token = os.environ.get("TRANSCRIPTION_SERVICE_TOKEN", "").strip()
 if env_file.is_file():
     for line in env_file.read_text().splitlines():
-        if line.startswith("TRANSCRIPTION_SERVICE_URL="):
+        if not tx_url and line.startswith("TRANSCRIPTION_SERVICE_URL="):
             tx_url = line.split("=", 1)[1].strip()
-        elif line.startswith("TRANSCRIPTION_SERVICE_TOKEN="):
+        elif not tx_token and line.startswith("TRANSCRIPTION_SERVICE_TOKEN="):
             tx_token = line.split("=", 1)[1].strip()
 
 def docker_compose_env(var: str) -> str:
