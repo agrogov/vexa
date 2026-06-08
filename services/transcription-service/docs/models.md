@@ -43,6 +43,9 @@ Notes:
 - The supported runtime path for this checkpoint is currently
   `nemo_toolkit[asr] @ git+https://github.com/NVIDIA/NeMo.git@main`,
   matching the NVIDIA model card guidance.
+- The service image uses Python 3.12 for Nemotron because the current
+  NeMo cache-aware streaming utilities are not compatible with Python
+  3.10 syntax.
 - Nemotron inference uses the documented cache-aware streaming path:
   `CacheAwareStreamingAudioBuffer` feeds chunks into
   `conformer_stream_step(...)`.

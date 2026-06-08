@@ -132,6 +132,8 @@ The service now supports two backend modes:
   - requires `git` in the image because the supported runtime is
     installed from the NeMo GitHub repository rather than a released
     `nemo_toolkit` wheel
+  - runs on Python 3.12 in the service image; current NeMo cache-aware
+    streaming utilities do not parse under Python 3.10
 
 Unknown `model` values are rejected with 400.
 

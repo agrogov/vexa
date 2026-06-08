@@ -1,4 +1,4 @@
-ARG CUDA_BASE_IMAGE=nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
+ARG CUDA_BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 FROM ${CUDA_BASE_IMAGE}
 
 ARG INSTALL_INFOBIP_CA=false
@@ -11,7 +11,7 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list /etc/apt/sources.list.d/nvidia*.lis
 
 # Install Python and dependencies
 RUN apt-get update && apt-get install -y \
-    python3.10 \
+    python3 \
     python3-pip \
     git \
     curl \
