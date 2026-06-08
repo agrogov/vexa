@@ -396,7 +396,7 @@ class NemotronBackend(BaseTranscriptionBackend):
                 if hasattr(self.model, "set_inference_prompt"):
                     self.model.set_inference_prompt(target_lang)
                 return self.model.transcribe(
-                    paths2audio_files=[wav_path],
+                    [wav_path],
                     batch_size=1,
                     verbose=False,
                     timestamps=want_word_timestamps,

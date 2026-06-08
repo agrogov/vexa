@@ -29,6 +29,36 @@
 Human decision:
 - `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
 
+## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (positional audio arg)
+
+- Classification: regression
+- Bound check:
+  - Approved in `tests3/releases/260607-nemotron-asr/plan-approval.yaml`
+  - Registry entry: `tests3/registry.yaml` `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+- Expected:
+  - The latest Nemotron backend returns `200 OK` for the repo WAV through
+    `/v1/audio/transcriptions`.
+- Actual:
+  - Startup is healthy, but the live request still returns `500`.
+  - Latest observed error:
+    - `EncDecRNNTBPEModelWithPrompt.transcribe() missing 1 required positional argument: 'audio'`
+- Root cause:
+  - Passing `paths2audio_files=[...]` by keyword is still not satisfying the
+    prompt-model transcribe signature in the installed NeMo runtime.
+  - The next likely compatible shape is the positional audio argument
+    `transcribe([wav_path], ...)`, with `set_inference_prompt(target_lang)` already set.
+- Touched commits:
+  - `5692f72f` `fix(transcription-service): use NeMo audio transcribe path`
+- Evidence:
+  - `/health` is `200 OK`.
+  - The failure occurs at the transcribe call boundary before inference work starts.
+- Next-fix target:
+  - Pass the audio list as the first positional argument to `transcribe`,
+    retain the explicit inference prompt, and rerun the live request.
+
+Human decision:
+- `fix this first: TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT`
+
 ## Failing DoD: `TRANSCRIPTION_NEMOTRON_BACKEND_COMPAT` (transcribe entrypoint)
 
 - Classification: regression
