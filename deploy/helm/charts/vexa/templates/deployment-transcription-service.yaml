@@ -74,17 +74,20 @@ spec:
             httpGet:
               path: /health
               port: http
+            initialDelaySeconds: {{ .Values.transcriptionService.probeInitialDelaySeconds | default 60 }}
             failureThreshold: 30
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /health
               port: http
+            initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /health
               port: http
+            initialDelaySeconds: 30
             periodSeconds: 20
           resources:
             {{- toYaml .Values.transcriptionService.resources | nindent 12 }}

@@ -197,13 +197,24 @@ def _clean_nemotron_text(text: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
-def _extract_nemotron_detected_language(text: str, target_lang: str) -> str:
+def _normalize_language_code(code: str) -> Optional[str]:
+    """Normalize language code to bare ISO 639-1 (2-letter).
+
+    Strips BCP 47 region subtags ('en-US' -> 'en', 'zh-CN' -> 'zh').
+    Returns None for 'auto' (language was not resolved to a specific code).
+    """
+    if not code or code == "auto":
+        return None
+    return code.split('-')[0].split('_')[0].lower()
+
+
+def _extract_nemotron_detected_language(text: str, target_lang: str) -> Optional[str]:
     if target_lang != "auto":
-        return target_lang
+        return _normalize_language_code(target_lang)
     match = re.search(r"<([A-Za-z]{2,3}(?:-[A-Za-z]{2,3})?)>", text)
     if match:
-        return match.group(1)
-    return "auto"
+        return _normalize_language_code(match.group(1))
+    return None
 
 
 def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
