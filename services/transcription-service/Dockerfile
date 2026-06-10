@@ -46,8 +46,16 @@ RUN find /opt/venv/lib/python*/site-packages/nvidia/*/lib -name "*.so*" \
 # Copy application
 COPY main.py .
 
-# Create models directory
-RUN mkdir -p /app/models
+# Create models directory and pre-bake Nemotron model into the image
+RUN mkdir -p /app/models/hf
+ARG HF_TOKEN=""
+RUN HF_TOKEN="${HF_TOKEN}" python -c "\
+from huggingface_hub import hf_hub_download; \
+hf_hub_download( \
+    repo_id='nvidia/nemotron-3.5-asr-streaming-0.6b', \
+    filename='nemotron-3.5-asr-streaming-0.6b.nemo', \
+    cache_dir='/app/models/hf' \
+)"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
