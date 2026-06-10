@@ -16,6 +16,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "vexa.componentName" (list . "pgbouncer") }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vexa.labels" . | nindent 4 }}
 spec:

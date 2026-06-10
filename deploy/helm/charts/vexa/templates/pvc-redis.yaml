@@ -3,6 +3,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: {{ include "vexa.componentName" (list . "redis-data") }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vexa.labels" . | nindent 4 }}
 spec:

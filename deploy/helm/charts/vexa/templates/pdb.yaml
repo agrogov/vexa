@@ -19,6 +19,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: {{ include "vexa.componentName" (list $ (printf "%s-pdb" $name | kebabcase)) }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vexa.labels" $ | nindent 4 }}
     app.kubernetes.io/component: {{ $name | kebabcase }}

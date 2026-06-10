@@ -3,6 +3,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "vexa.componentName" (list . "minio-init") }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vexa.labels" . | nindent 4 }}
   annotations:

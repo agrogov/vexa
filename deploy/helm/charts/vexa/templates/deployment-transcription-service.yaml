@@ -3,11 +3,17 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "vexa.componentName" (list . "transcription-service") }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vexa.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.transcriptionService.replicaCount }}
+  {{- if .Values.transcriptionService.deploymentStrategy }}
+  strategy:
+    {{- toYaml .Values.transcriptionService.deploymentStrategy | nindent 4 }}
+  {{- else }}
   {{- include "vexa.deploymentStrategy" . | nindent 2 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "vexa.selectorLabels" . | nindent 6 }}
@@ -18,7 +24,7 @@ spec:
         {{- include "vexa.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: transcription-service
       annotations:
-        {{- toYaml .Values.global.podAnnotations | nindent 8 }}
+        {{- toYaml (merge (.Values.transcriptionService.podAnnotations | default dict) .Values.global.podAnnotations) | nindent 8 }}
     spec:
       securityContext:
         {{- toYaml .Values.global.podSecurityContext | nindent 8 }}
@@ -57,6 +63,7 @@ spec:
             - name: AZURE_OPENAI_API_VERSION
               value: {{ . | quote }}
             {{- end }}
+            {{- if .Values.transcriptionService.azure.endpoint }}
             {{- if .Values.transcriptionService.azure.apiKey }}
             - name: AZURE_OPENAI_API_KEY
               value: {{ .Values.transcriptionService.azure.apiKey | quote }}
@@ -67,6 +74,7 @@ spec:
                   name: {{ .Values.secrets.existingSecretName | quote }}
                   key: AZURE_OPENAI_API_KEY
             {{- end }}
+            {{- end }}
             {{- with .Values.transcriptionService.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -74,9 +82,9 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: {{ .Values.transcriptionService.probeInitialDelaySeconds | default 60 }}
-            failureThreshold: 30
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.transcriptionService.startupProbe.initialDelaySeconds | default 0 }}
+            failureThreshold: {{ .Values.transcriptionService.startupProbe.failureThreshold | default 30 }}
+            periodSeconds: {{ .Values.transcriptionService.startupProbe.periodSeconds | default 10 }}
           readinessProbe:
             httpGet:
               path: /health
@@ -91,6 +99,10 @@ spec:
             periodSeconds: 20
           resources:
             {{- toYaml .Values.transcriptionService.resources | nindent 12 }}
+          {{- with .Values.transcriptionService.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- with (default .Values.global.nodeSelector .Values.transcriptionService.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -101,6 +113,10 @@ spec:
       {{- end }}
       {{- with .Values.global.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.transcriptionService.extraVolumes }}
+      volumes:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}

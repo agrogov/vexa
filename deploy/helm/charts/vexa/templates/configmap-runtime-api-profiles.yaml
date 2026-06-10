@@ -3,6 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: {{ include "vexa.componentName" (list . "runtime-api-profiles") }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "vexa.labels" . | nindent 4 }}
 data:
