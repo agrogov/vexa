@@ -117,18 +117,69 @@ TEMPERATURE_FALLBACK_CHAIN = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 WHISPER_COMPAT_MODEL = "whisper-1"
 NEMOTRON_PUBLIC_MODEL = "nemotron-3.5-asr-streaming-0.6b"
 NEMOTRON_MODEL_FILENAME = "nemotron-3.5-asr-streaming-0.6b.nemo"
+# Nemotron-3.5-asr supports 40 BCP-47 locales (19 transcription-ready +
+# 13 broad-coverage + 8 adaptation-ready). Source: HuggingFace model card
+# https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b
+# Passing a 2-letter code that is NOT in this map means the model receives an
+# unrecognized prompt and falls back to ambiguous decoding (root cause of the
+# Croatian-as-Cyrillic garbage we saw in meeting 317).
 NEMOTRON_LANGUAGE_MAP = {
-    "de": "de-DE",
+    # Transcription-ready (default to most common region per 2-letter code)
     "en": "en-US",
     "es": "es-ES",
     "fr": "fr-FR",
     "it": "it-IT",
-    "nl": "nl-NL",
-    "pl": "pl-PL",
     "pt": "pt-PT",
+    "nl": "nl-NL",
+    "de": "de-DE",
+    "tr": "tr-TR",
     "ru": "ru-RU",
+    "ar": "ar-AR",
+    "hi": "hi-IN",
+    "ja": "ja-JP",
+    "ko": "ko-KR",
+    "vi": "vi-VN",
     "uk": "uk-UA",
+    # Broad-coverage
+    "pl": "pl-PL",
+    "sv": "sv-SE",
+    "cs": "cs-CZ",
+    "no": "nb-NO",  # Norwegian Bokmål as default for bare 'no'
+    "nb": "nb-NO",
+    "da": "da-DK",
+    "bg": "bg-BG",
+    "fi": "fi-FI",
+    "hr": "hr-HR",
+    "sk": "sk-SK",
+    "zh": "zh-CN",
+    "hu": "hu-HU",
+    "ro": "ro-RO",
+    "et": "et-EE",
+    # Adaptation-ready — recognized by the tokenizer; quality may need
+    # fine-tuning but the prompt still constrains decoding.
+    "el": "el-GR",
+    "lt": "lt-LT",
+    "lv": "lv-LV",
+    "mt": "mt-MT",
+    "sl": "sl-SI",
+    "he": "he-IL",
+    "th": "th-TH",
+    "nn": "nn-NO",
 }
+
+# Full BCP-47 codes the model accepts (used for passthrough validation when
+# a client sends e.g. "en-GB" or "pt-BR" directly).
+NEMOTRON_SUPPORTED_BCP47 = frozenset({
+    # Transcription-ready (19)
+    "en-US", "en-GB", "es-US", "es-ES", "fr-FR", "fr-CA", "it-IT",
+    "pt-BR", "pt-PT", "nl-NL", "de-DE", "tr-TR", "ru-RU", "ar-AR",
+    "hi-IN", "ja-JP", "ko-KR", "vi-VN", "uk-UA",
+    # Broad-coverage (13)
+    "pl-PL", "sv-SE", "cs-CZ", "nb-NO", "da-DK", "bg-BG", "fi-FI",
+    "hr-HR", "sk-SK", "zh-CN", "hu-HU", "ro-RO", "et-EE",
+    # Adaptation-ready (8)
+    "el-GR", "lt-LT", "lv-LV", "mt-MT", "sl-SI", "he-IL", "th-TH", "nn-NO",
+})
 
 
 def _normalize_backend_name(raw: Optional[str]) -> str:
@@ -140,15 +191,38 @@ def _normalize_backend_name(raw: Optional[str]) -> str:
 
 
 def _normalize_nemotron_target_lang(raw: Optional[str]) -> str:
+    """Map a client-supplied language code to a Nemotron-accepted BCP-47 code.
+
+    Accepts: None/empty → default, "auto" → "auto", 2-letter ISO 639-1 via
+    NEMOTRON_LANGUAGE_MAP (e.g. "hr" → "hr-HR"), or full BCP-47 codes from
+    NEMOTRON_SUPPORTED_BCP47 (e.g. "en-GB", "pt-BR") as passthrough with
+    canonical "ll-RR" casing.
+
+    Unknown codes log a warning and fall back to NEMOTRON_TARGET_LANG_DEFAULT
+    rather than passing garbage to the model.
+    """
     if raw is None:
         return NEMOTRON_TARGET_LANG_DEFAULT
     value = raw.strip()
     if not value:
         return NEMOTRON_TARGET_LANG_DEFAULT
-    lowered = value.lower()
-    if lowered == "auto":
+    if value.lower() == "auto":
         return "auto"
-    return NEMOTRON_LANGUAGE_MAP.get(lowered, value)
+    # BCP-47 passthrough — canonicalise to ll-RR casing then verify.
+    if "-" in value:
+        parts = value.split("-", 1)
+        canonical = f"{parts[0].lower()}-{parts[1].upper()}"
+        if canonical in NEMOTRON_SUPPORTED_BCP47:
+            return canonical
+    # 2-letter (or 3-letter) ISO code lookup.
+    mapped = NEMOTRON_LANGUAGE_MAP.get(value.lower())
+    if mapped is not None:
+        return mapped
+    logger.warning(
+        "Unsupported Nemotron language %r, falling back to %r",
+        raw, NEMOTRON_TARGET_LANG_DEFAULT,
+    )
+    return NEMOTRON_TARGET_LANG_DEFAULT
 
 
 def _parse_nemotron_att_context_size(raw: Optional[str]) -> List[int]:
