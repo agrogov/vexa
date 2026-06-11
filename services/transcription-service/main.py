@@ -97,6 +97,10 @@ BEST_OF = _env_int("BEST_OF", 5)
 COMPRESSION_RATIO_THRESHOLD = _env_float("COMPRESSION_RATIO_THRESHOLD", 1.8)
 LOG_PROB_THRESHOLD = _env_float("LOG_PROB_THRESHOLD", -1.0)
 NO_SPEECH_THRESHOLD = _env_float("NO_SPEECH_THRESHOLD", 0.6)
+# Nemotron RNN-T logprob scale is very different from Whisper's CTC scale.
+# RNN-T cumulative scores live in roughly [-40, 0] per utterance, so the
+# Whisper-tuned LOG_PROB_THRESHOLD (-1.0) would reject everything.
+NEMOTRON_AVG_LOGPROB_THRESHOLD = _env_float("NEMOTRON_AVG_LOGPROB_THRESHOLD", -20.0)
 CONDITION_ON_PREVIOUS_TEXT = _env_bool("CONDITION_ON_PREVIOUS_TEXT", False)
 PROMPT_RESET_ON_TEMPERATURE = _env_float("PROMPT_RESET_ON_TEMPERATURE", 0.3)
 REPETITION_PENALTY = _env_float("REPETITION_PENALTY", 1.1)
@@ -708,7 +712,8 @@ class NemotronBackend(BaseTranscriptionBackend):
 
         if _looks_like_silence(segments_out):
             return _empty_response("silence")
-        if _looks_like_hallucination(segments_out):
+        # Nemotron uses its own threshold — RNN-T score scale differs from Whisper CTC
+        if _looks_like_hallucination(segments_out, logprob_threshold=NEMOTRON_AVG_LOGPROB_THRESHOLD):
             return _empty_response("hallucination")
         if _has_phrase_repetition(full_text):
             return _empty_response("phrase_repetition")
@@ -752,12 +757,21 @@ def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
             return False
     return True
 
-def _looks_like_hallucination(segments: List[Dict[str, Any]]) -> bool:
-    """Heuristic: reject segments that look like hallucinations / low-confidence."""
+def _looks_like_hallucination(
+    segments: List[Dict[str, Any]],
+    logprob_threshold: Optional[float] = None,
+) -> bool:
+    """Heuristic: reject segments that look like hallucinations / low-confidence.
+
+    Args:
+        logprob_threshold: Override for LOG_PROB_THRESHOLD. Used by Nemotron
+            whose RNN-T score scale differs from Whisper CTC.
+    """
     for s in segments:
         if float(s.get("compression_ratio", 0.0)) > COMPRESSION_RATIO_THRESHOLD:
             return True
-        if float(s.get("avg_logprob", 0.0)) < LOG_PROB_THRESHOLD:
+        thresh = logprob_threshold if logprob_threshold is not None else LOG_PROB_THRESHOLD
+        if float(s.get("avg_logprob", 0.0)) < thresh:
             return True
     return False
 
@@ -869,6 +883,7 @@ async def startup_event():
         f"cond_prev_text={CONDITION_ON_PREVIOUS_TEXT}, "
         f"compression_ratio_threshold={COMPRESSION_RATIO_THRESHOLD}, "
         f"log_prob_threshold={LOG_PROB_THRESHOLD}, "
+        f"nemotron_logprob_threshold={NEMOTRON_AVG_LOGPROB_THRESHOLD}, "
         f"no_speech_threshold={NO_SPEECH_THRESHOLD}, "
         f"vad_filter={VAD_FILTER}, "
         f"repetition_penalty={REPETITION_PENALTY}, "

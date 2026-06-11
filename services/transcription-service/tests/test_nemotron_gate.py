@@ -87,3 +87,10 @@ def test_looks_like_hallucination_triggers_on_high_compression():
 def test_looks_like_hallucination_passes_clean_segment():
     seg = {"avg_logprob": -0.3, "compression_ratio": 1.2}
     assert main._looks_like_hallucination([seg]) is False
+
+
+def test_nemotron_logprob_threshold_override():
+    """Nemotron's threshold is much lower; valid speech passes."""
+    seg = {"avg_logprob": -28.0, "compression_ratio": 1.0}
+    assert main._looks_like_hallucination([seg], logprob_threshold=-20.0) is True
+    assert main._looks_like_hallucination([seg], logprob_threshold=-30.0) is False
