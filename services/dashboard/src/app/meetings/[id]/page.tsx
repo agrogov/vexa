@@ -1312,7 +1312,15 @@ export default function MeetingDetailPage() {
             </div>
           )}
           {currentMeeting.status === "active" && (
-            <div className="flex items-center">
+            <div className="flex items-center gap-2">
+              <LanguagePicker
+                value={currentLanguage ?? "auto"}
+                onValueChange={handleLanguageChange}
+                disabled={isUpdatingConfig}
+              />
+              {isUpdatingConfig && (
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              )}
               <AlertDialog>
                 <AlertDialogTrigger asChild>
                   <Button
