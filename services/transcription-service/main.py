@@ -246,6 +246,75 @@ def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _nemotron_avg_logprob(hyp: Any) -> float:
+    """Derive a Whisper-like avg_logprob from a NeMo Hypothesis.
+
+    Uses cumulative score / token count. Falls back to 0.0 (neutral) when the
+    NeMo API shape doesn't expose what we need — degrades the gate to
+    compression-ratio-only rather than crashing.
+    """
+    if hyp is None:
+        return 0.0
+    try:
+        score = getattr(hyp, "score", None)
+        y_seq = getattr(hyp, "y_sequence", None)
+        if score is None or y_seq is None:
+            return 0.0
+        try:
+            n = int(len(y_seq))
+        except TypeError:
+            n = int(getattr(y_seq, "numel", lambda: 0)())
+        if n <= 0:
+            return 0.0
+        try:
+            score_val = float(score)
+        except (TypeError, ValueError):
+            score_val = float(getattr(score, "item", lambda: 0.0)())
+        return score_val / float(n)
+    except Exception:
+        return 0.0
+
+
+def _text_compression_ratio(text: str) -> float:
+    """Classic Whisper-style repetition heuristic: bytes / zlib(bytes)."""
+    if not text:
+        return 0.0
+    import zlib
+    raw = text.encode("utf-8")
+    if not raw:
+        return 0.0
+    compressed = zlib.compress(raw)
+    return len(raw) / max(len(compressed), 1)
+
+
+def _nemotron_no_speech_prob(text: str, duration: float) -> float:
+    """Cheap proxy: empty text on real audio = silence/no-speech."""
+    if duration <= 0.0:
+        return 0.0
+    stripped = (text or "").strip()
+    if not stripped:
+        return 1.0
+    if duration >= 2.0 and len(stripped) < 3:
+        return 0.8
+    return 0.0
+
+
+def _has_phrase_repetition(text: str) -> bool:
+    """Mirror of vexa-bot's hallucination-filter phrase-loop detector."""
+    words = (text or "").split()
+    if len(words) < 9:
+        return False
+    for n in range(3, 7):
+        phrase = " ".join(words[:n]).lower()
+        count = 0
+        for i in range(0, len(words) - n + 1, n):
+            if " ".join(words[i:i + n]).lower() == phrase:
+                count += 1
+        if count >= 3:
+            return True
+    return False
+
+
 class BaseTranscriptionBackend:
     backend_name: str
 
@@ -491,7 +560,7 @@ class NemotronBackend(BaseTranscriptionBackend):
             return 0
         return int(getattr(self.model.encoder.streaming_cfg, "drop_extra_pre_encoded", 0))
 
-    def _stream_audio_file(self, wav_path: str, target_lang: str) -> List[str]:
+    def _stream_audio_file(self, wav_path: str, target_lang: str) -> Tuple[List[str], Any]:
         streaming_buffer = self.streaming_buffer_cls(
             model=self.model,
             online_normalization=False,
@@ -505,6 +574,7 @@ class NemotronBackend(BaseTranscriptionBackend):
         previous_hypotheses = None
         pred_out_stream = None
         transcribed_texts: List[str] = []
+        last_hypothesis: Any = None
         for step_num, (chunk_audio, chunk_lengths) in enumerate(iter(streaming_buffer)):
             with self.torch.inference_mode():
                 chunk_audio = chunk_audio.to(self.device, dtype=self.compute_dtype)
@@ -529,6 +599,8 @@ class NemotronBackend(BaseTranscriptionBackend):
                     return_transcription=True,
                 )
                 transcribed_texts = self._extract_streaming_texts(step_hypotheses)
+                if step_hypotheses:
+                    last_hypothesis = step_hypotheses[0]
         streaming_buffer.reset_buffer()
         logger.info(
             "Nemotron cache-aware streaming completed - target_lang=%s att_context_size=%s chunk_ms=%s",
@@ -536,7 +608,7 @@ class NemotronBackend(BaseTranscriptionBackend):
             self.att_context_size,
             _nemotron_chunk_size_ms(self.att_context_size),
         )
-        return transcribed_texts
+        return transcribed_texts, last_hypothesis
 
     async def transcribe(
         self,
@@ -567,7 +639,7 @@ class NemotronBackend(BaseTranscriptionBackend):
                         self.model.decoding.set_strip_lang_tags(False)
                     return self._stream_audio_file(wav_path, target_lang)
 
-            hypotheses = await asyncio.get_event_loop().run_in_executor(
+            stream_result = await asyncio.get_event_loop().run_in_executor(
                 transcription_executor, _transcribe_sync
             )
         finally:
@@ -575,6 +647,10 @@ class NemotronBackend(BaseTranscriptionBackend):
                 os.unlink(wav_path)
             except OSError:
                 pass
+
+        if not isinstance(stream_result, tuple) or len(stream_result) != 2:
+            raise RuntimeError("Nemotron backend returned malformed streaming result")
+        hypotheses, last_hyp = stream_result
 
         if not isinstance(hypotheses, list) or not hypotheses:
             raise RuntimeError("Nemotron backend returned no hypotheses")
@@ -590,6 +666,10 @@ class NemotronBackend(BaseTranscriptionBackend):
             seg_start = 0.0
             seg_end = duration
 
+        avg_logprob = _nemotron_avg_logprob(last_hyp)
+        compression_ratio = _text_compression_ratio(full_text)
+        no_speech_prob = _nemotron_no_speech_prob(full_text, duration)
+
         segment: Dict[str, Any] = {
             "id": 0,
             "seek": 0,
@@ -598,9 +678,9 @@ class NemotronBackend(BaseTranscriptionBackend):
             "text": full_text,
             "tokens": [],
             "temperature": 0.0,
-            "avg_logprob": 0.0,
-            "compression_ratio": 0.0,
-            "no_speech_prob": 0.0,
+            "avg_logprob": avg_logprob,
+            "compression_ratio": compression_ratio,
+            "no_speech_prob": no_speech_prob,
             "audio_start": seg_start,
             "audio_end": seg_end,
         }
@@ -608,12 +688,37 @@ class NemotronBackend(BaseTranscriptionBackend):
             segment["words"] = words
 
         detected_language = _extract_nemotron_detected_language(raw_text, target_lang)
+        language_probability = 1.0 if target_lang != "auto" else 0.0
+
+        segments_out = [segment] if (full_text or words) else []
+
+        def _empty_response(reason: str) -> Dict[str, Any]:
+            logger.info(
+                "Worker %s Nemotron gate dropped output (%s): "
+                "avg_logprob=%.3f compression=%.3f no_speech=%.3f text=%r",
+                WORKER_ID, reason, avg_logprob, compression_ratio, no_speech_prob, full_text[:80],
+            )
+            return {
+                "text": "",
+                "language": detected_language,
+                "language_probability": language_probability,
+                "duration": duration,
+                "segments": [],
+            }
+
+        if _looks_like_silence(segments_out):
+            return _empty_response("silence")
+        if _looks_like_hallucination(segments_out):
+            return _empty_response("hallucination")
+        if _has_phrase_repetition(full_text):
+            return _empty_response("phrase_repetition")
+
         return {
             "text": full_text,
             "language": detected_language,
-            "language_probability": 1.0 if target_lang != "auto" else 0.0,
+            "language_probability": language_probability,
             "duration": duration,
-            "segments": [segment] if full_text or words else [],
+            "segments": segments_out,
         }
 
 
