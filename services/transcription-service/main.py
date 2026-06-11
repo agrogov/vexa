@@ -97,10 +97,8 @@ BEST_OF = _env_int("BEST_OF", 5)
 COMPRESSION_RATIO_THRESHOLD = _env_float("COMPRESSION_RATIO_THRESHOLD", 1.8)
 LOG_PROB_THRESHOLD = _env_float("LOG_PROB_THRESHOLD", -1.0)
 NO_SPEECH_THRESHOLD = _env_float("NO_SPEECH_THRESHOLD", 0.6)
-# Nemotron RNN-T logprob scale is very different from Whisper's CTC scale.
-# RNN-T cumulative scores live in roughly [-40, 0] per utterance, so the
-# Whisper-tuned LOG_PROB_THRESHOLD (-1.0) would reject everything.
-NEMOTRON_AVG_LOGPROB_THRESHOLD = _env_float("NEMOTRON_AVG_LOGPROB_THRESHOLD", -20.0)
+# Nemotron uses compression-ratio + phrase-repetition for quality (no logprob
+# gate — RNN-T score scale is fundamentally different from Whisper CTC).
 CONDITION_ON_PREVIOUS_TEXT = _env_bool("CONDITION_ON_PREVIOUS_TEXT", False)
 PROMPT_RESET_ON_TEMPERATURE = _env_float("PROMPT_RESET_ON_TEMPERATURE", 0.3)
 REPETITION_PENALTY = _env_float("REPETITION_PENALTY", 1.1)
@@ -248,35 +246,6 @@ def _extract_word_timestamps(payload: Any) -> List[Dict[str, Any]]:
             }
         )
     return out
-
-
-def _nemotron_avg_logprob(hyp: Any) -> float:
-    """Derive a Whisper-like avg_logprob from a NeMo Hypothesis.
-
-    Uses cumulative score / token count. Falls back to 0.0 (neutral) when the
-    NeMo API shape doesn't expose what we need — degrades the gate to
-    compression-ratio-only rather than crashing.
-    """
-    if hyp is None:
-        return 0.0
-    try:
-        score = getattr(hyp, "score", None)
-        y_seq = getattr(hyp, "y_sequence", None)
-        if score is None or y_seq is None:
-            return 0.0
-        try:
-            n = int(len(y_seq))
-        except TypeError:
-            n = int(getattr(y_seq, "numel", lambda: 0)())
-        if n <= 0:
-            return 0.0
-        try:
-            score_val = float(score)
-        except (TypeError, ValueError):
-            score_val = float(getattr(score, "item", lambda: 0.0)())
-        return score_val / float(n)
-    except Exception:
-        return 0.0
 
 
 def _text_compression_ratio(text: str) -> float:
@@ -564,7 +533,7 @@ class NemotronBackend(BaseTranscriptionBackend):
             return 0
         return int(getattr(self.model.encoder.streaming_cfg, "drop_extra_pre_encoded", 0))
 
-    def _stream_audio_file(self, wav_path: str, target_lang: str) -> Tuple[List[str], Any]:
+    def _stream_audio_file(self, wav_path: str, target_lang: str) -> List[str]:
         streaming_buffer = self.streaming_buffer_cls(
             model=self.model,
             online_normalization=False,
@@ -578,7 +547,6 @@ class NemotronBackend(BaseTranscriptionBackend):
         previous_hypotheses = None
         pred_out_stream = None
         transcribed_texts: List[str] = []
-        last_hypothesis: Any = None
         for step_num, (chunk_audio, chunk_lengths) in enumerate(iter(streaming_buffer)):
             with self.torch.inference_mode():
                 chunk_audio = chunk_audio.to(self.device, dtype=self.compute_dtype)
@@ -603,8 +571,6 @@ class NemotronBackend(BaseTranscriptionBackend):
                     return_transcription=True,
                 )
                 transcribed_texts = self._extract_streaming_texts(step_hypotheses)
-                if step_hypotheses:
-                    last_hypothesis = step_hypotheses[0]
         streaming_buffer.reset_buffer()
         logger.info(
             "Nemotron cache-aware streaming completed - target_lang=%s att_context_size=%s chunk_ms=%s",
@@ -612,7 +578,7 @@ class NemotronBackend(BaseTranscriptionBackend):
             self.att_context_size,
             _nemotron_chunk_size_ms(self.att_context_size),
         )
-        return transcribed_texts, last_hypothesis
+        return transcribed_texts
 
     async def transcribe(
         self,
@@ -652,13 +618,10 @@ class NemotronBackend(BaseTranscriptionBackend):
             except OSError:
                 pass
 
-        if not isinstance(stream_result, tuple) or len(stream_result) != 2:
-            raise RuntimeError("Nemotron backend returned malformed streaming result")
-        hypotheses, last_hyp = stream_result
-
-        if not isinstance(hypotheses, list) or not hypotheses:
+        if not isinstance(stream_result, list) or not stream_result:
             raise RuntimeError("Nemotron backend returned no hypotheses")
 
+        hypotheses = stream_result
         first = hypotheses[0]
         raw_text = _extract_response_text(first)
         full_text = _clean_nemotron_text(raw_text)
@@ -670,8 +633,6 @@ class NemotronBackend(BaseTranscriptionBackend):
             seg_start = 0.0
             seg_end = duration
 
-        avg_logprob = _nemotron_avg_logprob(last_hyp)
-        compression_ratio = _text_compression_ratio(full_text)
         no_speech_prob = _nemotron_no_speech_prob(full_text, duration)
 
         segment: Dict[str, Any] = {
@@ -682,8 +643,8 @@ class NemotronBackend(BaseTranscriptionBackend):
             "text": full_text,
             "tokens": [],
             "temperature": 0.0,
-            "avg_logprob": avg_logprob,
-            "compression_ratio": compression_ratio,
+            "avg_logprob": 0.0,
+            "compression_ratio": _text_compression_ratio(full_text),
             "no_speech_prob": no_speech_prob,
             "audio_start": seg_start,
             "audio_end": seg_end,
@@ -698,9 +659,10 @@ class NemotronBackend(BaseTranscriptionBackend):
 
         def _empty_response(reason: str) -> Dict[str, Any]:
             logger.info(
-                "Worker %s Nemotron gate dropped output (%s): "
-                "avg_logprob=%.3f compression=%.3f no_speech=%.3f text=%r",
-                WORKER_ID, reason, avg_logprob, compression_ratio, no_speech_prob, full_text[:80],
+                "Worker %s Nemotron gate dropped (%s): "
+                "compression=%.3f no_speech=%.3f text=%r",
+                WORKER_ID, reason,
+                segment.get("compression_ratio", 0.0), no_speech_prob, full_text[:80],
             )
             return {
                 "text": "",
@@ -712,8 +674,13 @@ class NemotronBackend(BaseTranscriptionBackend):
 
         if _looks_like_silence(segments_out):
             return _empty_response("silence")
-        # Nemotron uses its own threshold — RNN-T score scale differs from Whisper CTC
-        if _looks_like_hallucination(segments_out, logprob_threshold=NEMOTRON_AVG_LOGPROB_THRESHOLD):
+        # Hallucination gate: uses compression_ratio only (same heuristic for both
+        # backends) via _looks_like_hallucination. Nemotron does not get a logprob
+        # check — RNN-T score scale (~-3 to -5 per token, grows with length) is
+        # fundamentally different from Whisper CTC avg_logprob (~[-1.5, 0]).
+        # Catching Nemotron repetition/garbage relies on compression_ratio +
+        # phrase_repetition below.
+        if _looks_like_hallucination(segments_out):
             return _empty_response("hallucination")
         if _has_phrase_repetition(full_text):
             return _empty_response("phrase_repetition")
@@ -757,21 +724,18 @@ def _looks_like_silence(segments: List[Dict[str, Any]]) -> bool:
             return False
     return True
 
-def _looks_like_hallucination(
-    segments: List[Dict[str, Any]],
-    logprob_threshold: Optional[float] = None,
-) -> bool:
+def _looks_like_hallucination(segments: List[Dict[str, Any]]) -> bool:
     """Heuristic: reject segments that look like hallucinations / low-confidence.
 
-    Args:
-        logprob_threshold: Override for LOG_PROB_THRESHOLD. Used by Nemotron
-            whose RNN-T score scale differs from Whisper CTC.
+    Note: this checks avg_logprob against LOG_PROB_THRESHOLD which is tuned
+    for Whisper CTC scale (~[-1.5, 0]). Nemotron does NOT use this for the
+    logprob check (different RNN-T scale) — it relies on compression_ratio
+    + phrase_repetition instead.
     """
     for s in segments:
         if float(s.get("compression_ratio", 0.0)) > COMPRESSION_RATIO_THRESHOLD:
             return True
-        thresh = logprob_threshold if logprob_threshold is not None else LOG_PROB_THRESHOLD
-        if float(s.get("avg_logprob", 0.0)) < thresh:
+        if float(s.get("avg_logprob", 0.0)) < LOG_PROB_THRESHOLD:
             return True
     return False
 
@@ -883,7 +847,6 @@ async def startup_event():
         f"cond_prev_text={CONDITION_ON_PREVIOUS_TEXT}, "
         f"compression_ratio_threshold={COMPRESSION_RATIO_THRESHOLD}, "
         f"log_prob_threshold={LOG_PROB_THRESHOLD}, "
-        f"nemotron_logprob_threshold={NEMOTRON_AVG_LOGPROB_THRESHOLD}, "
         f"no_speech_threshold={NO_SPEECH_THRESHOLD}, "
         f"vad_filter={VAD_FILTER}, "
         f"repetition_penalty={REPETITION_PENALTY}, "

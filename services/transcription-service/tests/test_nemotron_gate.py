@@ -1,4 +1,4 @@
-"""Unit tests for the Nemotron quality-gate helpers added to main.py.
+"""Unit tests for the Nemotron quality-gate helpers.
 
 These tests only exercise pure-Python helpers (no model load, no inference).
 They import `main` lazily and skip if heavy ASR deps aren't installed in
@@ -9,30 +9,6 @@ from __future__ import annotations
 import pytest
 
 main = pytest.importorskip("main")
-
-
-class _FakeHyp:
-    def __init__(self, score=None, y_sequence=None):
-        if score is not None:
-            self.score = score
-        if y_sequence is not None:
-            self.y_sequence = y_sequence
-
-
-def test_avg_logprob_normal():
-    hyp = _FakeHyp(score=-5.0, y_sequence=[1, 2, 3, 4, 5])
-    assert main._nemotron_avg_logprob(hyp) == pytest.approx(-1.0)
-
-
-def test_avg_logprob_missing_fields_returns_neutral():
-    assert main._nemotron_avg_logprob(None) == 0.0
-    assert main._nemotron_avg_logprob(_FakeHyp()) == 0.0
-    assert main._nemotron_avg_logprob(_FakeHyp(score=-3.0)) == 0.0
-    assert main._nemotron_avg_logprob(_FakeHyp(y_sequence=[1, 2])) == 0.0
-
-
-def test_avg_logprob_empty_sequence():
-    assert main._nemotron_avg_logprob(_FakeHyp(score=-1.0, y_sequence=[])) == 0.0
 
 
 def test_compression_ratio_repetitive_text_is_high():
@@ -87,10 +63,3 @@ def test_looks_like_hallucination_triggers_on_high_compression():
 def test_looks_like_hallucination_passes_clean_segment():
     seg = {"avg_logprob": -0.3, "compression_ratio": 1.2}
     assert main._looks_like_hallucination([seg]) is False
-
-
-def test_nemotron_logprob_threshold_override():
-    """Nemotron's threshold is much lower; valid speech passes."""
-    seg = {"avg_logprob": -28.0, "compression_ratio": 1.0}
-    assert main._looks_like_hallucination([seg], logprob_threshold=-20.0) is True
-    assert main._looks_like_hallucination([seg], logprob_threshold=-30.0) is False
