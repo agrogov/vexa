@@ -78,13 +78,15 @@ spec:
             {{- with .Values.transcriptionService.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with .Values.transcriptionService.startupProbe }}
           startupProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: {{ .Values.transcriptionService.startupProbe.initialDelaySeconds | default 0 }}
-            failureThreshold: {{ .Values.transcriptionService.startupProbe.failureThreshold | default 30 }}
-            periodSeconds: {{ .Values.transcriptionService.startupProbe.periodSeconds | default 10 }}
+            initialDelaySeconds: {{ .initialDelaySeconds | default 0 }}
+            failureThreshold: {{ .failureThreshold | default 30 }}
+            periodSeconds: {{ .periodSeconds | default 10 }}
+          {{- end }}
           readinessProbe:
             httpGet:
               path: /health
