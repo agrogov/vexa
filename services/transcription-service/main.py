@@ -42,6 +42,7 @@ NEMOTRON_MODEL_NAME = os.getenv(
 NEMOTRON_TARGET_LANG_DEFAULT = os.getenv("NEMOTRON_TARGET_LANG_DEFAULT", "auto").strip() or "auto"
 NEMOTRON_ATT_CONTEXT_SIZE_RAW = os.getenv("NEMOTRON_ATT_CONTEXT_SIZE", "56,6").strip() or "56,6"
 NEMOTRON_BOOSTING_PHRASES_FILE = os.getenv("NEMOTRON_BOOSTING_PHRASES_FILE", "").strip()
+WHISPER_HOTWORDS_FILE = os.getenv("WHISPER_HOTWORDS_FILE", "").strip()
 
 # Device detection: Use environment variable or default to cuda for GPU containers
 # CTranslate2 (used by faster-whisper) will automatically detect and use CUDA if available
@@ -402,12 +403,29 @@ class WhisperBackend(BaseTranscriptionBackend):
             logger.info("Worker %s using %s CPU threads", WORKER_ID, CPU_THREADS)
         self.model = WhisperModel(**model_kwargs)
 
+        self.hotwords_string: Optional[str] = None
+        if WHISPER_HOTWORDS_FILE:
+            if not os.path.isfile(WHISPER_HOTWORDS_FILE):
+                raise RuntimeError(
+                    f"WHISPER_HOTWORDS_FILE does not exist: {WHISPER_HOTWORDS_FILE}"
+                )
+            with open(WHISPER_HOTWORDS_FILE, "r", encoding="utf-8") as f:
+                phrases = [ln.strip() for ln in f if ln.strip()]
+            self.hotwords_string = " ".join(phrases) if phrases else None
+            logger.info(
+                "Whisper hotwords enabled - file=%s count=%d chars=%d",
+                WHISPER_HOTWORDS_FILE,
+                len(phrases),
+                len(self.hotwords_string or ""),
+            )
+
     def startup_details(self) -> Dict[str, Any]:
         return {
             "backend": self.backend_name,
             "backend_model": MODEL_SIZE,
             "device": DEVICE,
             "compute_type": COMPUTE_TYPE,
+            "hotwords_file": WHISPER_HOTWORDS_FILE or None,
         }
 
     def accepted_models(self) -> Set[str]:
@@ -439,6 +457,7 @@ class WhisperBackend(BaseTranscriptionBackend):
                     language=language,
                     task=task,
                     initial_prompt=prompt,
+                    hotwords=self.hotwords_string,
                     temperature=t,
                     beam_size=BEAM_SIZE,
                     best_of=BEST_OF,
@@ -956,6 +975,8 @@ async def health_check():
         health_status["chunk_size_ms"] = backend_details["chunk_size_ms"]
     if "boosting_phrases_file" in backend_details:
         health_status["boosting_phrases_file"] = backend_details["boosting_phrases_file"]
+    if "hotwords_file" in backend_details:
+        health_status["hotwords_file"] = backend_details["hotwords_file"]
     
     if DEVICE == "cuda":
         # CTranslate2 (via faster-whisper) handles GPU automatically

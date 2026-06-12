@@ -91,6 +91,7 @@ All configuration is via environment variables. Copy `.env.example` and adjust.
 | `NEMOTRON_BOOSTING_ALPHA` | `1.0` | Phrase-boosting shallow-fusion weight when `NEMOTRON_BOOSTING_PHRASES_FILE` is set |
 | `NEMOTRON_BOOSTING_CONTEXT_SCORE` | `1.0` | Per-token context graph score for phrase boosting |
 | `NEMOTRON_BOOSTING_DEPTH_SCALING` | `2.0` | Context graph depth scaling for phrase boosting |
+| `WHISPER_HOTWORDS_FILE` | (none) | Optional Whisper hotwords phrase list, one phrase per line. Loaded once at startup and passed as `hotwords=` to faster-whisper. |
 | `DEVICE` | `cuda` | `cuda` or `cpu` |
 | `COMPUTE_TYPE` | `int8` | `int8`, `float16`, or `float32` |
 | `CPU_THREADS` | `0` (auto) | CPU threads when `DEVICE=cpu` |
@@ -176,6 +177,29 @@ NEMOTRON_BOOSTING_DEPTH_SCALING=2.0
 
 Increase `NEMOTRON_BOOSTING_ALPHA` if phrases are still missed; lower it
 if the decoder over-inserts boosted terms.
+
+### Whisper hotwords
+
+The Whisper backend supports faster-whisper's `hotwords=` decoding bias.
+Create a plain text file with one phrase per line (the same file format
+as Nemotron's phrase list can be reused):
+
+```text
+Infobip
+WhatsApp Business API
+CPaaS
+```
+
+Mount the file into the container and set:
+
+```bash
+TRANSCRIPTION_BACKEND=whisper
+WHISPER_HOTWORDS_FILE=/app/boosting/phrases.txt
+```
+
+The file is read once at startup, joined into a single space-separated
+string, and passed as `hotwords=` on every `model.transcribe()` call.
+The `/health` endpoint reports `hotwords_file` when active.
 
 ### Response format
 
