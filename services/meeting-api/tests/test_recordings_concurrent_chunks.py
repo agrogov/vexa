@@ -44,6 +44,8 @@ covers that surface in production traffic.
 from __future__ import annotations
 
 import asyncio
+import ast
+import inspect
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -77,15 +79,91 @@ class MockResult(_BaseMockResult):
 
 
 # ───────────────────────────────────────────────────────────────────────
-# Test 1 (REMOVED in v0.10.6.1): the prior `use_meeting_data` AST-walker
-# scanned for an `if use_meeting_data:` branch that no longer exists —
-# v0.10.6.1 dropped the relational `Recording`/`MediaFile` ORM tables
-# and the `RECORDING_METADATA_MODE` toggle, making the JSONB write the
-# only path. The runtime concurrency tests (2 + 3 below) still exercise
-# the lock-before-snapshot invariant end-to-end via _StatefulMockDB; the
-# AST guard was scaffolding for the toggled branch and has no signal
-# left to assert on.
+# Test 1 — static assertion: lock is acquired before the JSONB write
+# snapshot. This is branch-agnostic for the v0.10.6.1 JSONB-only
+# implementation; it does not depend on the removed `use_meeting_data`
+# toggle.
 # ───────────────────────────────────────────────────────────────────────
+
+
+def test_lock_acquired_before_snapshot_in_source():
+    """The Pack E.1.a v2 invariant: SELECT FOR UPDATE BEFORE snapshot.
+
+    If this fails, someone has reintroduced the stale-snapshot race
+    flagged by [PLATFORM] in #272 issuecomment-4327366063. The v2
+    contract is explicit:
+
+      1. Phase 1 (no lock): load meeting, derive legacy_id for storage_path
+      2. Phase 2 (no lock): S3 upload (idempotent on key)
+      3. Phase 3 (LOCKED):  SELECT FOR UPDATE → re-snapshot → JSONB write
+
+    The static check below confirms phase 3's lock acquisition appears
+    before the locked ``meeting.data`` write snapshot. The earlier
+    pre-lock snapshot is a storage_path helper only — not a JSONB write
+    source.
+    """
+    src = inspect.getsource(recordings_module.internal_upload_recording)
+    tree = ast.parse(src)
+
+    # The JSONB-only implementation has one write path. It may still read
+    # meeting.data before the lock to derive the pre-upload storage id, but
+    # the write snapshot must be re-derived after SELECT ... FOR UPDATE.
+    first_lock_lineno: int | None = None
+    first_locked_data_access_lineno: int | None = None
+
+    for node in ast.walk(tree):
+        if (
+            first_lock_lineno is None
+            and isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "with_for_update"
+        ):
+            first_lock_lineno = node.lineno
+
+    assert first_lock_lineno is not None, (
+        "no with_for_update() call found in internal_upload_recording — "
+        "Pack E.1.a v2 contract violated."
+    )
+
+    for child in ast.walk(tree):
+        if (
+            isinstance(child, ast.Attribute)
+            and getattr(child, "lineno", 0) > first_lock_lineno
+            and child.attr == "data"
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "meeting"
+        ):
+            if first_locked_data_access_lineno is None or child.lineno < first_locked_data_access_lineno:
+                first_locked_data_access_lineno = child.lineno
+
+    assert first_locked_data_access_lineno is not None, (
+        "no meeting.data re-snapshot found after with_for_update(); "
+        "function shape unexpected; review test."
+    )
+
+    # Make sure no JSONB write assignment occurs before the locked snapshot.
+    for child in ast.walk(tree):
+        if (
+            isinstance(child, ast.Assign)
+            and getattr(child, "lineno", 0) < first_locked_data_access_lineno
+            and any(
+                isinstance(target, ast.Attribute)
+                and target.attr == "data"
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "meeting"
+                for target in child.targets
+            )
+        ):
+            raise AssertionError(
+                "meeting.data is assigned before the locked snapshot; "
+                "Pack E.1.a v2 lock-before-write contract violated."
+            )
+
+    assert first_lock_lineno < first_locked_data_access_lineno, (
+        f"REGRESSION (Pack E.1.a v2): SELECT FOR UPDATE at line "
+        f"{first_lock_lineno} must come BEFORE the locked meeting.data "
+        f"snapshot at line {first_locked_data_access_lineno}."
+    )
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -280,6 +358,5 @@ async def test_concurrent_audio_video_no_lost_entry():
         f"media_types but only one entry survived, meaning the lock-before-"
         f"snapshot invariant has broken. Re-check "
         f"recordings.py::internal_upload_recording — the SELECT FOR UPDATE "
-        f"must precede the meeting.data snapshot inside the meeting_data "
-        f"branch."
+        f"must precede the locked meeting.data write snapshot."
     )

@@ -622,14 +622,6 @@ async def download_media_file_raw(
     db: AsyncSession = Depends(get_db),
 ):
     _, user = auth
-    content_type_map = {
-        "wav": "audio/wav",
-        "webm": "video/webm",
-        "opus": "audio/opus",
-        "mp3": "audio/mpeg",
-        "jpg": "image/jpeg",
-        "png": "image/png",
-    }
 
     # Resolve the storage path, source format, and content type.
     storage_path = None
@@ -645,7 +637,7 @@ async def download_media_file_raw(
             storage_path = f.get("storage_path")
             fmt = str(f.get("format", "bin")).lower()
             type_label = str(f.get("type", "audio"))
-            ct = content_type_map.get(fmt, media_content_type(type_label, fmt))
+            ct = media_content_type(type_label, fmt)
             filename = f"{recording_id}_{type_label}.{fmt}"
             break
 

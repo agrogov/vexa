@@ -125,6 +125,50 @@ class TestGetRecording:
 
 
 # ===================================================================
+# GET /recordings/{id}/media/{id}/raw
+# ===================================================================
+
+
+class TestRawMedia:
+
+    @pytest.mark.asyncio
+    async def test_raw_audio_webm_uses_audio_content_type(self, client, mock_db):
+        """GET /raw for audio/webm should not be served as video/webm."""
+        meeting = make_meeting(data={
+            "recordings": [{
+                "id": 1001,
+                "meeting_id": TEST_MEETING_ID,
+                "user_id": TEST_USER_ID,
+                "session_uid": "sess-1",
+                "source": "bot",
+                "status": "completed",
+                "created_at": "2025-01-01T00:00:00",
+                "completed_at": "2025-01-01T00:05:00",
+                "media_files": [{
+                    "id": 2001,
+                    "type": "audio",
+                    "format": "webm",
+                    "storage_path": "recordings/5/1001/sess-1/audio/master.webm",
+                    "storage_backend": "minio",
+                    "file_size_bytes": 4,
+                    "duration_seconds": 1.0,
+                    "metadata": {},
+                    "created_at": "2025-01-01T00:05:00",
+                }],
+            }],
+        })
+        mock_db.execute = AsyncMock(return_value=MockResult([meeting]))
+        mock_storage = MagicMock()
+        mock_storage.download_file = MagicMock(return_value=b"webm")
+
+        with patch("meeting_api.recordings.get_storage_client", return_value=mock_storage):
+            resp = await client.get("/recordings/1001/media/2001/raw")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "audio/webm"
+
+
+# ===================================================================
 # DELETE /recordings/{id}
 # ===================================================================
 
