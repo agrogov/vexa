@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { getAuthCookieName } from "@/lib/auth-cookies";
 
 /**
  * Get current user info from token.
@@ -10,7 +11,8 @@ export async function GET() {
   const VEXA_API_URL = process.env.VEXA_API_URL || "http://localhost:8056";
 
   const cookieStore = await cookies();
-  const cookieToken = cookieStore.get("vexa-token")?.value;
+  const authCookieName = getAuthCookieName();
+  const cookieToken = cookieStore.get(authCookieName)?.value;
   const token = cookieToken || "";
 
   if (!token) {
@@ -27,7 +29,7 @@ export async function GET() {
     });
 
     if (!response.ok) {
-      if (cookieToken) cookieStore.delete("vexa-token");
+      if (cookieToken) cookieStore.delete(authCookieName);
       return NextResponse.json(
         { error: "Invalid token" },
         { status: 401 }

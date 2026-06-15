@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { getAuthCookieName } from "@/lib/auth-cookies";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -13,14 +14,14 @@ async function proxyRequest(
 
   // Get user's token from HTTP-only cookie (set during login)
   const cookieStore = await cookies();
-  const userToken = cookieStore.get("vexa-token")?.value;
+  const userToken = cookieStore.get(getAuthCookieName())?.value;
 
   // VEXA_API_KEY from env is used ONLY for the meetings list endpoint
   // (pre-login browsing). All other endpoints require a user cookie.
   const VEXA_API_KEY = userToken || process.env.VEXA_API_KEY || "";
 
   const { path } = await params;
-  let pathString = path.join("/");
+  const pathString = path.join("/");
 
   // /meetings list: primary source is GET /bots (meeting-api DB — all statuses).
   // Fallback to /bots/status (running containers only) if /bots fails.

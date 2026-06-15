@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import crypto from "crypto";
 import { getAuthenticatedUserId } from "@/lib/auth-utils";
+import { getAuthCookieName } from "@/lib/auth-cookies";
 
 const getAdminConfig = () => {
   const VEXA_ADMIN_API_URL =
@@ -77,7 +78,7 @@ export async function PUT(request: NextRequest) {
   }
 
   const cookieStore = await cookies();
-  const token = cookieStore.get("vexa-token")?.value;
+  const token = cookieStore.get(getAuthCookieName())?.value;
 
   try {
     const body = await request.json();

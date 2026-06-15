@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { cookies } from "next/headers";
+import { getAuthCookieName } from "@/lib/auth-cookies";
 
 const AGENT_API_URL = process.env.AGENT_API_URL || "http://localhost:8100";
 // Service-to-service token — must match BOT_API_TOKEN in the agent-api container
@@ -7,7 +8,7 @@ const AGENT_API_TOKEN = process.env.AGENT_API_TOKEN || "";
 
 async function getUserToken(): Promise<string> {
   const cookieStore = await cookies();
-  return cookieStore.get("vexa-token")?.value || "";
+  return cookieStore.get(getAuthCookieName())?.value || "";
 }
 
 async function safeJsonResponse(resp: globalThis.Response): Promise<Response> {

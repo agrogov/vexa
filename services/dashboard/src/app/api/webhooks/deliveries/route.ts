@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { getAuthCookieName } from "@/lib/auth-cookies";
 
 const getAdminConfig = () => {
   const VEXA_ADMIN_API_URL =
@@ -22,7 +23,7 @@ export async function GET(request: NextRequest) {
   const VEXA_API_URL = process.env.VEXA_API_URL || "http://localhost:18056";
 
   const cookieStore = await cookies();
-  const token = cookieStore.get("vexa-token")?.value;
+  const token = cookieStore.get(getAuthCookieName())?.value;
   if (!token) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }

@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { getAuthCookieName, getUserInfoCookieName } from "@/lib/auth-cookies";
 
 /**
  * Resolve the authenticated user's ID from the vexa-token cookie.
@@ -19,7 +20,7 @@ export async function getAuthenticatedUserId(): Promise<string | null> {
   if (!VEXA_ADMIN_API_KEY) return null;
 
   const cookieStore = await cookies();
-  const token = cookieStore.get("vexa-token")?.value;
+  const token = cookieStore.get(getAuthCookieName())?.value;
   if (!token) return null;
 
   // Validate the token by calling the API gateway (same as /api/auth/me)
@@ -30,7 +31,7 @@ export async function getAuthenticatedUserId(): Promise<string | null> {
   if (!verifyRes.ok) return null;
 
   // Get the user's email from the SSO cookie, then resolve to a user ID
-  const userInfoStr = cookieStore.get("vexa-user-info")?.value;
+  const userInfoStr = cookieStore.get(getUserInfoCookieName())?.value;
   if (!userInfoStr) return null;
 
   let email: string;

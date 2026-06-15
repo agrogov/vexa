@@ -6,6 +6,7 @@ import { cookies } from "next/headers";
 import { findUserByEmail, createUser, createUserToken } from "@/lib/vexa-admin-api";
 import { getRegistrationConfig, validateEmailForRegistration } from "@/lib/registration";
 import { getVexaCookieOptions } from "@/lib/cookie-utils";
+import { getAuthCookieName, getUserInfoCookieName } from "@/lib/auth-cookies";
 
 // Check if Google OAuth is enabled
 const isGoogleAuthEnabled = () => {
@@ -104,8 +105,8 @@ export const authOptions: NextAuthOptions = {
 
           // Step 3: Set cookies (same as existing auth flow)
           const cookieStore = await cookies();
-          cookieStore.set("vexa-token", apiToken, getVexaCookieOptions());
-          cookieStore.set("vexa-user-info", JSON.stringify({ email: user.email, name: user.name }), getVexaCookieOptions());
+          cookieStore.set(getAuthCookieName(), apiToken, getVexaCookieOptions());
+          cookieStore.set(getUserInfoCookieName(), JSON.stringify({ email: user.email, name: user.name }), getVexaCookieOptions());
 
           // Store Vexa user info in the user object for the JWT callback
           (user as any).vexaUser = vexaUser;
@@ -210,4 +211,3 @@ export const authOptions: NextAuthOptions = {
 const handler = NextAuth(authOptions);
 
 export { handler as GET, handler as POST };
-

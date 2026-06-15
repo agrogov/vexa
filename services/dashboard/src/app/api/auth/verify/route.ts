@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import { getRegistrationConfig, validateEmailForRegistration } from "@/lib/registration";
 import { findUserByEmail, createUser, createUserToken, type ApiError } from "@/lib/vexa-admin-api";
 import { getVexaCookieOptions } from "@/lib/cookie-utils";
+import { getAuthCookieName, getUserInfoCookieName } from "@/lib/auth-cookies";
 
 const JWT_SECRET = process.env.JWT_SECRET || process.env.VEXA_ADMIN_API_KEY || "default-secret-change-me";
 
@@ -181,9 +182,9 @@ export async function POST(request: NextRequest) {
 
     // Step 5: Set token in HTTP-only cookie
     const cookieStore = await cookies();
-    cookieStore.set("vexa-token", apiToken, getVexaCookieOptions());
+    cookieStore.set(getAuthCookieName(), apiToken, getVexaCookieOptions());
     // Set user-info cookie so getAuthenticatedUserId can resolve the user
-    cookieStore.set("vexa-user-info", JSON.stringify({ email: user!.email, name: user!.name }), getVexaCookieOptions());
+    cookieStore.set(getUserInfoCookieName(), JSON.stringify({ email: user!.email, name: user!.name }), getVexaCookieOptions());
 
     // Step 6: Return success with user info
     return NextResponse.json({

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import { getAuthCookieName } from "@/lib/auth-cookies";
 
 /**
  * DELETE /api/profile/keys/:id — revoke an API key via admin API
@@ -19,7 +20,7 @@ export async function DELETE(
   }
 
   const cookieStore = await cookies();
-  const token = cookieStore.get("vexa-token")?.value;
+  const token = cookieStore.get(getAuthCookieName())?.value;
   if (!token) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
