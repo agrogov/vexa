@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import type { Meeting } from "@/types/vexa";
-import { withBasePath, vncWsPath } from "@/lib/base-path";
+import { withBasePath } from "@/lib/base-path";
 
 function CopyBlock({ label, text }: { label: string; text: string }) {
   return (
@@ -52,16 +52,20 @@ interface BrowserSessionViewProps {
 
 export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
   const router = useRouter();
-  const [apiUrl, setApiUrl] = useState("");
+  const [apiUrl, setApiUrl] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [showPanel, setShowPanel] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     fetch(withBasePath("/api/config"))
       .then((r) => r.json())
       .then((cfg) => {
-        setApiUrl(cfg.publicApiUrl || cfg.apiUrl || "http://localhost:8056");
+        setApiUrl(cfg.apiUrl || "");
+      })
+      .catch(() => {
+        setApiUrl("");
       });
   }, []);
 
@@ -87,11 +91,16 @@ export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
     );
   }
 
-  const vncUrl = withBasePath(`/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=${vncWsPath(token)}`);
-  const cdpUrl = apiUrl ? `${apiUrl}/b/${token}/cdp` : withBasePath(`/b/${token}/cdp`);
+  const gatewayBrowserBase = (apiUrl || "").replace(/\/+$/, "");
+  const browserRoute = (path: string) => {
+    if (apiUrl === null) return null;
+    return gatewayBrowserBase ? `${gatewayBrowserBase}${path}` : withBasePath(path);
+  };
+  const vncUrl = browserRoute(`/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify`);
+  const cdpUrl = browserRoute(`/b/${token}/cdp`);
   const mcpUrl = apiUrl ? `${apiUrl}/mcp` : null;
   const sshPort = meeting.data?.ssh_port as number | undefined;
-  const sshHost = apiUrl ? (() => { try { return new URL(apiUrl).hostname; } catch { return "localhost"; } })() : "localhost";
+  const sshHost = apiUrl ? (() => { try { return new URL(apiUrl).hostname; } catch { return ""; } })() : "";
 
   const agentInstructions = cdpUrl
     ? [
@@ -115,12 +124,12 @@ export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
       ].join("\n")
     : "";
 
-  const [isDeleting, setIsDeleting] = useState(false);
-
   async function handleSave() {
     setIsSaving(true);
     try {
-      const response = await fetch(withBasePath(`/b/${token}/save`), {
+      const saveUrl = browserRoute(`/b/${token}/save`);
+      if (!saveUrl) throw new Error("Runtime config is still loading");
+      const response = await fetch(saveUrl, {
         method: "POST",
       });
       if (!response.ok) throw new Error(await response.text());
@@ -136,7 +145,9 @@ export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
     if (!confirm("Delete all stored browser data? You will need to log in again.")) return;
     setIsDeleting(true);
     try {
-      const response = await fetch(withBasePath(`/b/${token}/storage`), {
+      const storageUrl = browserRoute(`/b/${token}/storage`);
+      if (!storageUrl) throw new Error("Runtime config is still loading");
+      const response = await fetch(storageUrl, {
         method: "DELETE",
       });
       if (!response.ok) throw new Error(await response.text());
