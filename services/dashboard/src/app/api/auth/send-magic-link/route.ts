@@ -5,6 +5,7 @@ import { getRegistrationConfig, validateEmailForRegistration } from "@/lib/regis
 import { findUserByEmail, createUser, createUserToken } from "@/lib/vexa-admin-api";
 import { cookies } from "next/headers";
 import { getAuthCookieName, getUserInfoCookieName } from "@/lib/auth-cookies";
+import { withBasePath } from "@/lib/base-path";
 
 const JWT_SECRET = process.env.JWT_SECRET || process.env.VEXA_ADMIN_API_KEY || "default-secret-change-me";
 const MAGIC_LINK_EXPIRY = "15m"; // 15 minutes
@@ -259,7 +260,7 @@ export async function POST(request: NextRequest) {
                    (request.headers.get("origin") ||
                     `${request.headers.get("x-forwarded-proto") || "http"}://${request.headers.get("host")}`);
 
-    const magicLink = `${baseUrl}/auth/verify?token=${encodeURIComponent(token)}`;
+    const magicLink = `${baseUrl.replace(/\/+$/, "")}${withBasePath(`/auth/verify?token=${encodeURIComponent(token)}`)}`;
 
     // Send email
     try {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac } from "crypto";
 import { findUserByEmail } from "@/lib/vexa-admin-api";
+import { withBasePath } from "@/lib/base-path";
 
 type CalendarOAuthStatePayload = {
   userId: string;
@@ -42,7 +43,7 @@ function resolveRedirectUri(req: NextRequest): string {
   if (process.env.GOOGLE_CALENDAR_REDIRECT_URI) {
     return process.env.GOOGLE_CALENDAR_REDIRECT_URI;
   }
-  return `${req.nextUrl.origin}/auth/google-calendar/callback`;
+  return `${req.nextUrl.origin}${withBasePath("/auth/google-calendar/callback")}`;
 }
 
 export async function POST(req: NextRequest) {

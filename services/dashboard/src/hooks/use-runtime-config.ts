@@ -86,9 +86,9 @@ export function getWsUrl(): string {
   // Fallback: derive from current window location (WS goes through dashboard proxy)
   if (typeof window !== "undefined") {
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${proto}//${window.location.host}/ws`;
+    return `${proto}//${window.location.host}${withBasePath("/ws")}`;
   }
-  return "ws://localhost:3001/ws";
+  return `ws://localhost:3001${withBasePath("/ws")}`;
 }
 
 /**

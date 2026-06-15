@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHmac } from "crypto";
 import { getUserById, updateUser } from "@/lib/vexa-admin-api";
+import { withBasePath } from "@/lib/base-path";
 
 type ZoomOAuthStatePayload = {
   userId: string;
@@ -32,7 +33,7 @@ function resolveRedirectUri(req: NextRequest): string {
   if (process.env.ZOOM_OAUTH_REDIRECT_URI) {
     return process.env.ZOOM_OAUTH_REDIRECT_URI;
   }
-  return `${req.nextUrl.origin}/auth/zoom/callback`;
+  return `${req.nextUrl.origin}${withBasePath("/auth/zoom/callback")}`;
 }
 
 function parseAndVerifyState(state: string, secret: string): ZoomOAuthStatePayload {

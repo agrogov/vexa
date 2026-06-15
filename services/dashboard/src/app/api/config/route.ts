@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { getAuthCookieName } from "@/lib/auth-cookies";
 import { resolveBrowserApiUrl } from "@/lib/browser-api-url";
+import { withBasePath } from "@/lib/base-path";
 
 /**
  * Public configuration endpoint that exposes runtime environment variables to the client.
@@ -24,10 +25,18 @@ export async function GET(request: NextRequest) {
     process.env.NEXT_PUBLIC_API_URL ||
     "";
 
-  const wsUrlFromHttpBase = (baseUrl: string) => {
-    const trimmed = baseUrl.replace(/\/+$/, "");
-    const wsProto = trimmed.startsWith("https://") ? "wss" : "ws";
-    return `${wsProto}://${trimmed.replace(/^https?:\/\//, "")}/ws`;
+  const wsUrlFromHttpBase = (baseUrl: string, rootWsPath = "/ws") => {
+    try {
+      const parsed = new URL(baseUrl);
+      const wsProto = parsed.protocol === "https:" ? "wss" : "ws";
+      const basePathname = parsed.pathname.replace(/\/+$/, "");
+      const wsPath = basePathname ? `${basePathname}/ws` : rootWsPath;
+      return `${wsProto}://${parsed.host}${wsPath}`;
+    } catch {
+      const trimmed = baseUrl.replace(/\/+$/, "");
+      const wsProto = trimmed.startsWith("https://") ? "wss" : "ws";
+      return `${wsProto}://${trimmed.replace(/^https?:\/\//, "")}${rootWsPath}`;
+    }
   };
 
   const host = request.headers.get("x-forwarded-host") || request.headers.get("host")!;
@@ -49,9 +58,9 @@ export async function GET(request: NextRequest) {
   if (publicApiUrl) {
     wsUrl = wsUrlFromHttpBase(publicApiUrl);
   } else if (appUrl && !appUrl.includes('localhost')) {
-    wsUrl = wsUrlFromHttpBase(appUrl);
+    wsUrl = wsUrlFromHttpBase(appUrl, withBasePath("/ws"));
   } else {
-    wsUrl = `${proto}://${host}/ws`;
+    wsUrl = `${proto}://${host}${withBasePath("/ws")}`;
   }
 
   // Auth token for WebSocket: cookie first; self-hosted service token only when explicitly configured.

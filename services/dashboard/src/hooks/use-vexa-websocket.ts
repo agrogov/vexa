@@ -47,7 +47,7 @@ async function fetchConfig(): Promise<{ wsUrl: string; authToken: string | null 
     const proto = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = typeof window !== "undefined" ? window.location.host : "localhost:3001"; // SSR-only fallback; WS is browser-only
     return {
-      wsUrl: `${proto}//${host}/ws`,
+      wsUrl: `${proto}//${host}${withBasePath("/ws")}`,
       authToken: null
     };
   }
