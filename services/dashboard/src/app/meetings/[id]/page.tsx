@@ -59,7 +59,7 @@ import type { MeetingStatus, Meeting, RecordingData } from "@/types/vexa";
 import { StatusHistory } from "@/components/meetings/status-history";
 import { cn, parseUTCTimestamp } from "@/lib/utils";
 import { vexaAPI } from "@/lib/api";
-import { withBasePath } from "@/lib/base-path";
+import { withBasePath, vncWsPath } from "@/lib/base-path";
 import { toast } from "sonner";
 import { LanguagePicker } from "@/components/language-picker";
 import { WHISPER_LANGUAGE_CODES, getLanguageDisplayName } from "@/lib/languages";
@@ -133,7 +133,7 @@ export default function MeetingDetailPage() {
   } = useMeetingsStore();
   const authToken = useAuthStore((s) => s.token);
   const { config: runtimeConfig, isLoading: isRuntimeConfigLoading } = useRuntimeConfig();
-  const apiBaseUrl = runtimeConfig?.apiUrl || "";
+  const apiBaseUrl = runtimeConfig?.publicApiUrl || runtimeConfig?.apiUrl || "";
   const gatewayBrowserBase = apiBaseUrl.replace(/\/+$/, "");
   const browserRouteUrl = useCallback(
     (path: string) => {
@@ -141,6 +141,22 @@ export default function MeetingDetailPage() {
       return gatewayBrowserBase ? `${gatewayBrowserBase}${path}` : withBasePath(path);
     },
     [gatewayBrowserBase, isRuntimeConfigLoading]
+  );
+  const browserVncUrl = useCallback(
+    (token: string | number) => {
+      const websockifyPath = gatewayBrowserBase
+        ? `b/${token}/vnc/websockify`
+        : vncWsPath(token);
+      const qs = new URLSearchParams({
+        autoconnect: "true",
+        resize: "scale",
+        reconnect: "true",
+        view_only: "false",
+        path: websockifyPath,
+      });
+      return browserRouteUrl(`/b/${token}/vnc/vnc.html?${qs.toString()}`);
+    },
+    [browserRouteUrl, gatewayBrowserBase]
   );
 
   // Agent panel state
@@ -191,6 +207,7 @@ export default function MeetingDetailPage() {
     progress: number;
   } | null>(null);
   const convertPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const convertRequestRef = useRef(0);
   const [isDeletingMeeting, setIsDeletingMeeting] = useState(false);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [forcePostMeetingMode, setForcePostMeetingMode] = useState(false);
@@ -573,6 +590,7 @@ export default function MeetingDetailPage() {
 
   // Cancel the conversion modal and stop polling
   const cancelConvertModal = useCallback(() => {
+    convertRequestRef.current += 1;
     if (convertPollRef.current) {
       clearInterval(convertPollRef.current);
       convertPollRef.current = null;
@@ -582,6 +600,13 @@ export default function MeetingDetailPage() {
 
   // Download audio — original: direct link; converted: show modal + poll backend
   const handleDownloadRecording = useCallback(async (recordingId: number, mediaFileId: number, fmt?: string, srcFmt?: string) => {
+    convertRequestRef.current += 1;
+    const requestId = convertRequestRef.current;
+    if (convertPollRef.current) {
+      clearInterval(convertPollRef.current);
+      convertPollRef.current = null;
+    }
+
     const ext = fmt || srcFmt || "webm";
     const filename = currentMeeting
       ? generateFilename(currentMeeting, ext).replace(/^transcript-/, "recording-")
@@ -597,8 +622,10 @@ export default function MeetingDetailPage() {
     let ready = false;
     try {
       const result = await vexaAPI.prepareRecordingConversion(recordingId, mediaFileId, fmt);
+      if (requestId !== convertRequestRef.current) return;
       ready = result.ready;
     } catch (err) {
+      if (requestId !== convertRequestRef.current) return;
       toast.error(`Failed to start conversion: ${(err as Error).message}`);
       return;
     }
@@ -607,11 +634,17 @@ export default function MeetingDetailPage() {
       // Already converted — fetch and download immediately
       try {
         const resp = await fetch(vexaAPI.getRecordingDownloadUrl(recordingId, mediaFileId, fmt));
+        if (requestId !== convertRequestRef.current) return;
         if (!resp.ok) throw new Error(`Server error ${resp.status}`);
         const blobUrl = URL.createObjectURL(await resp.blob());
+        if (requestId !== convertRequestRef.current) {
+          URL.revokeObjectURL(blobUrl);
+          return;
+        }
         triggerBlobDownload(blobUrl, filename);
         setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
       } catch (err) {
+        if (requestId !== convertRequestRef.current) return;
         toast.error(`Download failed: ${(err as Error).message}`);
       }
       return;
@@ -623,6 +656,7 @@ export default function MeetingDetailPage() {
     const estimatedMs = 300000; // 5min estimate for progress bar (large files)
 
     convertPollRef.current = setInterval(async () => {
+      if (requestId !== convertRequestRef.current) return;
       try {
         const elapsed = Date.now() - startTime;
         // Progress: animate to 90% over estimatedMs, hold there until done
@@ -630,6 +664,7 @@ export default function MeetingDetailPage() {
         setConvertModal(prev => prev ? { ...prev, progress } : null);
 
         const status = await vexaAPI.checkRecordingConversion(recordingId, mediaFileId, fmt);
+        if (requestId !== convertRequestRef.current) return;
         if (status.ready) {
           clearInterval(convertPollRef.current!);
           convertPollRef.current = null;
@@ -637,15 +672,22 @@ export default function MeetingDetailPage() {
 
           // Small delay so user sees 100%
           await new Promise(r => setTimeout(r, 400));
+          if (requestId !== convertRequestRef.current) return;
           setConvertModal(null);
 
           const resp = await fetch(vexaAPI.getRecordingDownloadUrl(recordingId, mediaFileId, fmt));
+          if (requestId !== convertRequestRef.current) return;
           if (!resp.ok) throw new Error(`Server error ${resp.status}`);
           const blobUrl = URL.createObjectURL(await resp.blob());
+          if (requestId !== convertRequestRef.current) {
+            URL.revokeObjectURL(blobUrl);
+            return;
+          }
           triggerBlobDownload(blobUrl, filename);
           setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
         }
       } catch (err) {
+        if (requestId !== convertRequestRef.current) return;
         clearInterval(convertPollRef.current!);
         convertPollRef.current = null;
         setConvertModal(null);
@@ -1127,16 +1169,16 @@ export default function MeetingDetailPage() {
     (browserSessionEscalation?.session_token as string | undefined) ||
     (currentMeeting.data?.session_token as string | undefined) ||
     String(currentMeeting.id);
-  const browserVncUrl = browserSessionToken
-    ? browserRouteUrl(`/b/${browserSessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${browserSessionToken}/vnc/websockify`)
+  const activeBrowserVncUrl = browserSessionToken
+    ? browserVncUrl(browserSessionToken)
     : "";
 
   const browserViewIframe = hasBrowserView && viewMode === 'browser' ? (() => {
     return (
       <div className="flex-1 overflow-hidden">
-        {browserVncUrl ? (
+        {activeBrowserVncUrl ? (
           <iframe
-            src={browserVncUrl}
+            src={activeBrowserVncUrl}
             className="w-full h-full border-0"
             allow="clipboard-read; clipboard-write"
           />
@@ -1198,7 +1240,7 @@ export default function MeetingDetailPage() {
               Browser
             </Button>
           </div>
-          <Button variant="outline" size="sm" className="h-8" disabled={!browserVncUrl} onClick={() => { if (browserVncUrl) window.open(browserVncUrl, "_blank"); }}>
+          <Button variant="outline" size="sm" className="h-8" disabled={!activeBrowserVncUrl} onClick={() => { if (activeBrowserVncUrl) window.open(activeBrowserVncUrl, "_blank"); }}>
             <ExternalLink className="h-3.5 w-3.5 mr-1" />
             Fullscreen
           </Button>
@@ -2016,7 +2058,7 @@ export default function MeetingDetailPage() {
                       const sessionToken = escalation?.session_token as string
                         || currentMeeting.data?.session_token as string;
                       if (!sessionToken) return null;
-                      const vncUrl = browserRouteUrl(`/b/${sessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${sessionToken}/vnc/websockify`);
+                      const vncUrl = browserVncUrl(sessionToken);
                       return (
                         <Button
                           variant="default"

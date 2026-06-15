@@ -16,7 +16,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import type { Meeting } from "@/types/vexa";
-import { withBasePath } from "@/lib/base-path";
+import { withBasePath, vncWsPath } from "@/lib/base-path";
 
 function CopyBlock({ label, text }: { label: string; text: string }) {
   return (
@@ -62,7 +62,7 @@ export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
     fetch(withBasePath("/api/config"))
       .then((r) => r.json())
       .then((cfg) => {
-        setApiUrl(cfg.apiUrl || "");
+        setApiUrl(cfg.publicApiUrl || cfg.apiUrl || "");
       })
       .catch(() => {
         setApiUrl("");
@@ -96,7 +96,16 @@ export function BrowserSessionView({ meeting }: BrowserSessionViewProps) {
     if (apiUrl === null) return null;
     return gatewayBrowserBase ? `${gatewayBrowserBase}${path}` : withBasePath(path);
   };
-  const vncUrl = browserRoute(`/b/${token}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&path=b/${token}/vnc/websockify`);
+  const websockifyPath = gatewayBrowserBase
+    ? `b/${token}/vnc/websockify`
+    : vncWsPath(token);
+  const vncParams = new URLSearchParams({
+    autoconnect: "true",
+    resize: "scale",
+    reconnect: "true",
+    path: websockifyPath,
+  });
+  const vncUrl = browserRoute(`/b/${token}/vnc/vnc.html?${vncParams.toString()}`);
   const cdpUrl = browserRoute(`/b/${token}/cdp`);
   const mcpUrl = apiUrl ? `${apiUrl}/mcp` : null;
   const sshPort = meeting.data?.ssh_port as number | undefined;
