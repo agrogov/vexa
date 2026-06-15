@@ -51,15 +51,15 @@ import { BotStatusIndicator, BotFailedIndicator } from "@/components/meetings/bo
 import { WsEventLog, RestTranscriptsPreview, RestRecordingsPreview } from "@/components/meetings/ws-event-log";
 // ChatPanel removed — chat messages now render inline in TranscriptViewer
 import { AIChatPanel } from "@/components/ai";
-import { useMeetingsStore } from "@/stores/meetings-store";
+import { recordingsStateSignature, useMeetingsStore } from "@/stores/meetings-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useLiveTranscripts } from "@/hooks/use-live-transcripts";
 import { PLATFORM_CONFIG, getDetailedStatus } from "@/types/vexa";
-import type { MeetingStatus, Meeting } from "@/types/vexa";
+import type { MeetingStatus, Meeting, RecordingData } from "@/types/vexa";
 import { StatusHistory } from "@/components/meetings/status-history";
-import { cn } from "@/lib/utils";
+import { cn, parseUTCTimestamp } from "@/lib/utils";
 import { vexaAPI } from "@/lib/api";
-import { withBasePath, vncWsPath } from "@/lib/base-path";
+import { withBasePath } from "@/lib/base-path";
 import { toast } from "sonner";
 import { LanguagePicker } from "@/components/language-picker";
 import { WHISPER_LANGUAGE_CODES, getLanguageDisplayName } from "@/lib/languages";
@@ -132,8 +132,16 @@ export default function MeetingDetailPage() {
     clearCurrentMeeting,
   } = useMeetingsStore();
   const authToken = useAuthStore((s) => s.token);
-  const { config: runtimeConfig } = useRuntimeConfig();
-  const apiBaseUrl = runtimeConfig?.publicApiUrl || runtimeConfig?.apiUrl || "";
+  const { config: runtimeConfig, isLoading: isRuntimeConfigLoading } = useRuntimeConfig();
+  const apiBaseUrl = runtimeConfig?.apiUrl || "";
+  const gatewayBrowserBase = apiBaseUrl.replace(/\/+$/, "");
+  const browserRouteUrl = useCallback(
+    (path: string) => {
+      if (isRuntimeConfigLoading) return "";
+      return gatewayBrowserBase ? `${gatewayBrowserBase}${path}` : withBasePath(path);
+    },
+    [gatewayBrowserBase, isRuntimeConfigLoading]
+  );
 
   // Agent panel state
   const [agentPanelOpen, setAgentPanelOpen] = useState(false);
@@ -204,40 +212,120 @@ export default function MeetingDetailPage() {
   // Build ordered recording fragments for multi-fragment playback.
   // Each recording has a session_uid, created_at, and media_files with duration.
   // Sort by created_at so fragments play sequentially.
-  const recordingFragments = useMemo((): AudioFragment[] => {
-    // Include recordings that have audio media files, whether completed or in_progress
-    // (in_progress recordings may have snapshot uploads available for playback)
-    const availableRecordings = recordings
-      .filter(r => (r.status === "completed" || r.status === "in_progress") && r.media_files?.some(mf => mf.type === "audio"))
-      .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  //
+  // Pack U.8 (v0.10.6, re-applies reverted Pack D-3 — commit a62d658 — on
+  // top of the new master-recording contract from Pack U.5+U.6): resolve the
+  // canonical master route, then prefer the dashboard same-origin raw route
+  // for browser playback. This keeps proxied/local deployments working when
+  // the browser cannot directly reach the object-store public endpoint.
+  //
+  // The async fetch happens once per recordings change. While in flight,
+  // recordingFragments is the previous (or empty) array — the AudioPlayer
+  // shows a "Preparing audio…" state.
+  const [recordingFragments, setRecordingFragments] = useState<AudioFragment[]>([]);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  // Surface connection errors from the master-stream-URL lookup. This is
+  // distinct from "master not ready yet" (404 -> null -> finalizing UI).
+  // v0.10.6.1 — a non-null value here means a real network/HTTP failure
+  // that the user should see, not be silently retried-into-empty-state.
+  const [playbackConnectionError, setPlaybackConnectionError] = useState<string | null>(null);
 
-    return availableRecordings.map(rec => {
-      const audioMedia = rec.media_files.find(mf => mf.type === "audio")!;
-      return {
-        src: vexaAPI.getRecordingAudioUrl(rec.id, audioMedia.id),
-        duration: audioMedia.duration_seconds || 0,
-        sessionUid: rec.session_uid,
-        createdAt: rec.created_at,
-        format: audioMedia.format as string | undefined,
-        recordingId: rec.id,
-        mediaFileId: audioMedia.id,
-      };
+  // v0.10.6.1 — ADR-2 canonical playback path. Dashboard reads
+  // `recording.playback_url.audio` (a stable backend route) and calls
+  // vexaAPI.getRecordingMasterStreamUrl() to resolve it to a presigned
+  // URL. No client-side picking from media_files[]. Null playback_url
+  // → render "finalizing" UI state (no silent fallback to chunk 0).
+  //
+  // The signature pattern avoids URL refetch storms when recordings[] reference
+  // changes but content did not.
+  const recordingStateSignature = useMemo(() => {
+    if (!currentMeeting) return "";
+    if (recordings.length === 0) return recordingsStateSignature(currentMeeting);
+    return recordingsStateSignature({
+      ...currentMeeting,
+      data: {
+        ...currentMeeting.data,
+        recordings,
+      },
     });
-  }, [recordings]);
+  }, [currentMeeting, recordings]);
+
+  useEffect(() => {
+    if (!recordingStateSignature) {
+      setRecordingFragments([]);
+      setPlaybackConnectionError(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const availableRecordings = recordings
+        .filter(r => (r.status === "completed" || r.status === "in_progress") && r.playback_url?.audio)
+        .sort((a, b) => a.created_at.localeCompare(b.created_at));
+      try {
+        const results = await Promise.all(availableRecordings.map(async rec => {
+          const result = await vexaAPI.getRecordingMasterStreamUrl(rec.id, "audio");
+          if (!result) {
+            // 404 — master not ready for this recording yet.
+            return null;
+          }
+          const audioMedia = rec.media_files?.find(mf => mf.type === "audio");
+          return {
+            src: result.url,
+            duration: result.duration_seconds ?? audioMedia?.duration_seconds ?? 0,
+            sessionUid: rec.session_uid,
+            createdAt: rec.created_at,
+            format: audioMedia?.format as string | undefined,
+            recordingId: rec.id,
+            mediaFileId: audioMedia?.id,
+          } as AudioFragment;
+        }));
+        if (!cancelled) {
+          setRecordingFragments(results.filter((f): f is AudioFragment => f !== null));
+          setPlaybackConnectionError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPlaybackConnectionError(err instanceof Error ? err.message : String(err));
+          setRecordingFragments([]);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [recordingStateSignature, recordings]);
 
   const hasRecordingAudio = recordingFragments.length > 0;
 
-  // Find the first video media file across all recordings for the VideoPlayer.
-  const videoSrc = useMemo(() => {
-    for (const rec of recordings) {
-      if (rec.status !== "completed" && rec.status !== "in_progress") continue;
-      const videoMedia = rec.media_files?.find((mf: { type: string }) => mf.type === "video");
-      if (videoMedia) {
-        return vexaAPI.getRecordingVideoUrl(rec.id, videoMedia.id);
+  // Find the first finalized video master across all recordings for the VideoPlayer.
+  // v0.10.6.1 ADR-2: read recording.playback_url.video; no client-side
+  // selection from media_files[].
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        for (const rec of recordings) {
+          if (rec.status !== "completed" && rec.status !== "in_progress") continue;
+          if (!rec.playback_url?.video) continue;
+          const result = await vexaAPI.getRecordingMasterStreamUrl(rec.id, "video");
+          if (!result) {
+            // 404 — video master not ready for this recording yet; try the next.
+            continue;
+          }
+          if (!cancelled) {
+            setVideoSrc(result.url);
+            setPlaybackConnectionError(null);
+          }
+          return;
+        }
+        if (!cancelled) setVideoSrc(null);
+      } catch (err) {
+        if (!cancelled) {
+          setPlaybackConnectionError(err instanceof Error ? err.message : String(err));
+          setVideoSrc(null);
+        }
       }
-    }
-    return null;
-  }, [recordings]);
+    })();
+    return () => { cancelled = true; };
+  }, [recordingStateSignature, recordings]);
 
   // Derive each session's start time (wall-clock ms) from segment data.
   // segment.start_time is relative to session start, and segment.absolute_start_time
@@ -493,7 +581,7 @@ export default function MeetingDetailPage() {
   }, []);
 
   // Download audio — original: direct link; converted: show modal + poll backend
-  const handleAudioDownload = useCallback(async (recordingId: number, mediaFileId: number, fmt?: string, srcFmt?: string) => {
+  const handleDownloadRecording = useCallback(async (recordingId: number, mediaFileId: number, fmt?: string, srcFmt?: string) => {
     const ext = fmt || srcFmt || "webm";
     const filename = currentMeeting
       ? generateFilename(currentMeeting, ext).replace(/^transcript-/, "recording-")
@@ -575,7 +663,7 @@ export default function MeetingDetailPage() {
     }
     
     if (meeting.start_time) {
-      output += `Date: ${format(new Date(meeting.start_time), "PPPp")}\n`;
+      output += `Date: ${format(parseUTCTimestamp(meeting.start_time), "PPPp")}\n`;
     }
     
     if (meeting.data?.participants?.length) {
@@ -589,8 +677,17 @@ export default function MeetingDetailPage() {
       let timestamp = "";
       if (segment.absolute_start_time) {
         try {
-          const date = new Date(segment.absolute_start_time);
-          timestamp = date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "").replace("Z", "");
+          // v0.10.5.3 Pack D-1 follow-up: parse as UTC then format in
+          // browser-local tz so the copied transcript matches what the user
+          // sees on screen (e.g. "2026-05-01 14:32:11" not "11:32:11").
+          const date = parseUTCTimestamp(segment.absolute_start_time);
+          const yyyy = date.getFullYear().toString().padStart(4, "0");
+          const mo = (date.getMonth() + 1).toString().padStart(2, "0");
+          const dd = date.getDate().toString().padStart(2, "0");
+          const hh = date.getHours().toString().padStart(2, "0");
+          const mm = date.getMinutes().toString().padStart(2, "0");
+          const ss = date.getSeconds().toString().padStart(2, "0");
+          timestamp = `${yyyy}-${mo}-${dd} ${hh}:${mm}:${ss}`;
         } catch {
           timestamp = segment.absolute_start_time;
         }
@@ -764,6 +861,13 @@ export default function MeetingDetailPage() {
   const meetingNativeId = currentMeeting?.platform_specific_id;
   const meetingNumericId = currentMeeting?.id ? String(currentMeeting.id) : undefined;
   const meetingStatus = currentMeeting?.status;
+  const isPostMeetingStatus =
+    forcePostMeetingMode || meetingStatus === "stopping" || meetingStatus === "completed";
+  const shouldPollPostMeetingArtifacts =
+    isPostMeetingStatus &&
+    currentMeeting?.data?.recording_enabled !== false &&
+    !hasRecordingAudio &&
+    !playbackConnectionError;
 
   useEffect(() => {
     // Active browser sessions use VNC — no transcript fetch needed.
@@ -795,6 +899,38 @@ export default function MeetingDetailPage() {
       fetchChatMessages(meetingPlatform, meetingNativeId);
     }
   }, [shouldUseWebSocket, meetingPlatform, meetingNativeId, fetchChatMessages]);
+
+  // Recording masters are finalized asynchronously after the bot stops. The
+  // status WebSocket can report "completed" before playback_url/audio is ready,
+  // so keep refreshing post-meeting artifacts until the player can render.
+  useEffect(() => {
+    if (!meetingId || !meetingPlatform || !meetingNativeId) return;
+    if (!shouldPollPostMeetingArtifacts) return;
+
+    let cancelled = false;
+    const refreshPostMeetingArtifacts = () => {
+      if (cancelled) return;
+      refreshMeeting(meetingId);
+      fetchTranscripts(meetingPlatform, meetingNativeId, meetingNumericId, { silent: true });
+      fetchChatMessages(meetingPlatform, meetingNativeId);
+    };
+
+    refreshPostMeetingArtifacts();
+    const interval = window.setInterval(refreshPostMeetingArtifacts, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [
+    meetingId,
+    meetingPlatform,
+    meetingNativeId,
+    meetingNumericId,
+    shouldPollPostMeetingArtifacts,
+    refreshMeeting,
+    fetchTranscripts,
+    fetchChatMessages,
+  ]);
 
   // Handle saving notes on blur
   const handleNotesBlur = useCallback(async () => {
@@ -908,24 +1044,46 @@ export default function MeetingDetailPage() {
     return <MeetingDetailSkeleton />;
   }
 
+  // v0.10.5.3 Pack D-1: parseUTCTimestamp on both ends so duration is correct
+  // when API returns unsuffixed-ISO timestamps. Pre-fix: new Date() interpreted
+  // both as local-tz → numerical delta is correct (same offset cancels) but
+  // unifying the parse path here matches the rest of the file.
   const duration =
     currentMeeting.start_time && currentMeeting.end_time
       ? Math.round(
-          (new Date(currentMeeting.end_time).getTime() -
-            new Date(currentMeeting.start_time).getTime()) /
+          (parseUTCTimestamp(currentMeeting.end_time).getTime() -
+            parseUTCTimestamp(currentMeeting.start_time).getTime()) /
             60000
         )
       : null;
   const isPostMeetingFlow =
     forcePostMeetingMode ||
     currentMeeting.status === "stopping" || currentMeeting.status === "completed";
-  const hasRecordingEntries = recordings.length > 0;
+  const meetingRecordings = Array.isArray(currentMeeting.data?.recordings)
+    ? (currentMeeting.data.recordings as RecordingData[])
+    : [];
+  const effectiveRecordings = recordings.length > 0 ? recordings : meetingRecordings;
+  const hasRecordingEntries = effectiveRecordings.length > 0;
+  const hasActiveRecording = effectiveRecordings.some((recording) =>
+    recording.status === "in_progress" || recording.status === "uploading"
+  );
+  const recordingWasRequested = currentMeeting.data?.recording_enabled !== false;
   const noAudioRecordingForMeeting =
-    (currentMeeting.data?.recording_enabled === false && !hasRecordingAudio) ||
-    (currentMeeting.status === "completed" && !hasRecordingEntries);
-  const canUseSegmentPlayback = isPostMeetingFlow && !noAudioRecordingForMeeting;
-  const recordingTopBar = isPostMeetingFlow ? (
-    hasRecordingAudio ? (
+    currentMeeting.data?.recording_enabled === false && !hasRecordingAudio;
+  const missingRequestedRecording =
+    isPostMeetingFlow && recordingWasRequested && currentMeeting.status === "completed" && !hasRecordingEntries;
+  const canUseSegmentPlayback = isPostMeetingFlow && !noAudioRecordingForMeeting && !missingRequestedRecording;
+  const recordingTopBar = (isPostMeetingFlow || hasActiveRecording) ? (
+    hasActiveRecording && !isPostMeetingFlow ? (
+      <div className="flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-lg border text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Recording in progress...
+      </div>
+    ) : playbackConnectionError ? (
+      <div className="flex items-center gap-2 px-4 py-2 bg-destructive/10 rounded-lg border border-destructive/30 text-sm text-destructive">
+        Connection error loading recording: {playbackConnectionError}
+      </div>
+    ) : hasRecordingAudio ? (
       <div className="flex flex-col gap-2">
         {videoSrc && (
           <VideoPlayer ref={videoPlayerRef} src={videoSrc} className="max-h-[360px]" />
@@ -941,6 +1099,11 @@ export default function MeetingDetailPage() {
     ) : noAudioRecordingForMeeting ? (
       <div className="flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-lg border text-sm text-muted-foreground">
         No audio recording for this meeting.
+      </div>
+    ) : missingRequestedRecording ? (
+      <div className="flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-lg border text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Recording is finalizing...
       </div>
     ) : (
       <div className="flex items-center gap-2 px-4 py-2 bg-muted/50 rounded-lg border text-sm text-muted-foreground">
@@ -959,17 +1122,29 @@ export default function MeetingDetailPage() {
 
   // Browser view available for any active meeting bot (VNC runs in all bot containers)
   const hasBrowserView = !!(['requested', 'joining', 'awaiting_admission', 'active'].includes(currentMeeting?.status));
+  const browserSessionEscalation = currentMeeting.data?.escalation as Record<string, unknown> | undefined;
+  const browserSessionToken =
+    (browserSessionEscalation?.session_token as string | undefined) ||
+    (currentMeeting.data?.session_token as string | undefined) ||
+    String(currentMeeting.id);
+  const browserVncUrl = browserSessionToken
+    ? browserRouteUrl(`/b/${browserSessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${browserSessionToken}/vnc/websockify`)
+    : "";
 
   const browserViewIframe = hasBrowserView && viewMode === 'browser' ? (() => {
-    const meetingId = currentMeeting.id;
-    const vncUrl = withBasePath(`/b/${meetingId}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=${vncWsPath(meetingId)}`);
     return (
       <div className="flex-1 overflow-hidden">
-        <iframe
-          src={vncUrl}
-          className="w-full h-full border-0"
-          allow="clipboard-read; clipboard-write"
-        />
+        {browserVncUrl ? (
+          <iframe
+            src={browserVncUrl}
+            className="w-full h-full border-0"
+            allow="clipboard-read; clipboard-write"
+          />
+        ) : (
+          <div className="h-full flex items-center justify-center">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          </div>
+        )}
       </div>
     );
   })() : null;
@@ -1023,7 +1198,7 @@ export default function MeetingDetailPage() {
               Browser
             </Button>
           </div>
-          <Button variant="outline" size="sm" className="h-8" onClick={() => { const mid = currentMeeting.id; const url = withBasePath(`/b/${mid}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=${vncWsPath(mid)}`); window.open(url, "_blank"); }}>
+          <Button variant="outline" size="sm" className="h-8" disabled={!browserVncUrl} onClick={() => { if (browserVncUrl) window.open(browserVncUrl, "_blank"); }}>
             <ExternalLink className="h-3.5 w-3.5 mr-1" />
             Fullscreen
           </Button>
@@ -1296,7 +1471,11 @@ export default function MeetingDetailPage() {
                             key={label}
                             onClick={() => {
                               const frag = recordingFragments[0];
-                              handleAudioDownload(frag.recordingId!, frag.mediaFileId!, fmt, frag.format);
+                              if (!frag.recordingId || !frag.mediaFileId) {
+                                toast.error("Recording download is not available yet");
+                                return;
+                              }
+                              handleDownloadRecording(frag.recordingId, frag.mediaFileId, fmt, frag.format);
                             }}
                           >
                             {label}
@@ -1651,7 +1830,11 @@ export default function MeetingDetailPage() {
                               key={label}
                               onClick={() => {
                                 const frag = recordingFragments[0];
-                                handleAudioDownload(frag.recordingId!, frag.mediaFileId!, fmt, frag.format);
+                                if (!frag.recordingId || !frag.mediaFileId) {
+                                  toast.error("Recording download is not available yet");
+                                  return;
+                                }
+                                handleDownloadRecording(frag.recordingId, frag.mediaFileId, fmt, frag.format);
                               }}
                             >
                               {label}
@@ -1833,13 +2016,16 @@ export default function MeetingDetailPage() {
                       const sessionToken = escalation?.session_token as string
                         || currentMeeting.data?.session_token as string;
                       if (!sessionToken) return null;
-                      const vncUrl = withBasePath(`/b/${sessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=${vncWsPath(sessionToken)}`);
+                      const vncUrl = browserRouteUrl(`/b/${sessionToken}/vnc/vnc.html?autoconnect=true&resize=scale&reconnect=true&view_only=false&path=b/${sessionToken}/vnc/websockify`);
                       return (
                         <Button
                           variant="default"
                           size="sm"
                           className="gap-2 bg-orange-600 hover:bg-orange-700"
-                          onClick={() => window.open(vncUrl, "_blank")}
+                          disabled={!vncUrl}
+                          onClick={() => {
+                            if (vncUrl) window.open(vncUrl, "_blank");
+                          }}
                         >
                           <Monitor className="h-4 w-4" />
                           Open Remote Browser
@@ -1858,7 +2044,9 @@ export default function MeetingDetailPage() {
                           className="gap-2"
                           onClick={async () => {
                             try {
-                              const response = await fetch(withBasePath(`/b/${sessionToken}/save`), {
+                              const saveUrl = browserRouteUrl(`/b/${sessionToken}/save`);
+                              if (!saveUrl) throw new Error("Runtime config is still loading");
+                              const response = await fetch(saveUrl, {
                                 method: "POST",
                               });
                               if (!response.ok) throw new Error(await response.text());
@@ -2033,7 +2221,7 @@ export default function MeetingDetailPage() {
                   <div>
                     <p className="text-sm font-medium">Date</p>
                     <p className="text-sm text-muted-foreground">
-                      {format(new Date(currentMeeting.start_time), "PPPp")}
+                      {format(parseUTCTimestamp(currentMeeting.start_time), "PPPp")}
                     </p>
                   </div>
                 </div>
@@ -2266,7 +2454,7 @@ export default function MeetingDetailPage() {
       {/* Webhook Delivery Section */}
       {currentMeeting.status === "completed" && (
         <div className="mt-6">
-          <WebhookDeliverySection meetingId={currentMeeting.id} />
+          <WebhookDeliverySection meetingId={meetingId} />
         </div>
       )}
 
