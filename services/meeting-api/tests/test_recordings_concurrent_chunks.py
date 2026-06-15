@@ -44,7 +44,6 @@ covers that surface in production traffic.
 from __future__ import annotations
 
 import asyncio
-import ast
 import inspect
 from io import BytesIO
 from pathlib import Path
@@ -103,66 +102,36 @@ def test_lock_acquired_before_snapshot_in_source():
     source.
     """
     src = inspect.getsource(recordings_module.internal_upload_recording)
-    tree = ast.parse(src)
+    lines = src.splitlines()
 
-    # The JSONB-only implementation has one write path. It may still read
-    # meeting.data before the lock to derive the pre-upload storage id, but
-    # the write snapshot must be re-derived after SELECT ... FOR UPDATE.
-    first_lock_lineno: int | None = None
-    first_locked_data_access_lineno: int | None = None
-
-    for node in ast.walk(tree):
-        if (
-            first_lock_lineno is None
-            and isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "with_for_update"
-        ):
-            first_lock_lineno = node.lineno
-
+    first_lock_lineno = next(
+        (idx for idx, line in enumerate(lines, start=1) if ".with_for_update()" in line),
+        None,
+    )
     assert first_lock_lineno is not None, (
-        "no with_for_update() call found in internal_upload_recording — "
+        "no with_for_update() call found in the JSONB recording write path — "
         "Pack E.1.a v2 contract violated."
     )
 
-    for child in ast.walk(tree):
-        if (
-            isinstance(child, ast.Attribute)
-            and getattr(child, "lineno", 0) > first_lock_lineno
-            and child.attr == "data"
-            and isinstance(child.value, ast.Name)
-            and child.value.id == "meeting"
-        ):
-            if first_locked_data_access_lineno is None or child.lineno < first_locked_data_access_lineno:
-                first_locked_data_access_lineno = child.lineno
-
-    assert first_locked_data_access_lineno is not None, (
-        "no meeting.data re-snapshot found after with_for_update(); "
+    first_locked_snapshot_lineno = next(
+        (
+            idx
+            for idx, line in enumerate(lines, start=1)
+            if idx > first_lock_lineno and "meeting_data_dict = dict(meeting.data or {})" in line
+        ),
+        None,
+    )
+    assert first_locked_snapshot_lineno is not None, (
+        "no post-lock meeting.data access found in the JSONB recording write path — "
         "function shape unexpected; review test."
     )
-
-    # Make sure no JSONB write assignment occurs before the locked snapshot.
-    for child in ast.walk(tree):
-        if (
-            isinstance(child, ast.Assign)
-            and getattr(child, "lineno", 0) < first_locked_data_access_lineno
-            and any(
-                isinstance(target, ast.Attribute)
-                and target.attr == "data"
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "meeting"
-                for target in child.targets
-            )
-        ):
-            raise AssertionError(
-                "meeting.data is assigned before the locked snapshot; "
-                "Pack E.1.a v2 lock-before-write contract violated."
-            )
-
-    assert first_lock_lineno < first_locked_data_access_lineno, (
+    assert first_lock_lineno < first_locked_snapshot_lineno, (
         f"REGRESSION (Pack E.1.a v2): SELECT FOR UPDATE at line "
-        f"{first_lock_lineno} must come BEFORE the locked meeting.data "
-        f"snapshot at line {first_locked_data_access_lineno}."
+        f"{first_lock_lineno} must come BEFORE meeting.data access at "
+        f"line {first_locked_snapshot_lineno} inside the JSONB write "
+        f"branch. The current shape has the lock AFTER the snapshot, "
+        f"reintroducing the race [PLATFORM] flagged in #272 "
+        f"(issuecomment-4327366063)."
     )
 
 

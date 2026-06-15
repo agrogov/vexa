@@ -18,11 +18,14 @@ COPY services/dashboard/public ./public
 COPY services/dashboard/next.config.ts services/dashboard/tsconfig.json services/dashboard/postcss.config.mjs services/dashboard/eslint.config.mjs ./
 COPY services/dashboard/components.json ./
 COPY services/dashboard/scripts ./scripts
+COPY VERSION /VERSION
 
 ARG NEXT_PUBLIC_VEXA_OSS_VERSION
 ARG NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE
+ARG VEXA_API_URL=http://localhost:8066
 ENV NEXT_PUBLIC_VEXA_OSS_VERSION=$NEXT_PUBLIC_VEXA_OSS_VERSION
 ENV NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE=$NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE
+ENV VEXA_API_URL=$VEXA_API_URL
 
 # Build application
 # Note: No NEXT_PUBLIC_* variables needed at build time.
@@ -49,6 +52,7 @@ RUN adduser --system --uid 1001 nextjs
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --chown=nextjs:nodejs services/dashboard/docker-entrypoint.sh ./docker-entrypoint.sh
 
 USER nextjs
 
@@ -58,4 +62,4 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
-CMD ["node", "server.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

@@ -7,9 +7,9 @@
  *
  * Source of truth, in priority order:
  *   1. NEXT_PUBLIC_VEXA_OSS_VERSION env var (CI / Docker build-arg override)
- *   2. deploy/helm/charts/vexa/Chart.yaml `appVersion`
- *      — authoritative source for the OSS release this dashboard ships in
- *   3. Latest git tag matching v\d+\.\d+\.\d+
+ *   2. repo root VERSION file
+ *   3. deploy/helm/charts/vexa/Chart.yaml `appVersion`
+ *   4. Latest git tag matching v\d+\.\d+\.\d+
  *
  * Release date in priority order:
  *   1. NEXT_PUBLIC_VEXA_OSS_RELEASE_DATE env var
@@ -25,14 +25,25 @@ const { execSync } = require('child_process');
 
 const HERE = __dirname;
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..'); // services/dashboard/scripts → repo root
+const ROOT_VERSION = path.join(REPO_ROOT, 'VERSION');
 const CHART_YAML = path.join(REPO_ROOT, 'deploy', 'helm', 'charts', 'vexa', 'Chart.yaml');
 const OUT_FILE = path.join(HERE, '..', 'src', 'lib', 'release-version.generated.json');
+
+function normalizeVersion(value) {
+  const trimmed = value.trim();
+  return /^\d+\.\d+\.\d+(?:\.\d+)?$/.test(trimmed) ? `v${trimmed}` : null;
+}
+
+function readRootVersion() {
+  if (!fs.existsSync(ROOT_VERSION)) return null;
+  return normalizeVersion(fs.readFileSync(ROOT_VERSION, 'utf-8'));
+}
 
 function readChartAppVersion() {
   if (!fs.existsSync(CHART_YAML)) return null;
   const text = fs.readFileSync(CHART_YAML, 'utf-8');
-  // appVersion: "0.10.5"  (line in Chart.yaml)
-  const m = text.match(/^\s*appVersion\s*:\s*['"]?(\d+\.\d+\.\d+)['"]?\s*$/m);
+  // appVersion: "0.10.5" or "0.10.5.2" (line in Chart.yaml)
+  const m = text.match(/^\s*appVersion\s*:\s*['"]?(\d+\.\d+\.\d+(?:\.\d+)?)['"]?\s*$/m);
   return m ? `v${m[1]}` : null;
 }
 
@@ -64,14 +75,15 @@ function tagCommitDate(tag) {
 function main() {
   const version =
     process.env.NEXT_PUBLIC_VEXA_OSS_VERSION ||
+    readRootVersion() ||
     readChartAppVersion() ||
     latestGitTag();
 
   if (!version) {
     throw new Error(
-      '[release-version] cannot derive version: no env var, no Chart.yaml ' +
-      'appVersion, no git tag. Set NEXT_PUBLIC_VEXA_OSS_VERSION or commit ' +
-      'a chart bump.'
+      '[release-version] cannot derive version: no env var, no VERSION, ' +
+      'no Chart.yaml appVersion, no git tag. Set NEXT_PUBLIC_VEXA_OSS_VERSION ' +
+      'or commit a VERSION bump.'
     );
   }
 
@@ -83,7 +95,9 @@ function main() {
   const source =
     process.env.NEXT_PUBLIC_VEXA_OSS_VERSION
       ? 'env'
-      : readChartAppVersion()
+      : readRootVersion()
+        ? 'VERSION'
+        : readChartAppVersion()
         ? 'deploy/helm/charts/vexa/Chart.yaml'
         : 'git tag';
 
