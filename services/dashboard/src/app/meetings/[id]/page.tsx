@@ -2266,7 +2266,7 @@ export default function MeetingDetailPage() {
       {/* Webhook Delivery Section */}
       {currentMeeting.status === "completed" && (
         <div className="mt-6">
-          <WebhookDeliverySection webhookDelivery={currentMeeting.data?.webhook_delivery} />
+          <WebhookDeliverySection meetingId={currentMeeting.id} />
         </div>
       )}
 
