@@ -511,8 +511,9 @@ class WhisperBackend(BaseTranscriptionBackend):
                 logger.info("Worker %s detected silence (temp=%s)", WORKER_ID, t)
                 break
 
-            if not _looks_like_hallucination(segments):
-                full_text = " ".join([s["text"].strip() for s in segments]).strip()
+            full_text = " ".join([s["text"].strip() for s in segments]).strip()
+
+            if not _looks_like_hallucination(segments) and not _has_phrase_repetition(full_text):
                 duration = segments[-1]["end"] if segments else 0.0
                 best = (full_text, info.language, getattr(info, "language_probability", 0.0), duration, segments)
                 logger.info("Worker %s accepted whisper transcription (temp=%s)", WORKER_ID, t)
