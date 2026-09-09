@@ -4,12 +4,19 @@
 FROM --platform=linux/amd64 docker.ib-ci.com/node:20-bullseye AS native-builder
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y \
+# Note: qtbase5-dev is intentionally omitted — binding.gyp only does an
+# optional, failure-tolerant `pkg-config Qt5Core 2>/dev/null` check, and the
+# Qt5 package chain on bullseye-security is prone to mirror 404s.
+# bullseye-security is dropped here too: its Packages index is out of sync
+# with its own pool (stale/EOL mirror), causing 404s on routine packages
+# (e.g. libssl1.1); this build stage only needs headers to compile, not the
+# latest security patch level, so resolving from main avoids the broken repo.
+RUN sed -i '/security/d' /etc/apt/sources.list \
+    && apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y \
     build-essential \
     cmake \
     python3 \
     libssl-dev \
-    qtbase5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app/vexa-bot
@@ -38,7 +45,7 @@ FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS ts-builder
 WORKDIR /app/vexa-bot
 
 # Install TypeScript build dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y \
     xvfb \
     ffmpeg \
     x11-utils \
@@ -82,7 +89,7 @@ FROM mcr.microsoft.com/playwright:v1.56.0-jammy AS runtime
 WORKDIR /app/vexa-bot
 
 # Add Infobip Root CA (required behind corporate SSL inspection)
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 ADD http://ca.infobip.com/crl/RootCA.crt /usr/local/share/ca-certificates/infobip-rootca.crt
 RUN update-ca-certificates
@@ -91,7 +98,7 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 # Install runtime dependencies
-RUN export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y --no-install-recommends \
+RUN export DEBIAN_FRONTEND=noninteractive && apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y --no-install-recommends \
     xvfb \
     pulseaudio \
     xserver-xephyr \
