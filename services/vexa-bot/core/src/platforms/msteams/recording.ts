@@ -314,6 +314,8 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               return;
             }
 
+            (window as any).__vexaCombinedAudioStream = combinedStream;
+
             if (isAudioRecordingEnabled) {
               try {
                 const mimeType = getSupportedMediaRecorderMimeType();
@@ -984,16 +986,31 @@ export async function startTeamsRecording(page: Page, botConfig: BotConfig): Pro
               let lastCaptionTimestamp: number = 0;
               let lastFlushedTextLength: number = 0;
 
-              const setupPerSpeakerAudioRouting = () => {
-                const audioEl = document.querySelector('audio') as HTMLAudioElement | null;
-                if (!audioEl || !(audioEl.srcObject instanceof MediaStream)) {
-                  (window as any).logBot?.('[Teams PerSpeaker] No audio element found, skipping per-speaker routing');
-                  return;
+              const setupPerSpeakerAudioRouting = async () => {
+                // Reuse the same combined, multi-element audio stream that the
+                // MediaRecorder recording pipeline already built, instead of a
+                // naive document.querySelector('audio') — Teams often renders
+                // several <audio>/<video> elements, and the first one in DOM
+                // order is not guaranteed to carry the live mixed conference
+                // audio. Falling back to a fresh discovery+combine only if the
+                // main pipeline hasn't produced one yet.
+                let stream: MediaStream | undefined = (window as any).__vexaCombinedAudioStream;
+                if (!stream || stream.getAudioTracks().length === 0) {
+                  const mediaElements = await audioService.findMediaElements(5, 1000);
+                  if (mediaElements.length === 0) {
+                    (window as any).logBot?.('[Teams PerSpeaker] No active media elements found, skipping per-speaker routing');
+                    return;
+                  }
+                  try {
+                    stream = await audioService.createCombinedAudioStream(mediaElements);
+                  } catch (err: any) {
+                    (window as any).logBot?.(`[Teams PerSpeaker] Failed to combine audio streams: ${err?.message || err}`);
+                    return;
+                  }
                 }
 
-                const stream = audioEl.srcObject as MediaStream;
-                if (stream.getAudioTracks().length === 0) {
-                  (window as any).logBot?.('[Teams PerSpeaker] Audio stream has no tracks');
+                if (!stream || stream.getAudioTracks().length === 0) {
+                  (window as any).logBot?.('[Teams PerSpeaker] Combined audio stream has no tracks');
                   return;
                 }
 
